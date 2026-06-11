@@ -78,6 +78,8 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
   async onCreate(options: unknown) {
     this.roomId = await generateUniqueRoomCode(this.presence);
     this.state.roomCode = this.roomId;
+    this.state.minPlayers = this.minPlayers;
+    this.state.maxPlayers = this.maxPlayers;
     this.maxClients = this.maxPlayers;
     // Joining is by code only; keep the room out of generic matchmaking.
     await this.setPrivate();

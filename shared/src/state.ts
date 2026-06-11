@@ -30,4 +30,7 @@ export class BaseState extends Schema {
   @type("string") endReason = "";
   /** The 4-letter join code (also the Colyseus roomId), mirrored for UI. */
   @type("string") roomCode = "";
+  /** Player count limits, mirrored from the room config for lobby UI. */
+  @type("uint8") minPlayers = 0;
+  @type("uint8") maxPlayers = 0;
 }

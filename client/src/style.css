@@ -1,0 +1,234 @@
+/* Mobile-first styling shared by the lobby chrome and all games. */
+:root {
+  --bg: #14161f;
+  --card: #1f2230;
+  --text: #e8eaf2;
+  --muted: #9aa0b4;
+  --accent: #5b8cff;
+  --accent-press: #4a75d6;
+  --danger: #e35d6a;
+  --ok: #41c98a;
+  --warn: #e3b341;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  min-height: 100%;
+}
+
+#app {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.title {
+  text-align: center;
+  margin: 24px 0;
+}
+
+.card {
+  background: var(--card);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 1.1rem;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+input,
+select,
+button {
+  font-size: 1rem;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #353a4f;
+  background: #161927;
+  color: var(--text);
+}
+
+input::placeholder {
+  color: var(--muted);
+}
+
+#join-code {
+  text-transform: uppercase;
+  letter-spacing: 0.4em;
+  text-align: center;
+  font-size: 1.4rem;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+}
+
+button.primary {
+  background: var(--accent);
+  color: white;
+  font-weight: 600;
+}
+
+button.primary:active {
+  background: var(--accent-press);
+}
+
+button.primary:disabled {
+  background: #353a4f;
+  color: var(--muted);
+  cursor: default;
+}
+
+button.subtle {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid #353a4f;
+  padding: 6px 10px;
+}
+
+.error {
+  background: #3a1d24;
+  border: 1px solid var(--danger);
+  color: #ffb9c0;
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 8px;
+}
+
+.notice {
+  background: #2a2d1d;
+  border: 1px solid var(--warn);
+  color: #f0dfa0;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 16px;
+}
+
+.muted {
+  color: var(--muted);
+  font-weight: normal;
+}
+
+.center {
+  text-align: center;
+}
+
+.boot {
+  margin-top: 40vh;
+}
+
+/* Room chrome */
+.room-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.game-name {
+  font-weight: 600;
+  margin-right: 10px;
+}
+
+.room-code {
+  background: var(--card);
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  padding: 4px 10px;
+  letter-spacing: 0.3em;
+  font-weight: 700;
+}
+
+.roster {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+}
+
+.roster li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 4px;
+  border-bottom: 1px solid #2a2e40;
+}
+
+.roster li.disconnected {
+  opacity: 0.6;
+}
+
+.roster .kick {
+  margin-left: auto;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.dot.on {
+  background: var(--ok);
+}
+
+.dot.off {
+  background: var(--warn);
+}
+
+.badge {
+  font-size: 0.75rem;
+  background: #2a2e40;
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+
+.badge.warn {
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  background: transparent;
+}
+
+#status-bar {
+  margin-top: 8px;
+  min-height: 24px;
+  text-align: center;
+}
+
+/* Reconnecting overlay */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 12, 18, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.overlay-box {
+  background: var(--card);
+  padding: 24px 32px;
+  border-radius: 12px;
+  font-size: 1.1rem;
+}
