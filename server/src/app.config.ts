@@ -1,7 +1,9 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
-import { defineServer, monitor, playground } from "colyseus";
+import { defineRoom, defineServer, monitor, playground } from "colyseus";
+import { TICTACTOE } from "@backbone/shared";
+import { TicTacToeRoom } from "./games/tictactoe/TicTacToeRoom.js";
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -16,7 +18,9 @@ const server = defineServer({
    * Game rooms. Every game registers itself here with one line - see
    * ADDING_A_GAME.md.
    */
-  rooms: {},
+  rooms: {
+    [TICTACTOE]: defineRoom(TicTacToeRoom),
+  },
 
   express: (app) => {
     /** Health check used by the hosting provider. */

@@ -2,11 +2,17 @@
  * Every game registers itself here with one entry.
  * The home screen's "create a game" menu is generated from this list.
  */
+import { TICTACTOE } from "@backbone/shared";
 import type { GameDefinition } from "../framework/GameView.js";
+import { TicTacToeView } from "./tictactoe/TicTacToeView.js";
 
 export const games: GameDefinition[] = [
-  // Game entries are added as games are implemented (see ADDING_A_GAME.md):
-  // { gameType: "foo", displayName: "Foo", description: "...", createView: () => new FooView() },
+  {
+    gameType: TICTACTOE,
+    displayName: "Tic-Tac-Toe",
+    description: "2 players",
+    createView: () => new TicTacToeView(),
+  },
 ];
 
 export function getGame(gameType: string): GameDefinition | undefined {
