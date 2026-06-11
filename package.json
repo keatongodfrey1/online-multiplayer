@@ -22,7 +22,9 @@
   "devDependencies": {
     "@types/node": "^22.15.3",
     "concurrently": "^9.1.2",
-    "tsx": "^4.21.0",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "tsx": "^4.21.0"
   }
 }
