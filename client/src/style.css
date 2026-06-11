@@ -241,6 +241,16 @@ button.subtle {
   color: var(--accent);
 }
 
+/* Dot Arena */
+#arena-canvas {
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
+  display: block;
+  touch-action: none;
+  background: #10131c;
+}
+
 /* Reconnecting overlay */
 .overlay {
   position: fixed;

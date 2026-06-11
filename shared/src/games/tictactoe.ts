@@ -2,7 +2,7 @@
  * Tic-Tac-Toe - shared schema + messages.
  * The reference example for turn-based games (see ADDING_A_GAME.md).
  */
-import { ArraySchema, type } from "@colyseus/schema";
+import { ArraySchema, entity, type } from "@colyseus/schema";
 import { BasePlayer, BaseState } from "../state.js";
 
 export const TICTACTOE = "tictactoe";
@@ -20,6 +20,12 @@ export interface TicTacToeMovePayload {
 /** Seconds per turn before the turn is skipped. */
 export const TTT_TURN_SECONDS = 60;
 
+/**
+ * No extra fields beyond BasePlayer. Schema subclasses that add no
+ * @type() fields of their own must be tagged @entity to register with
+ * the serializer's TypeRegistry.
+ */
+@entity
 export class TicTacToePlayer extends BasePlayer {}
 
 export class TicTacToeState extends BaseState {
