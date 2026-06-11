@@ -16,6 +16,8 @@ export class BasePlayer extends Schema {
   @type("uint8") seat = 0;
   @type("boolean") connected = true;
   @type("boolean") isHost = false;
+  /** True while this player has voted to play again (ended phase only). */
+  @type("boolean") wantsRematch = false;
 }
 
 export class BaseState extends Schema {
