@@ -6,7 +6,10 @@ services:
     name: game-night
     runtime: node
     plan: free
-    buildCommand: npm install && npm run build
+    # --include=dev is required: NODE_ENV=production (below) makes a bare
+    # "npm install" skip devDependencies, but the build needs typescript
+    # and vite. Verified failure mode: deploy dies in typecheck without it.
+    buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /healthz
     envVars:
