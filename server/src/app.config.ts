@@ -1,7 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
-import { defineRoom, defineServer, monitor, playground } from "colyseus";
+import { defineRoom, defineServer, monitor, playground, WebSocketTransport } from "colyseus";
 import { ARENA, TICTACTOE } from "@backbone/shared";
 import { ArenaRoom } from "./games/arena/ArenaRoom.js";
 import { TicTacToeRoom } from "./games/tictactoe/TicTacToeRoom.js";
@@ -15,6 +15,19 @@ const clientDist = path.resolve(
 );
 
 const server = defineServer({
+  /**
+   * WebSocket keepalive. Colyseus's default transport probes liveness with
+   * WebSocket-level ping/pong *control frames* (every 3s) and terminates any
+   * client that misses two pongs (~9s). Render's proxy does not relay those
+   * control frames, so in production the server wrongly decides every client
+   * is unresponsive and disconnects it a few seconds after it connects - an
+   * instant, unrecoverable "Reconnecting..." for everyone. Disabling the
+   * control-frame check (pingInterval: 0) stops the false terminations; the
+   * connection is instead kept warm by an app-level (data-frame) heartbeat -
+   * see BaseGameRoom's keepAlive - which proxies do relay.
+   */
+  transport: new WebSocketTransport({ pingInterval: 0 }),
+
   /**
    * Game rooms. Every game registers itself here with one line - see
    * ADDING_A_GAME.md.
