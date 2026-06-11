@@ -22,8 +22,10 @@ import { Room, type Client, CloseCode, ServerError } from "colyseus";
 import {
   type BasePlayer,
   type BaseState,
+  ConnectionMsg,
   EndReason,
   JoinError,
+  KEEPALIVE_INTERVAL_MS,
   LobbyMsg,
   NICKNAME_MAX_LENGTH,
   NICKNAME_MIN_LENGTH,
@@ -31,18 +33,6 @@ import {
   ServerMsg,
 } from "@backbone/shared";
 import { generateUniqueRoomCode, releaseRoomCode } from "./roomCodes.js";
-
-/**
- * App-level WebSocket keepalive. The transport's built-in ping/pong is
- * disabled (see app.config.ts) because some proxies - notably Render - drop
- * WebSocket control frames, which makes the server falsely terminate healthy
- * clients. This broadcast is an ordinary data-frame message that proxies do
- * relay, so it keeps the connection from idling out. The "__"-prefixed type
- * is recognised by the client SDK as internal and ignored, so no game or view
- * code has to handle it.
- */
-const KEEPALIVE_TYPE = "__keepalive";
-const KEEPALIVE_INTERVAL_MS = 15_000;
 
 export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends Room<{
   state: TState;
@@ -85,7 +75,7 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
   /** Pending reconnection handles, so a kick can cancel one. */
   private pendingReconnections = new Map<string, { reject: Function }>();
 
-  /** App-level keepalive timer (see KEEPALIVE_TYPE); stopped on dispose. */
+  /** Server->client keepalive timer (see ConnectionMsg); stopped on dispose. */
   private keepAlive?: ReturnType<typeof setInterval>;
 
   // ---- lifecycle (final - subclasses use the hooks above) ----------------
@@ -107,10 +97,18 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
     );
     this.onMessage(LobbyMsg.REMATCH, (client) => this.handleRematch(client));
 
-    // Keep clients connected through proxies that drop WS ping/pong frames.
+    // Connection keepalive (see ConnectionMsg). A quiet WebSocket can be
+    // idle-closed by hosting proxies seconds after connecting, so we keep both
+    // halves of the socket warm with tiny app-level messages:
+    //  - upstream: the client sends HEARTBEAT on an interval; this handler just
+    //    accepts it (receiving the bytes is the whole point - it resets the
+    //    proxy's idle timer for the client->server direction).
+    //  - downstream: we broadcast KEEPALIVE on the same interval below.
+    this.onMessage(ConnectionMsg.HEARTBEAT, () => {});
+
     // unref() so a lingering timer never holds the process open (e.g. tests).
     this.keepAlive = setInterval(
-      () => this.broadcast(KEEPALIVE_TYPE),
+      () => this.broadcast(ConnectionMsg.KEEPALIVE),
       KEEPALIVE_INTERVAL_MS
     );
     this.keepAlive.unref?.();

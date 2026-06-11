@@ -5,7 +5,13 @@
  *  - friendly error messages for the join failure cases
  */
 import { ColyseusSDK, type Room } from "@colyseus/sdk";
-import { JoinError, ROOM_CODE_REGEX, type BaseState } from "@backbone/shared";
+import {
+  ConnectionMsg,
+  JoinError,
+  KEEPALIVE_INTERVAL_MS,
+  ROOM_CODE_REGEX,
+  type BaseState,
+} from "@backbone/shared";
 import {
   clearSession,
   loadSession,
@@ -85,6 +91,25 @@ export class GameClient {
         nickname,
       });
     });
+    this.startHeartbeat(room);
+  }
+
+  /**
+   * Keep the WebSocket from being idle-closed by hosting proxies (Render): a
+   * player just sitting in the lobby sends nothing, so we send a tiny heartbeat
+   * upstream on a short interval (the server warms the downstream half - see
+   * BaseGameRoom). Runs for the life of the room; the SDK buffers sends across
+   * brief reconnects, so we stop only when the room is left for good.
+   */
+  private startHeartbeat(room: Room<any, BaseState>): void {
+    const timer = setInterval(() => {
+      try {
+        room.send(ConnectionMsg.HEARTBEAT);
+      } catch {
+        // The SDK can reject a send in the gap between drop and reconnect.
+      }
+    }, KEEPALIVE_INTERVAL_MS);
+    room.onLeave(() => clearInterval(timer));
   }
 }
 
