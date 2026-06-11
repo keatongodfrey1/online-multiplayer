@@ -1,6 +1,12 @@
 import assert from "node:assert";
 import { boot, type ColyseusTestServer } from "@colyseus/testing";
-import { LobbyMsg, Phase, ROOM_CODE_REGEX } from "@backbone/shared";
+import {
+  ConnectionMsg,
+  KEEPALIVE_INTERVAL_MS,
+  LobbyMsg,
+  Phase,
+  ROOM_CODE_REGEX,
+} from "@backbone/shared";
 import { makeTestAppConfig, sleep, until, type StubRoom } from "./StubRoom.js";
 
 describe("BaseGameRoom framework", () => {
@@ -154,6 +160,39 @@ describe("BaseGameRoom framework", () => {
     guest.send(LobbyMsg.KICK, { sessionId: host.sessionId });
     await sleep(80);
     assert.strictEqual(room.state.players.size, 2);
+  });
+
+  it("accepts client heartbeats without disturbing the room", async () => {
+    // The client sends ConnectionMsg.HEARTBEAT on an interval to keep proxies
+    // from idle-closing a quiet socket. The server must accept it as a harmless
+    // no-op: no disconnect, no state change.
+    const { room, host } = await createWithHost();
+    let left = false;
+    host.onLeave(() => {
+      left = true;
+    });
+
+    for (let i = 0; i < 5; i++) {
+      host.send(ConnectionMsg.HEARTBEAT);
+      await sleep(15);
+    }
+    await sleep(100);
+
+    assert.strictEqual(left, false, "heartbeats must not disconnect the client");
+    assert.strictEqual(room.state.players.size, 1);
+    assert.ok(room.state.players.get(host.sessionId), "player remains seated");
+    assert.strictEqual(room.state.phase, Phase.LOBBY);
+  });
+
+  it("broadcasts a server->client keepalive to connected clients", async () => {
+    const { host } = await createWithHost();
+    let keepalives = 0;
+    host.onMessage(ConnectionMsg.KEEPALIVE, () => {
+      keepalives += 1;
+    });
+    // First broadcast fires one interval after the room was created.
+    await sleep(KEEPALIVE_INTERVAL_MS + 800);
+    assert.ok(keepalives >= 1, `expected >=1 server keepalive, got ${keepalives}`);
   });
 
   it("frees the room code when the room disposes", async () => {

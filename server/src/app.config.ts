@@ -23,8 +23,10 @@ const server = defineServer({
    * is unresponsive and disconnects it a few seconds after it connects - an
    * instant, unrecoverable "Reconnecting..." for everyone. Disabling the
    * control-frame check (pingInterval: 0) stops the false terminations; the
-   * connection is instead kept warm by an app-level (data-frame) heartbeat -
-   * see BaseGameRoom's keepAlive - which proxies do relay.
+   * connection is instead kept warm by app-level (data-frame) heartbeats that
+   * proxies DO relay, sent in BOTH directions on a short interval - see
+   * ConnectionMsg in shared/protocol.ts (client->server) and BaseGameRoom's
+   * keepAlive broadcast (server->client).
    */
   transport: new WebSocketTransport({ pingInterval: 0 }),
 

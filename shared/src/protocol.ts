@@ -38,6 +38,33 @@ export const ServerMsg = {
 } as const;
 
 /**
+ * Connection keepalive plumbing (NOT game logic - nothing reads these).
+ *
+ * A WebSocket that goes quiet - e.g. a player just sitting in the lobby - can
+ * be idle-closed by a hosting proxy (Render/Cloudflare) seconds after it
+ * connects, producing an unrecoverable "Reconnecting..." overlay. WebSocket
+ * control-frame pings don't help (those proxies don't reliably relay them,
+ * which is why the transport's ping is disabled - see app.config.ts). Instead
+ * we keep BOTH halves of the socket warm with tiny application data-frame
+ * messages, which proxies do relay, on a short interval:
+ *   - HEARTBEAT (client -> server): sent by GameClient for the life of the room.
+ *   - KEEPALIVE (server -> client): broadcast by BaseGameRoom. The "__" prefix
+ *     makes the client SDK ignore it silently, so no view code handles it.
+ * Sending in both directions covers proxies that idle on either direction.
+ */
+export const ConnectionMsg = {
+  HEARTBEAT: "fw/heartbeat",
+  KEEPALIVE: "__keepalive",
+} as const;
+
+/**
+ * How often each side sends its keepalive. Must stay comfortably BELOW the
+ * proxy's idle timeout. Production drops were observed ~5-15s after connect, so
+ * 4s leaves margin while staying cheap (a few bytes per beat).
+ */
+export const KEEPALIVE_INTERVAL_MS = 4000;
+
+/**
  * Error codes used when rejecting a join (thrown as ServerError on the
  * server; surfaced in the client's catch handler). 4100+ to stay clear of
  * Colyseus' own 4000-4010 close-code range.
