@@ -29,7 +29,7 @@ export class RoomScreen {
   private root?: HTMLElement;
   private view?: GameView;
   private mountedPhase = "";
-  private kicked = false;
+  private leaving = false;
 
   constructor(
     private room: Room<any, BaseState>,
@@ -59,29 +59,51 @@ export class RoomScreen {
       if (this.room.state.phase === Phase.PLAYING) {
         if (!confirm("Leave the game? Your seat will be given up.")) return;
       }
-      void this.room.leave(true);
+      this.exitToHome();
     });
 
     this.room.onStateChange(() => this.render());
 
-    this.room.onDrop(() => this.setOverlay(true));
+    // A genuine connection drop shows the overlay - unless we are deliberately
+    // leaving, in which case we are already on our way home.
+    this.room.onDrop(() => {
+      if (!this.leaving) this.setOverlay(true);
+    });
     this.room.onReconnect(() => {
       this.setOverlay(false);
       this.render();
     });
 
-    this.room.onMessage(ServerMsg.KICKED, () => {
-      this.kicked = true;
-    });
+    // Kicked by the host. The KICKED message is reliable, but the socket close
+    // that follows is not: hosting proxies can turn the server's clean close
+    // into an abnormal one, which the SDK would treat as a dropped connection
+    // ("Reconnecting..."). So act on the message and head home now.
+    this.room.onMessage(ServerMsg.KICKED, () =>
+      this.exitToHome("You were removed from the game by the host.")
+    );
 
-    this.room.onLeave(() => {
-      this.teardownView();
-      this.handlers.onExit(
-        this.kicked ? "You were removed from the game by the host." : undefined
-      );
-    });
+    this.room.onLeave(() => this.exitToHome());
 
     this.render();
+  }
+
+  /**
+   * Leave the room and return to the home screen - from the Leave button, a
+   * kick, or the server closing the connection. We go home on the user's
+   * INTENT rather than waiting for the socket to close, because hosting proxies
+   * can mangle the server's clean "consented" close into an abnormal one; the
+   * SDK would then treat a deliberate leave as a dropped connection and show
+   * "Reconnecting...". Disabling reconnection also stops the SDK retrying a
+   * room we are done with (and lets the eventual close resolve as a clean
+   * leave, which tears the connection down). Idempotent.
+   */
+  private exitToHome(notice?: string): void {
+    if (this.leaving) return;
+    this.leaving = true;
+    this.room.reconnection.enabled = false;
+    void this.room.leave(true);
+    this.teardownView();
+    this.handlers.onExit(notice);
   }
 
   /** Full re-render of the phase area; cheap at lobby scale. */
