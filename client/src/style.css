@@ -16,6 +16,18 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+/*
+ * The `hidden` attribute must always win - even over a class that sets its own
+ * `display`. The browser hides `hidden` elements via `[hidden] { display: none }`,
+ * but that has the SAME specificity as a class rule, so e.g. `.overlay { display:
+ * flex }` overrides it and the element stays visible. That is exactly what kept
+ * the "Reconnecting..." overlay (`#reconnect-overlay.overlay[hidden]`) permanently
+ * on screen. `!important` makes `hidden` reliable for every element that uses it.
+ */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
