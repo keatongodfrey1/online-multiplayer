@@ -136,8 +136,12 @@ Owned by the game room (see `ArenaRoom`): fixed-timestep loop (`tickRate`
 ticks/second; `onTick(dt)` always gets a constant dt). Input pattern:
 `bindInput(messageType, validate)` stores the latest sanitized input per
 player; the tick consumes `loop.inputs`. Clients send inputs only when
-they change. Disconnected players: skip them in the tick (freeze) rather
-than removing them - their seat is held for the grace period.
+they change, and no faster than the tick rate - the server keeps only the
+latest input per tick, and flooding (e.g. one message per touch-move on a
+phone) trips the room's `maxMessagesPerSecond` cap and force-disconnects the
+player, so throttle the send (see `ArenaView.sendInput`). Disconnected
+players: skip them in the tick (freeze) rather than removing them - their
+seat is held for the grace period.
 
 Client side, render at display framerate and interpolate toward the
 server position (see `ArenaView` - `displayPos` lerp). Never move the

@@ -9,6 +9,7 @@ import {
   ARENA_HEIGHT,
   ARENA_PELLET_RADIUS,
   ARENA_PLAYER_RADIUS,
+  ARENA_TICK_RATE,
   ARENA_WIN_SCORE,
   ARENA_WIDTH,
   ArenaMsg,
@@ -48,6 +49,9 @@ export class ArenaView implements GameView {
   private touchVector: { dx: number; dy: number } | null = null;
   private lastSent = { dx: 0, dy: 0 };
   private touchOrigin: { x: number; y: number } | null = null;
+  // Outbound input is rate-limited to the server tick rate (see sendInput).
+  private lastSentAt = 0;
+  private trailingTimer = 0;
 
   private readonly onKeyDown = (e: KeyboardEvent) => {
     if (KEY_VECTORS[e.key]) {
@@ -112,6 +116,7 @@ export class ArenaView implements GameView {
 
   unmount(): void {
     cancelAnimationFrame(this.raf);
+    if (this.trailingTimer) clearTimeout(this.trailingTimer);
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
     this.displayPos.clear();
@@ -141,9 +146,25 @@ export class ArenaView implements GameView {
         dy /= len;
       }
     }
-    if (dx !== this.lastSent.dx || dy !== this.lastSent.dy) {
+    if (dx === this.lastSent.dx && dy === this.lastSent.dy) return;
+
+    // Rate-limit to the server tick rate. The server ticks ARENA_TICK_RATE
+    // times/second and only consumes each player's LATEST input per tick, so
+    // sending faster is wasted work - and a touch drag fires one touchmove per
+    // frame (60-120/s), which would exceed the room's per-client message cap
+    // and get the player force-disconnected. Send on the leading edge, then
+    // coalesce a trailing send so the final direction always lands.
+    const minInterval = 1000 / ARENA_TICK_RATE;
+    const wait = minInterval - (performance.now() - this.lastSentAt);
+    if (wait <= 0) {
       this.lastSent = { dx, dy };
+      this.lastSentAt = performance.now();
       this.room?.send(ArenaMsg.INPUT, { dx, dy });
+    } else if (!this.trailingTimer) {
+      this.trailingTimer = window.setTimeout(() => {
+        this.trailingTimer = 0;
+        this.sendInput();
+      }, wait);
     }
   }
 
