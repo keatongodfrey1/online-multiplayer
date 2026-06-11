@@ -1,0 +1,14 @@
+# Render Blueprint: deploys the whole project as ONE free web service that
+# serves both the game website and the WebSocket game server on one URL.
+# See DEPLOYMENT.md for the click-by-click guide.
+services:
+  - type: web
+    name: game-night
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production

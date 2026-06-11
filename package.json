@@ -16,6 +16,7 @@
     "build": "npm run typecheck && npm run build -w client",
     "start": "npm run start -w server",
     "test": "npm run test -w server",
+    "smoke": "node scripts/smoke-e2e.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "devDependencies": {

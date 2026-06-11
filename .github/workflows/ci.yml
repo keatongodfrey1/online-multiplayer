@@ -1,0 +1,22 @@
+# Runs on every push: typecheck, full test suite, production client build.
+# A red X on GitHub means something broke - open the failed job, copy the
+# red log text, and paste it to your AI agent to fix.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build -w client
