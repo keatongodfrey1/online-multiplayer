@@ -121,6 +121,11 @@ send changes as a game message, and have the room validate them
 (host-only, lobby-phase-only). See `renderSplendorLobbySettings` in
 `client/src/games/splendor/SplendorView.ts` for the pattern.
 
+Optional: `renderGameSummary` renders a final-score breakdown on the
+game-over screen, above the rematch button (see
+`renderSplendorGameSummary` for the pattern). Derive everything from the
+last synced state - the server leaves it in place when the game ends.
+
 ## The test file
 
 Copy `server/test/tictactoe.test.ts` (or `arena.test.ts`) to

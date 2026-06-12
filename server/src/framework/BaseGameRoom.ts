@@ -74,6 +74,19 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
   /** A player left for good (kicked, quit, or grace period expired). */
   protected onPlayerLeftForGood(player: BasePlayer): void {}
   /**
+   * A bot was just seated (LobbyMsg.ADD_BOT). The game may inspect the
+   * message payload (e.g. a difficulty choice) and adjust the bot entry.
+   */
+  protected onBotAdded(bot: BasePlayer, options: unknown): void {}
+  /**
+   * Game veto for starting (host pressed Start, player count already
+   * satisfied). Return false to keep the lobby open - e.g. while a loaded
+   * save is waiting for the right players to arrive.
+   */
+  protected canStartGame(): boolean {
+    return true;
+  }
+  /**
    * Re-send private data (anything delivered via client.send rather than
    * synced state) to a client that just reconnected. State synced via
    * schema - including StateView-filtered fields - needs no handling here.
@@ -104,7 +117,7 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
       this.handleKick(client, payload)
     );
     this.onMessage(LobbyMsg.REMATCH, (client) => this.handleRematch(client));
-    this.onMessage(LobbyMsg.ADD_BOT, (client) => this.handleAddBot(client));
+    this.onMessage(LobbyMsg.ADD_BOT, (client, payload) => this.handleAddBot(client, payload));
 
     // Connection keepalive (see ConnectionMsg). A quiet WebSocket can be
     // idle-closed by hosting proxies seconds after connecting, so we keep both
@@ -248,6 +261,7 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
     if (this.state.phase !== Phase.LOBBY) return;
     if (client.sessionId !== this.state.hostSessionId) return;
     if (this.state.players.size < this.minPlayers) return;
+    if (!this.canStartGame()) return;
     this.startGame();
   }
 
@@ -289,20 +303,28 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
   }
 
   /** Host seats an AI player (lobby only, games with supportsBots). */
-  private handleAddBot(client: Client): void {
+  private handleAddBot(client: Client, options: unknown): void {
     if (!this.supportsBots) return;
     if (this.state.phase !== Phase.LOBBY) return;
     if (client.sessionId !== this.state.hostSessionId) return;
     if (this.state.players.size >= this.maxPlayers) return;
+    this.onBotAdded(this.seatBot(), options);
+  }
 
+  /**
+   * Seat a bot player directly (also used by games restoring a saved
+   * lineup). The caller is responsible for capacity/phase checks.
+   */
+  protected seatBot(nickname?: string): BasePlayer {
     const seat = this.lowestFreeSeat();
     const bot = this.createPlayer(seat);
     bot.sessionId = this.nextBotSessionId();
-    bot.nickname = this.nextBotNickname();
+    bot.nickname = nickname ?? this.nextBotNickname();
     bot.seat = seat;
     bot.connected = true; // a bot is never "away"
     bot.isBot = true;
     this.state.players.set(bot.sessionId, bot);
+    return bot;
   }
 
   /** "bot:N" - colons never appear in real Colyseus session ids. */
