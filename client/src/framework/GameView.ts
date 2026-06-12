@@ -16,6 +16,12 @@ export interface GameView {
   unmount(): void;
 }
 
+export interface LobbySettingsContext {
+  mySessionId: string;
+  /** Whether this client is the host (only the host's controls should be live). */
+  isHost: boolean;
+}
+
 /** What a game registers so the framework can list and launch it. */
 export interface GameDefinition {
   /** Room name registered on the server (app.config.ts key). */
@@ -26,4 +32,16 @@ export interface GameDefinition {
   description: string;
   /** Factory - a fresh view per mounted game. */
   createView(): GameView;
+  /**
+   * Optional game-specific settings UI shown in the lobby (e.g. a turn-timer
+   * picker). Called on every lobby re-render with an empty container; read
+   * current values from room.state and send changes as game messages (the
+   * server validates - host-only, lobby-only). Non-hosts should see the
+   * settings read-only.
+   */
+  renderLobbySettings?(
+    container: HTMLElement,
+    room: Room<any, BaseState>,
+    ctx: LobbySettingsContext
+  ): void;
 }

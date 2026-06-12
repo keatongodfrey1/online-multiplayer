@@ -114,6 +114,13 @@ your view only covers the playing phase.
 },
 ```
 
+Optional: if your game has pre-game settings (e.g. Splendor's turn timer),
+add `renderLobbySettings` to the entry. The lobby calls it on every
+re-render with an empty container; read current values from `room.state`,
+send changes as a game message, and have the room validate them
+(host-only, lobby-phase-only). See `renderSplendorLobbySettings` in
+`client/src/games/splendor/SplendorView.ts` for the pattern.
+
 ## The test file
 
 Copy `server/test/tictactoe.test.ts` (or `arena.test.ts`) to

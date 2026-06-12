@@ -166,6 +166,7 @@ export class RoomScreen {
             )
             .join("")}
         </ul>
+        <div id="lobby-settings"></div>
         ${
           isHost
             ? `<button id="start-btn" class="primary" ${enough ? "" : "disabled"}>
@@ -175,6 +176,12 @@ export class RoomScreen {
         }
       </div>
     `;
+
+    this.game.renderLobbySettings?.(
+      phaseRoot.querySelector<HTMLElement>("#lobby-settings")!,
+      this.room,
+      { mySessionId: this.room.sessionId, isHost }
+    );
 
     phaseRoot.querySelector<HTMLButtonElement>("#start-btn")?.addEventListener("click", () => {
       this.room.send(LobbyMsg.START, {});
