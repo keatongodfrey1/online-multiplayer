@@ -119,6 +119,76 @@ export function renderSplendorLobbySettings(
   });
 }
 
+/**
+ * Final-score table (GameDefinition.renderGameSummary): everything is
+ * derived from the last synced seats, which the server leaves in place
+ * when the game ends. Ordered like the engine's ranking: points first,
+ * fewer cards bought breaking ties.
+ */
+export function renderSplendorGameSummary(
+  container: HTMLElement,
+  room: Room<any, BaseState>,
+  ctx: GameViewContext
+): void {
+  const state = room.state as unknown as SplendorState;
+  const seats = [...(state.seats ?? [])];
+  if (seats.length === 0) return;
+
+  const rows = seats.map((seat) => {
+    const tierPoints = [0, 0, 0];
+    for (const card of seat.built) {
+      if (card.tier >= 1 && card.tier <= 3) tierPoints[card.tier - 1]! += card.points;
+    }
+    const noblePoints = [...seat.nobles].reduce((sum, n) => sum + n.points, 0);
+    return {
+      seat,
+      tierPoints,
+      noblePoints,
+      total: seat.points,
+      cards: seat.built.length,
+      mine: seat.sessionId !== "" && seat.sessionId === ctx.mySessionId,
+    };
+  });
+  rows.sort((a, b) => b.total - a.total || a.cards - b.cards);
+  const best = rows[0]!;
+  const isWinner = (r: (typeof rows)[number]) => r.total === best.total && r.cards === best.cards;
+
+  const body = rows
+    .map((r) => {
+      const name = `${isWinner(r) ? "👑 " : ""}${escapeHtml(r.seat.nickname)}${r.mine ? " (you)" : ""}${
+        r.seat.gone ? " · left" : ""
+      }`;
+      return `
+        <tr class="${isWinner(r) ? "winner" : ""} ${r.seat.gone ? "gone" : ""}">
+          <td class="spl-sum-name">${name}</td>
+          <td>${r.tierPoints[0]}</td>
+          <td>${r.tierPoints[1]}</td>
+          <td>${r.tierPoints[2]}</td>
+          <td>${r.noblePoints}${r.seat.nobles.length > 0 ? ` <span class="muted">(${r.seat.nobles.length})</span>` : ""}</td>
+          <td class="spl-sum-total">${r.total}</td>
+          <td class="muted">${r.cards}</td>
+        </tr>`;
+    })
+    .join("");
+
+  container.innerHTML = `
+    <table class="spl-summary">
+      <thead>
+        <tr>
+          <th></th>
+          <th title="Points from tier 1 cards">Tier 1</th>
+          <th title="Points from tier 2 cards">Tier 2</th>
+          <th title="Points from tier 3 cards">Tier 3</th>
+          <th title="Points from nobles (count in parentheses)">Nobles</th>
+          <th>Total</th>
+          <th title="Cards bought - fewer wins a points tie">Cards</th>
+        </tr>
+      </thead>
+      <tbody>${body}</tbody>
+    </table>
+    <p class="muted spl-sum-note">Ties go to whoever bought fewer cards.</p>`;
+}
+
 function costPips(cost: { [K in Gem]: number }): string {
   return GEMS.filter((g) => cost[g] > 0)
     .map((g) => `<span class="spl-pip spl-${g}">${cost[g]}</span>`)

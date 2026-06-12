@@ -703,6 +703,48 @@ button.spl-gem.selected {
   font-size: 0.8rem;
 }
 
+/* Final score table on the ended screen */
+.spl-summary {
+  margin: 8px auto 4px;
+  border-collapse: collapse;
+  text-align: center;
+}
+
+.spl-summary th,
+.spl-summary td {
+  padding: 6px 10px;
+  border-bottom: 1px solid #2a2e40;
+  font-size: 0.9rem;
+}
+
+.spl-summary th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.spl-summary .spl-sum-name {
+  text-align: left;
+  font-weight: 600;
+}
+
+.spl-summary .spl-sum-total {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.spl-summary tr.winner td {
+  color: var(--ok);
+}
+
+.spl-summary tr.gone td {
+  opacity: 0.6;
+}
+
+.spl-sum-note {
+  font-size: 0.75rem;
+  margin: 2px 0 10px;
+}
+
 /* Reconnecting overlay */
 .overlay {
   position: fixed;
