@@ -149,4 +149,182 @@ describe("splendor", () => {
     assert.strictEqual(room.engine.players[0]!.gems.white, 2, "take-two applied");
     await until(() => room.state.currentTurn === b.sessionId);
   });
+
+  it("runs the discard flow, including discarding gold", async () => {
+    const { room, clients } = await startedGame(23);
+    const a = clients[0]!;
+    const b = clients[1]!;
+    // 8 tokens injected; taking 3 more puts seat 0 one over the limit of 10.
+    const me = room.engine.players[0]!;
+    me.gems.white = 4;
+    me.gems.blue = 3;
+    me.gold = 1;
+
+    a.send(SplendorMsg.MOVE, { kind: "TAKE_THREE", colors: ["green", "red", "black"] });
+    await until(() => room.engine.awaiting.inputType === "DISCARD");
+    assert.strictEqual(room.engine.awaiting.discardCount, 1);
+    await until(() => room.state.awaitingType === "DISCARD");
+    assert.strictEqual(room.state.discardCount, 1);
+    assert.strictEqual(room.state.awaitingSeat, 0);
+    assert.strictEqual(room.state.currentTurn, a.sessionId, "same seat keeps the turn mid-decision");
+
+    const pending = room.engine;
+    b.send(SplendorMsg.RESOLVE, { kind: "DISCARD", gems: { white: 1 } }); // not their decision
+    a.send(SplendorMsg.RESOLVE, { kind: "DISCARD", gems: { white: 2 } }); // wrong count
+    a.send(SplendorMsg.RESOLVE, { kind: "DISCARD", gems: {}, gold: 2 }); // wrong count via gold
+    a.send(SplendorMsg.RESOLVE, { kind: "DISCARD", gems: { white: -1 }, gold: 2 }); // negative
+    await sleep(100);
+    assert.strictEqual(room.engine, pending, "bad discards ignored");
+
+    a.send(SplendorMsg.RESOLVE, { kind: "DISCARD", gems: {}, gold: 1 }); // give up the gold
+    await until(() => room.engine !== pending);
+    assert.strictEqual(room.engine.players[0]!.gold, 0, "gold discarded");
+    assert.strictEqual(room.engine.awaiting.inputType, "MOVE");
+    assert.strictEqual(room.engine.awaiting.seat, 1);
+    await until(() => room.state.currentTurn === b.sessionId);
+    assert.strictEqual(room.state.awaitingType, "MOVE");
+    assert.strictEqual(room.state.seats[0]!.gold, 0, "schema mirrors the spent gold");
+  });
+
+  it("runs the pick-noble flow when two nobles qualify at once", async () => {
+    const { room, clients } = await startedGame(29);
+    const a = clients[0]!;
+    const b = clients[1]!;
+    // Meet two nobles' requirements at once. Trigger end-of-turn with a token
+    // take: a BUY would recompute bonuses from built cards and wipe these.
+    const me = room.engine.players[0]!;
+    const n1 = room.engine.nobles[0]!;
+    const n2 = room.engine.nobles[1]!;
+    for (const c of ["white", "blue", "green", "red", "black"] as const) {
+      me.bonuses[c] = Math.max(n1.requirement[c], n2.requirement[c]);
+    }
+
+    a.send(SplendorMsg.MOVE, { kind: "TAKE_TWO", color: "white" });
+    await until(() => room.engine.awaiting.inputType === "PICK_NOBLE");
+    const choices = room.engine.awaiting.nobleChoices ?? [];
+    assert.ok(choices.length >= 2, "both nobles offered");
+    await until(() => room.state.awaitingType === "PICK_NOBLE");
+    assert.deepEqual([...room.state.nobleChoices], choices, "choices mirrored to clients");
+    assert.strictEqual(room.state.currentTurn, a.sessionId);
+
+    const pending = room.engine;
+    b.send(SplendorMsg.RESOLVE, { kind: "PICK_NOBLE", nobleId: choices[0] }); // not their decision
+    a.send(SplendorMsg.RESOLVE, { kind: "PICK_NOBLE", nobleId: 99 }); // out of range
+    a.send(SplendorMsg.RESOLVE, { kind: "PICK_NOBLE", nobleId: 0 });
+    a.send(SplendorMsg.RESOLVE, { kind: "PICK_NOBLE", nobleId: String(choices[0]) }); // wrong type
+    await sleep(100);
+    assert.strictEqual(room.engine, pending, "bad picks ignored");
+
+    const picked = Math.min(...choices);
+    a.send(SplendorMsg.RESOLVE, { kind: "PICK_NOBLE", nobleId: picked });
+    await until(() => room.engine !== pending);
+    assert.strictEqual(room.engine.players[0]!.nobles.length, 1, "exactly one noble awarded");
+    assert.strictEqual(room.engine.players[0]!.nobles[0]!.id, picked);
+    await until(() => room.state.seats[0]!.nobles.length === 1);
+    assert.ok(
+      [...room.state.nobles].every((n) => n.id !== picked),
+      "awarded noble removed from the board"
+    );
+    assert.strictEqual(room.state.seats[0]!.points, 3);
+    await until(() => room.state.currentTurn === b.sessionId);
+  });
+
+  it("lets the ghost play out a quitter's seat in a 3p game", async () => {
+    const { room, clients } = await startedGame(13, 3);
+    const [a, , c] = clients;
+    const quitter = clients[1]!;
+    const quitterSessionId = quitter.sessionId;
+
+    // The quitter leaves while owing a discard - the ghost must resolve the
+    // pending decision, not just their future turns.
+    room.engine.awaiting = { seat: 1, inputType: "DISCARD", discardCount: 2 };
+    room.engine.players[1]!.gems.white = 12;
+
+    await quitter.leave(true);
+    await until(() => room.engine.awaiting.seat !== 1 || room.engine.over);
+    assert.strictEqual(room.state.phase, Phase.PLAYING, "game continues with 2 of 3 players");
+    assert.strictEqual(room.engine.players[1]!.gems.white, 10, "ghost discarded down to 10");
+    await until(() => room.state.seats[1]!.gone === true);
+    assert.strictEqual(room.state.seats[1]!.sessionId, "");
+    assert.ok(!room.state.players.has(quitterSessionId));
+    assert.strictEqual(room.engine.awaiting.seat, 2, "play moved on past the quitter");
+    await until(() => room.state.currentTurn === c!.sessionId);
+
+    // A full rotation: seat 2 moves, seat 0 moves, and the ghost takes seat
+    // 1's turn in between without the game ever waiting on it.
+    const policy = new GreedyPolicy(2);
+    let prev = room.engine;
+    c!.send(SplendorMsg.MOVE, policy.move(prev)!);
+    await until(() => room.engine !== prev);
+    assert.strictEqual(room.engine.awaiting.seat, 0);
+    await until(() => room.state.currentTurn === a!.sessionId);
+
+    prev = room.engine;
+    const turnsBefore = prev.turnCount;
+    a!.send(SplendorMsg.MOVE, policy.move(prev)!);
+    await until(() => room.engine !== prev);
+    assert.strictEqual(room.engine.awaiting.seat, 2, "ghost played seat 1 in the same beat");
+    assert.strictEqual(room.engine.turnCount, turnsBefore + 2, "seat 0's turn plus the ghost's");
+    await until(() => room.state.currentTurn === c!.sessionId);
+  });
+
+  it("rematch fully resets the game and re-grants private views", async () => {
+    const { room, clients } = await startedGame(17);
+    const a = clients[0]!;
+    const b = clients[1]!;
+    const zero = { white: 0, blue: 0, green: 0, red: 0, black: 0 };
+    // Hand seat 0 a 15-point finish: 14 built points plus a free 1-point
+    // reserve buy. Ids stay <= 90 so the uint8 schema fields can mirror them.
+    const me = room.engine.players[0]!;
+    me.built.push({ id: 88, tier: 3, bonus: "white", points: 14, cost: { ...zero } });
+    me.reserved.push({ id: 89, tier: 1, bonus: "white", points: 1, cost: { ...zero } });
+
+    a.send(SplendorMsg.MOVE, { kind: "BUY", from: { reserve: { cardId: 89 } } });
+    await until(() => room.state.lastRound === true);
+    assert.strictEqual(room.state.phase, Phase.PLAYING, "finishRound: the round completes first");
+
+    b.send(SplendorMsg.MOVE, { kind: "TAKE_THREE", colors: ["white", "blue", "green"] });
+    await until(() => room.state.phase === Phase.ENDED);
+    assert.strictEqual(room.state.endReason, `${EndReason.WIN_PREFIX}0`);
+
+    const oldEngine = room.engine;
+    a.send(LobbyMsg.REMATCH, {});
+    b.send(LobbyMsg.REMATCH, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+
+    assert.notStrictEqual(room.engine, oldEngine, "fresh engine");
+    assert.deepEqual([...room.state.deckCounts], [36, 26, 16]);
+    assert.strictEqual(room.state.bank.white, 4, "2p bank resets to 4 per gem");
+    assert.strictEqual(room.state.bankGold, 5);
+    assert.strictEqual(room.state.nobles.length, 3, "players + 1 nobles");
+    assert.ok([...room.state.market].every((card) => card.id >= 1), "12 market cards dealt");
+    for (const seat of room.state.seats) {
+      assert.strictEqual(seat.points, 0);
+      assert.strictEqual(seat.built.length, 0);
+      assert.strictEqual(seat.nobles.length, 0);
+      assert.strictEqual(seat.reservedCount, 0);
+      assert.strictEqual(seat.gone, false);
+      assert.ok(seat.sessionId !== "");
+    }
+    assert.strictEqual(room.state.turnCount, 0);
+    assert.strictEqual(room.state.lastRound, false);
+    assert.strictEqual(room.state.currentTurn, a.sessionId, "seat 0 starts again");
+
+    // The rematch built new reserved arrays - the re-grant must follow them.
+    a.send(SplendorMsg.MOVE, { kind: "RESERVE", from: { deck: { tier: 1 } } });
+    await until(() => room.engine.players[0]!.reserved.length === 1);
+    const aState = () => a.state as any;
+    await until(() => aState().seats?.at(0)?.reserved?.length === 1);
+    assert.ok(aState().seats.at(0).reserved.at(0).id >= 1, "owner sees the new game's card");
+    const bState = () => b.state as any;
+    assert.strictEqual(bState().seats.at(0).reserved?.length ?? 0, 0, "opponent still blind");
+  });
+
+  it("ends a 2p game as abandoned when a player quits (no ghost completion)", async () => {
+    const { room, clients } = await startedGame(31);
+    await clients[1]!.leave(true);
+    await until(() => room.state.phase === Phase.ENDED);
+    assert.strictEqual(room.state.endReason, EndReason.ABANDONED);
+    assert.strictEqual(room.state.currentTurn, "", "turn cleared after game end");
+  });
 });
