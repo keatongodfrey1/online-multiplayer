@@ -1,0 +1,438 @@
+/**
+ * Splendor view - renders the synced schema and sends raw engine Move /
+ * Resolution JSON. The server validates everything; the legality mirrored
+ * here (exact take-3 count, pile >= 4 for take-2, affordability) only
+ * exists to grey out buttons.
+ */
+import type { Room } from "@colyseus/sdk";
+import {
+  type BaseState,
+  SplendorEngine,
+  SplendorMsg,
+  type SplendorCard,
+  type SplendorNoble,
+  type SplendorSeat,
+  type SplendorState,
+} from "@backbone/shared";
+import type { GameView, GameViewContext } from "../../framework/GameView.js";
+import { escapeHtml } from "../../lobby/HomeScreen.js";
+
+const GEMS = ["white", "blue", "green", "red", "black"] as const;
+type Gem = (typeof GEMS)[number];
+type DiscardColor = Gem | "gold";
+
+/** Bridge a schema card to the engine type for the affordability helper. */
+function toEngineCard(c: SplendorCard): SplendorEngine.Card {
+  return {
+    id: c.id,
+    tier: c.tier as SplendorEngine.Tier,
+    bonus: c.bonus as SplendorEngine.Color,
+    points: c.points,
+    cost: { white: c.cost.white, blue: c.cost.blue, green: c.cost.green, red: c.cost.red, black: c.cost.black },
+  };
+}
+
+/** affordable() only reads gems/gold/bonuses; the rest is shape-filling. */
+function toEnginePlayer(s: SplendorSeat): SplendorEngine.PlayerState {
+  return {
+    seat: 0,
+    name: "",
+    kind: "human",
+    connected: true,
+    gems: { white: s.gems.white, blue: s.gems.blue, green: s.gems.green, red: s.gems.red, black: s.gems.black },
+    gold: s.gold,
+    bonuses: {
+      white: s.bonuses.white,
+      blue: s.bonuses.blue,
+      green: s.bonuses.green,
+      red: s.bonuses.red,
+      black: s.bonuses.black,
+    },
+    reserved: [],
+    built: [],
+    nobles: [],
+  };
+}
+
+function costPips(cost: { [K in Gem]: number }): string {
+  return GEMS.filter((g) => cost[g] > 0)
+    .map((g) => `<span class="spl-pip spl-${g}">${cost[g]}</span>`)
+    .join("");
+}
+
+function cardHtml(card: SplendorCard, buttons: string): string {
+  return `
+    <div class="spl-card spl-bonus-${card.bonus}">
+      <div class="spl-card-top">
+        <span class="spl-card-points">${card.points > 0 ? card.points : ""}</span>
+        <span class="spl-pip spl-${card.bonus}"></span>
+      </div>
+      <div class="spl-card-cost">${costPips(card.cost)}</div>
+      <div class="spl-card-actions">${buttons}</div>
+    </div>`;
+}
+
+function nobleHtml(noble: SplendorNoble, button = ""): string {
+  return `
+    <div class="spl-noble">
+      <span class="spl-card-points">${noble.points}</span>
+      <span class="spl-card-cost">${costPips(noble.requirement)}</span>
+      ${button}
+    </div>`;
+}
+
+export class SplendorView implements GameView {
+  private root?: HTMLElement;
+  private room?: Room<any, SplendorState>;
+  private ctx?: GameViewContext;
+  private readonly onState = () => this.render();
+  private readonly onClick = (ev: Event) => this.handleClick(ev);
+
+  /** Take-3 pile selection; survives re-renders, cleared after sending. */
+  private selectedColors = new Set<Gem>();
+  /** Discard picker counts; reset whenever the discard prompt goes away. */
+  private discardPick: Record<DiscardColor, number> = {
+    white: 0, blue: 0, green: 0, red: 0, black: 0, gold: 0,
+  };
+
+  mount(root: HTMLElement, room: Room<any, BaseState>, ctx: GameViewContext): void {
+    this.root = root;
+    this.room = room as unknown as Room<any, SplendorState>;
+    this.ctx = ctx;
+
+    root.innerHTML = `
+      <div class="spl">
+        <p id="spl-status" class="center"></p>
+        <div id="spl-nobles" class="spl-nobles"></div>
+        <div id="spl-market"></div>
+        <div id="spl-bank"></div>
+        <div id="spl-modal"></div>
+        <div id="spl-me"></div>
+        <div id="spl-opponents"></div>
+      </div>
+    `;
+    root.addEventListener("click", this.onClick);
+    this.room.onStateChange(this.onState);
+    this.render();
+  }
+
+  unmount(): void {
+    this.room?.onStateChange.remove(this.onState);
+    this.root?.removeEventListener("click", this.onClick);
+    this.root = undefined;
+    this.room = undefined;
+  }
+
+  // ---- input -----------------------------------------------------------------
+
+  private handleClick(ev: Event): void {
+    const target = (ev.target as HTMLElement | null)?.closest<HTMLElement>("[data-action]");
+    if (!target || !this.room || target.hasAttribute("disabled")) return;
+    const data = target.dataset;
+    switch (data.action) {
+      case "toggle-take": {
+        const color = data.color as Gem;
+        if (this.selectedColors.has(color)) this.selectedColors.delete(color);
+        else if (this.selectedColors.size < 3) this.selectedColors.add(color);
+        this.render();
+        return;
+      }
+      case "confirm-take":
+        this.room.send(SplendorMsg.MOVE, { kind: "TAKE_THREE", colors: [...this.selectedColors] });
+        this.selectedColors.clear();
+        return;
+      case "take-two":
+        this.room.send(SplendorMsg.MOVE, { kind: "TAKE_TWO", color: data.color });
+        this.selectedColors.clear();
+        return;
+      case "buy-market":
+        this.room.send(SplendorMsg.MOVE, {
+          kind: "BUY",
+          from: { market: { tier: Number(data.tier), index: Number(data.index) } },
+        });
+        return;
+      case "reserve-market":
+        this.room.send(SplendorMsg.MOVE, {
+          kind: "RESERVE",
+          from: { market: { tier: Number(data.tier), index: Number(data.index) } },
+        });
+        return;
+      case "reserve-deck":
+        this.room.send(SplendorMsg.MOVE, { kind: "RESERVE", from: { deck: { tier: Number(data.tier) } } });
+        return;
+      case "buy-reserve":
+        this.room.send(SplendorMsg.MOVE, { kind: "BUY", from: { reserve: { cardId: Number(data.cardId) } } });
+        return;
+      case "discard-step": {
+        const color = data.color as DiscardColor;
+        this.discardPick[color] = Math.max(0, this.discardPick[color] + Number(data.step));
+        this.render();
+        return;
+      }
+      case "confirm-discard": {
+        const { gold, ...gems } = this.discardPick;
+        const picked: Record<string, number> = {};
+        for (const g of GEMS) if (gems[g] > 0) picked[g] = gems[g];
+        this.room.send(SplendorMsg.RESOLVE, { kind: "DISCARD", gems: picked, gold });
+        return;
+      }
+      case "pick-noble":
+        this.room.send(SplendorMsg.RESOLVE, { kind: "PICK_NOBLE", nobleId: Number(data.nobleId) });
+        return;
+    }
+  }
+
+  // ---- rendering ---------------------------------------------------------------
+
+  private render(): void {
+    if (!this.root || !this.room || !this.ctx) return;
+    const state = this.room.state;
+    if (!state?.seats) return;
+
+    const seats = [...state.seats];
+    const mySeatIndex = seats.findIndex((s) => s.sessionId === this.ctx!.mySessionId);
+    const me = mySeatIndex >= 0 ? seats[mySeatIndex] : undefined;
+    const actorSeat = seats[state.awaitingSeat];
+    const isMyDecision = state.awaitingSeat === mySeatIndex && mySeatIndex >= 0;
+    const myMove = isMyDecision && state.awaitingType === "MOVE";
+
+    if (state.awaitingType !== "DISCARD" || !isMyDecision) {
+      this.discardPick = { white: 0, blue: 0, green: 0, red: 0, black: 0, gold: 0 };
+    }
+    if (!myMove) this.selectedColors.clear();
+
+    this.renderStatus(state, actorSeat, isMyDecision);
+    this.renderNobles(state);
+    this.renderMarket(state, me, myMove);
+    this.renderBank(state, myMove);
+    this.renderModal(state, me, isMyDecision);
+    this.renderMe(state, me, myMove);
+    this.renderOpponents(state, seats, mySeatIndex);
+  }
+
+  private q(id: string): HTMLElement {
+    return this.root!.querySelector<HTMLElement>(`#${id}`)!;
+  }
+
+  private renderStatus(state: SplendorState, actor: SplendorSeat | undefined, mine: boolean): void {
+    const banner = state.lastRound ? `<span class="spl-final badge warn">Final round!</span> ` : "";
+    let text: string;
+    if (mine) {
+      text =
+        state.awaitingType === "DISCARD"
+          ? `Too many tokens - discard <strong>${state.discardCount}</strong>`
+          : state.awaitingType === "PICK_NOBLE"
+            ? "Choose a noble to visit you"
+            : "<strong>Your turn</strong>";
+    } else {
+      const name = escapeHtml(actor?.nickname ?? "...");
+      const doing =
+        state.awaitingType === "DISCARD"
+          ? " (discarding)"
+          : state.awaitingType === "PICK_NOBLE"
+            ? " (choosing a noble)"
+            : "";
+      text = `Waiting for <strong>${name}</strong>${doing}`;
+    }
+    this.q("spl-status").innerHTML = banner + text;
+  }
+
+  private renderNobles(state: SplendorState): void {
+    this.q("spl-nobles").innerHTML = [...state.nobles].map((n) => nobleHtml(n)).join("");
+  }
+
+  private renderMarket(state: SplendorState, me: SplendorSeat | undefined, myMove: boolean): void {
+    const canReserve = myMove && me !== undefined && me.reservedCount < 3;
+    const pseudo = me ? toEnginePlayer(me) : undefined;
+    const rows: string[] = [];
+    for (const tier of [3, 2, 1] as const) {
+      const cells: string[] = [];
+      const deckCount = state.deckCounts.at(tier - 1) ?? 0;
+      cells.push(`
+        <div class="spl-card spl-deck">
+          <div class="spl-deck-count">Tier ${tier}<br>${deckCount} left</div>
+          <div class="spl-card-actions">
+            <button class="secondary" data-action="reserve-deck" data-tier="${tier}"
+              ${canReserve && deckCount > 0 ? "" : "disabled"}>Reserve</button>
+          </div>
+        </div>`);
+      for (let index = 0; index < 4; index++) {
+        const card = state.market.at((tier - 1) * 4 + index);
+        if (!card || card.id === 0) {
+          cells.push(`<div class="spl-card spl-empty"></div>`);
+          continue;
+        }
+        const canBuy = myMove && pseudo !== undefined && SplendorEngine.affordable(toEngineCard(card), pseudo);
+        cells.push(
+          cardHtml(
+            card,
+            `<button data-action="buy-market" data-tier="${tier}" data-index="${index}"
+               ${canBuy ? "" : "disabled"}>Buy</button>
+             <button class="secondary" data-action="reserve-market" data-tier="${tier}" data-index="${index}"
+               ${canReserve ? "" : "disabled"}>Res.</button>`
+          )
+        );
+      }
+      rows.push(`<div class="spl-market-row">${cells.join("")}</div>`);
+    }
+    this.q("spl-market").innerHTML = rows.join("");
+  }
+
+  private renderBank(state: SplendorState, myMove: boolean): void {
+    const piles = GEMS.map((g) => ({ gem: g, count: state.bank[g] }));
+    const availColors = piles.filter((p) => p.count > 0).length;
+    const need = Math.min(3, availColors);
+    const canConfirm = myMove && need > 0 && this.selectedColors.size === need;
+
+    const chips = piles
+      .map(({ gem, count }) => {
+        const selected = this.selectedColors.has(gem);
+        const selectable = myMove && count > 0;
+        return `
+          <div class="spl-pile">
+            <button class="spl-gem spl-${gem} ${selected ? "selected" : ""}"
+              data-action="toggle-take" data-color="${gem}" ${selectable ? "" : "disabled"}>${count}</button>
+            <button class="spl-take2 secondary" data-action="take-two" data-color="${gem}"
+              ${myMove && count >= 4 ? "" : "disabled"}>×2</button>
+          </div>`;
+      })
+      .join("");
+    const gold = `
+      <div class="spl-pile">
+        <span class="spl-gem spl-gold">${state.bankGold}</span>
+        <span class="spl-take2 muted">gold</span>
+      </div>`;
+    const hint = myMove
+      ? need === 0
+        ? "No tokens to take"
+        : `Pick ${need} different gem${need > 1 ? "s" : ""}, or ×2 from a pile of 4+`
+      : "";
+    this.q("spl-bank").innerHTML = `
+      <div class="spl-bank-row">${chips}${gold}
+        <button id="spl-take-confirm" data-action="confirm-take" ${canConfirm ? "" : "disabled"}>
+          Take ${need > 0 ? need : 3}
+        </button>
+      </div>
+      <p class="center muted spl-hint">${hint}</p>`;
+  }
+
+  private renderModal(state: SplendorState, me: SplendorSeat | undefined, mine: boolean): void {
+    const modal = this.q("spl-modal");
+    if (!mine || !me || state.awaitingType === "MOVE" || state.awaitingType === "") {
+      modal.innerHTML = "";
+      return;
+    }
+    if (state.awaitingType === "PICK_NOBLE") {
+      const byId = new Map([...state.nobles].map((n) => [n.id, n]));
+      const options = [...state.nobleChoices]
+        .map((id) => {
+          const noble = byId.get(id);
+          return noble
+            ? nobleHtml(noble, `<button data-action="pick-noble" data-noble-id="${id}">Choose</button>`)
+            : "";
+        })
+        .join("");
+      modal.innerHTML = `<div class="spl-prompt"><h3>A noble visits - choose one</h3>
+        <div class="spl-nobles">${options}</div></div>`;
+      return;
+    }
+    // DISCARD
+    const held: Record<DiscardColor, number> = {
+      white: me.gems.white, blue: me.gems.blue, green: me.gems.green,
+      red: me.gems.red, black: me.gems.black, gold: me.gold,
+    };
+    for (const c of Object.keys(held) as DiscardColor[]) {
+      this.discardPick[c] = Math.min(this.discardPick[c], held[c]);
+    }
+    const total = (Object.values(this.discardPick) as number[]).reduce((a, b) => a + b, 0);
+    const steppers = (Object.keys(held) as DiscardColor[])
+      .filter((c) => held[c] > 0)
+      .map(
+        (c) => `
+        <div class="spl-stepper">
+          <span class="spl-gem spl-${c}">${held[c] - this.discardPick[c]}</span>
+          <button class="secondary" data-action="discard-step" data-color="${c}" data-step="-1"
+            ${this.discardPick[c] > 0 ? "" : "disabled"}>-</button>
+          <strong>${this.discardPick[c]}</strong>
+          <button class="secondary" data-action="discard-step" data-color="${c}" data-step="1"
+            ${this.discardPick[c] < held[c] && total < state.discardCount ? "" : "disabled"}>+</button>
+        </div>`
+      )
+      .join("");
+    modal.innerHTML = `<div class="spl-prompt">
+      <h3>Over 10 tokens - discard ${state.discardCount}</h3>
+      <div class="spl-steppers">${steppers}</div>
+      <button data-action="confirm-discard" ${total === state.discardCount ? "" : "disabled"}>
+        Discard ${total}/${state.discardCount}
+      </button></div>`;
+  }
+
+  private renderMe(state: SplendorState, me: SplendorSeat | undefined, myMove: boolean): void {
+    const panel = this.q("spl-me");
+    if (!me) {
+      panel.innerHTML = "";
+      return;
+    }
+    const pseudo = toEnginePlayer(me);
+    const reserved = [...me.reserved]
+      .map((card) =>
+        cardHtml(
+          card,
+          `<button data-action="buy-reserve" data-card-id="${card.id}"
+            ${myMove && SplendorEngine.affordable(toEngineCard(card), pseudo) ? "" : "disabled"}>Buy</button>`
+        )
+      )
+      .join("");
+    panel.innerHTML = `
+      <div class="spl-seat mine">
+        <div class="spl-seat-head"><strong>You</strong><span class="spl-points">${me.points} pts</span></div>
+        ${this.holdingsHtml(me)}
+        ${me.reserved.length > 0 ? `<div class="spl-reserved"><span class="muted">Reserved:</span>${reserved}</div>` : ""}
+      </div>`;
+  }
+
+  private renderOpponents(state: SplendorState, seats: SplendorSeat[], mySeatIndex: number): void {
+    const panels = seats
+      .map((seat, i) => {
+        if (i === mySeatIndex) return "";
+        const connected = seat.sessionId === "" ? false : state.players.get(seat.sessionId)?.connected !== false;
+        const badge = seat.gone
+          ? `<span class="badge warn">left - auto-play</span>`
+          : connected
+            ? ""
+            : `<span class="badge warn">reconnecting</span>`;
+        const turn = state.awaitingSeat === i && state.awaitingType !== "" ? "active" : "";
+        const backs = seat.reservedCount > 0
+          ? `<div class="spl-reserved"><span class="muted">Reserved:</span>${
+              `<span class="spl-card spl-back"></span>`.repeat(seat.reservedCount)
+            }</div>`
+          : "";
+        return `
+          <div class="spl-seat ${turn}">
+            <div class="spl-seat-head"><strong>${escapeHtml(seat.nickname)}</strong>${badge}
+              <span class="spl-points">${seat.points} pts</span></div>
+            ${this.holdingsHtml(seat)}
+            ${backs}
+          </div>`;
+      })
+      .join("");
+    this.q("spl-opponents").innerHTML = panels;
+  }
+
+  /** Tokens (top row) and card bonuses (bottom row) for one seat. */
+  private holdingsHtml(seat: SplendorSeat): string {
+    const tokens = GEMS.map((g) =>
+      seat.gems[g] > 0 ? `<span class="spl-gem spl-${g}">${seat.gems[g]}</span>` : ""
+    ).join("");
+    const gold = seat.gold > 0 ? `<span class="spl-gem spl-gold">${seat.gold}</span>` : "";
+    const bonuses = GEMS.map((g) =>
+      seat.bonuses[g] > 0 ? `<span class="spl-pip spl-${g}">${seat.bonuses[g]}</span>` : ""
+    ).join("");
+    const nobles = seat.nobles.length > 0 ? `<span class="badge">nobles: ${seat.nobles.length}</span>` : "";
+    return `
+      <div class="spl-holdings">
+        <div class="spl-tokens">${tokens}${gold}</div>
+        <div class="spl-bonuses">${bonuses}${nobles}</div>
+      </div>`;
+  }
+}
