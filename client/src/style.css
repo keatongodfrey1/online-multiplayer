@@ -703,6 +703,45 @@ button.spl-gem.selected {
   font-size: 0.8rem;
 }
 
+/* Save slots in the lobby */
+.spl-saves {
+  margin: 10px 0;
+}
+
+.spl-saves summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.spl-saves ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.spl-save-slot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid #2a2e40;
+  font-size: 0.9rem;
+}
+
+.spl-save-slot button {
+  font-size: 0.8rem;
+  padding: 5px 10px;
+}
+
+.spl-loaded-save {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+  flex-wrap: wrap;
+}
+
 /* Final score table on the ended screen */
 .spl-summary {
   margin: 8px auto 4px;

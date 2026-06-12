@@ -76,6 +76,53 @@ function formatSeconds(total: number): string {
   return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${s}s`;
 }
 
+// ---- save slots (host's browser keeps the box on its shelf) -------------------
+
+const SAVES_KEY = "splendor-saves";
+const MAX_SAVE_SLOTS = 12;
+
+interface SaveSlot {
+  id: string;
+  label: string;
+  savedAt: number;
+  save: unknown;
+}
+
+function loadSaveSlots(): SaveSlot[] {
+  try {
+    const raw = localStorage.getItem(SAVES_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? (list as SaveSlot[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSaveSlots(slots: SaveSlot[]): void {
+  try {
+    localStorage.setItem(SAVES_KEY, JSON.stringify(slots.slice(0, MAX_SAVE_SLOTS)));
+  } catch {
+    // storage full/blocked - the in-game button will just not confirm
+  }
+}
+
+/** Set by the mounted view so the once-per-room message handler can reach it. */
+let onSaveStored: (() => void) | undefined;
+
+function storeSaveSlot(save: unknown): void {
+  const blob = save as { seats?: { nickname?: string }[]; engine?: { turnCount?: number } } | null;
+  const names = (blob?.seats ?? []).map((s) => s?.nickname ?? "?").join(", ");
+  const turn = (blob?.engine?.turnCount ?? 0) + 1;
+  const slots = loadSaveSlots();
+  slots.unshift({
+    id: `${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    label: `${names} — turn ${turn}`,
+    savedAt: Date.now(),
+    save,
+  });
+  writeSaveSlots(slots);
+}
+
 /**
  * Lobby settings (GameDefinition.renderLobbySettings): the turn-timer picker.
  * The host gets a live dropdown; everyone else sees the current choice.
@@ -101,13 +148,44 @@ export function renderSplendorLobbySettings(
          </div>`
       : `<div class="spl-lobby-setting muted">Table is full</div>`
     : "";
+  // Saved games: slots live in this browser; loading stages the save on the
+  // server, which then waits for the saved players before Start unlocks.
+  let savedGames = "";
+  if (state.loadedSave) {
+    savedGames = `
+      <div class="spl-loaded-save">
+        <span class="badge warn">${escapeHtml(state.loadedSave)}</span>
+        ${ctx.isHost ? '<button id="spl-load-clear" class="subtle">Cancel</button>' : ""}
+      </div>`;
+  } else if (ctx.isHost) {
+    const slots = loadSaveSlots();
+    if (slots.length > 0) {
+      const rows = slots
+        .map(
+          (slot) => `
+          <li class="spl-save-slot">
+            <span>${escapeHtml(slot.label)}
+              <span class="muted">· ${new Date(slot.savedAt).toLocaleString()}</span></span>
+            <span>
+              <button class="spl-load-slot" data-save-id="${escapeHtml(slot.id)}">Resume</button>
+              <button class="subtle spl-delete-slot" data-save-id="${escapeHtml(slot.id)}">Delete</button>
+            </span>
+          </li>`
+        )
+        .join("");
+      savedGames = `<details class="spl-saves"><summary>Saved games (${slots.length})</summary>
+        <ul>${rows}</ul></details>`;
+    }
+  }
+
   container.innerHTML = `
     <label class="spl-lobby-setting">
       Turn timer
       <select id="spl-turn-seconds" ${ctx.isHost ? "" : "disabled"}>${options.join("")}</select>
       ${ctx.isHost ? "" : '<span class="muted">(host chooses)</span>'}
     </label>
-    ${addBots}`;
+    ${addBots}
+    ${savedGames}`;
   container.querySelector<HTMLSelectElement>("#spl-turn-seconds")?.addEventListener("change", (ev) => {
     const turnSeconds = Number((ev.target as HTMLSelectElement).value);
     room.send(SplendorMsg.CONFIG, { turnSeconds });
@@ -115,6 +193,21 @@ export function renderSplendorLobbySettings(
   container.querySelectorAll<HTMLButtonElement>(".spl-add-bot").forEach((btn) => {
     btn.addEventListener("click", () => {
       room.send(LobbyMsg.ADD_BOT, { difficulty: btn.dataset.difficulty });
+    });
+  });
+  container.querySelector<HTMLButtonElement>("#spl-load-clear")?.addEventListener("click", () => {
+    room.send(SplendorMsg.LOAD, null);
+  });
+  container.querySelectorAll<HTMLButtonElement>(".spl-load-slot").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const slot = loadSaveSlots().find((s) => s.id === btn.dataset.saveId);
+      if (slot) room.send(SplendorMsg.LOAD, slot.save);
+    });
+  });
+  container.querySelectorAll<HTMLButtonElement>(".spl-delete-slot").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      writeSaveSlots(loadSaveSlots().filter((s) => s.id !== btn.dataset.saveId));
+      renderSplendorLobbySettings(container, room, ctx); // re-render in place
     });
   });
 }
@@ -234,6 +327,8 @@ export class SplendorView implements GameView {
   /** Chime bookkeeping: fire once per transition, not per render. */
   private wasMyTurn = false;
   private clockChimedFor = 0;
+  /** Show "Saved ✓" on the save button until this timestamp. */
+  private saveFlashUntil = 0;
 
   mount(root: HTMLElement, room: Room<any, BaseState>, ctx: GameViewContext): void {
     this.root = root;
@@ -255,6 +350,23 @@ export class SplendorView implements GameView {
     `;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
+    // SAVE_DATA arrives in response to the Save button. Message handlers on
+    // the SDK room cannot be removed, and a rematch mounts a fresh view on
+    // the SAME room - so register once per room and route through a
+    // module-level hook that always points at the live view.
+    const hooked = this.room as unknown as { __splSaveHooked?: boolean };
+    if (!hooked.__splSaveHooked) {
+      hooked.__splSaveHooked = true;
+      this.room.onMessage(SplendorMsg.SAVE_DATA, (save: unknown) => {
+        storeSaveSlot(save);
+        onSaveStored?.();
+      });
+    }
+    onSaveStored = () => {
+      this.saveFlashUntil = Date.now() + 2000;
+      this.render();
+      setTimeout(() => this.render(), 2100); // drop the "Saved ✓" label again
+    };
     this.ticker = setInterval(() => this.updateTimer(), 500);
     this.render();
   }
@@ -262,6 +374,7 @@ export class SplendorView implements GameView {
   unmount(): void {
     if (this.ticker) clearInterval(this.ticker);
     this.ticker = undefined;
+    onSaveStored = undefined;
     this.room?.onStateChange.remove(this.onState);
     this.root?.removeEventListener("click", this.onClick);
     this.root = undefined;
@@ -327,6 +440,9 @@ export class SplendorView implements GameView {
       case "toggle-pause":
         this.room.send(SplendorMsg.PAUSE, { paused: !this.room.state.paused });
         return;
+      case "save-game":
+        this.room.send(SplendorMsg.SAVE, {});
+        return;
       case "toggle-mute":
         setMuted(!isMuted());
         this.render();
@@ -380,9 +496,16 @@ export class SplendorView implements GameView {
       state.turnSeconds > 0
         ? ` <button class="subtle spl-pause" data-action="toggle-pause">${state.paused ? "Resume" : "Pause"}</button>`
         : "";
+    const saveButton =
+      state.hostSessionId === this.ctx?.mySessionId
+        ? ` <button class="subtle spl-pause" data-action="save-game">${
+            Date.now() < this.saveFlashUntil ? "Saved ✓" : "Save"
+          }</button>`
+        : "";
     if (state.paused) {
       this.q("spl-status").innerHTML =
-        `<span class="badge warn">Game paused by ${escapeHtml(state.pausedBy || "...")}</span>${pauseButton}${muteButton}`;
+        `<span class="badge warn">Game paused by ${escapeHtml(state.pausedBy || "...")}</span>` +
+        `${pauseButton}${saveButton}${muteButton}`;
       return;
     }
     let text: string;
@@ -404,7 +527,7 @@ export class SplendorView implements GameView {
       text = `Waiting for <strong>${name}</strong>${doing}`;
     }
     this.q("spl-status").innerHTML =
-      `${banner}${text} <span id="spl-timer" class="spl-timer"></span>${pauseButton}${muteButton}`;
+      `${banner}${text} <span id="spl-timer" class="spl-timer"></span>${pauseButton}${saveButton}${muteButton}`;
     this.updateTimer();
   }
 

@@ -308,16 +308,23 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
     if (this.state.phase !== Phase.LOBBY) return;
     if (client.sessionId !== this.state.hostSessionId) return;
     if (this.state.players.size >= this.maxPlayers) return;
+    this.onBotAdded(this.seatBot(), options);
+  }
 
+  /**
+   * Seat a bot player directly (also used by games restoring a saved
+   * lineup). The caller is responsible for capacity/phase checks.
+   */
+  protected seatBot(nickname?: string): BasePlayer {
     const seat = this.lowestFreeSeat();
     const bot = this.createPlayer(seat);
     bot.sessionId = this.nextBotSessionId();
-    bot.nickname = this.nextBotNickname();
+    bot.nickname = nickname ?? this.nextBotNickname();
     bot.seat = seat;
     bot.connected = true; // a bot is never "away"
     bot.isBot = true;
     this.state.players.set(bot.sessionId, bot);
-    this.onBotAdded(bot, options);
+    return bot;
   }
 
   /** "bot:N" - colons never appear in real Colyseus session ids. */
