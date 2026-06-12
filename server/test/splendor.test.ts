@@ -419,4 +419,99 @@ describe("splendor", () => {
     await until(() => room.engine !== before, 3000);
     assert.strictEqual(room.engine.awaiting.seat, 1);
   });
+
+  it("pause freezes the clock and blocks moves until someone resumes", async function () {
+    this.timeout(10000);
+    const { room, clients } = await startedGame(47, 2, (r) => {
+      r.state.turnSeconds = 1;
+    });
+    const a = clients[0]!;
+    const b = clients[1]!;
+
+    b.send(SplendorMsg.PAUSE, { paused: true }); // any player may pause
+    await until(() => room.state.paused === true);
+    assert.strictEqual(room.state.pausedBy, "Player1");
+    assert.strictEqual(room.state.turnDeadline, 0, "countdown frozen");
+
+    const before = room.engine;
+    a.send(SplendorMsg.MOVE, { kind: "TAKE_TWO", color: "white" }); // blocked while paused
+    await sleep(1500); // also long past the 1s clock - no timeout either
+    assert.strictEqual(room.engine, before, "no moves and no timeout while paused");
+    assert.strictEqual(room.state.phase, Phase.PLAYING);
+
+    a.send(SplendorMsg.PAUSE, { paused: false }); // anyone may resume
+    await until(() => room.state.paused === false);
+    assert.strictEqual(room.state.pausedBy, "");
+    assert.ok(room.state.turnDeadline > Date.now(), "clock re-armed with the remaining time");
+
+    a.send(SplendorMsg.MOVE, { kind: "TAKE_TWO", color: "white" });
+    await until(() => room.engine !== before);
+    assert.strictEqual(room.engine.players[0]!.gems.white, 2, "play continues after resume");
+  });
+
+  it("ignores pause in untimed games and malformed pause payloads", async () => {
+    const timed = await startedGame(49, 2, (r) => {
+      r.state.turnSeconds = 15;
+    });
+    timed.clients[0]!.send(SplendorMsg.PAUSE, { paused: "yes" });
+    timed.clients[0]!.send(SplendorMsg.PAUSE, {});
+    timed.clients[0]!.send(SplendorMsg.PAUSE, { paused: false }); // already running
+    await sleep(100);
+    assert.strictEqual(timed.room.state.paused, false);
+    assert.ok(timed.room.state.turnDeadline > 0, "clock untouched by junk");
+
+    const untimed = await startedGame(51, 2, (r) => {
+      r.state.turnSeconds = 0;
+    });
+    untimed.clients[0]!.send(SplendorMsg.PAUSE, { paused: true });
+    await sleep(100);
+    assert.strictEqual(untimed.room.state.paused, false, "untimed games cannot be paused");
+  });
+
+  it("keeps the clock frozen across a reconnect while paused", async function () {
+    this.timeout(10000);
+    const { room, clients } = await startedGame(53, 2, (r) => {
+      r.state.turnSeconds = 1;
+    });
+    const a = clients[0]!;
+    a.send(SplendorMsg.PAUSE, { paused: true });
+    await until(() => room.state.paused);
+
+    const token = a.reconnectionToken;
+    const aSessionId = a.sessionId;
+    await a.leave(false); // the current player drops while the game is paused
+    await until(() => room.state.players.get(aSessionId)?.connected === false);
+    const a2 = await colyseus.sdk.reconnect(token);
+    await until(() => room.state.players.get(aSessionId)?.connected === true);
+    assert.strictEqual(room.state.paused, true, "manual pause survives the reconnect");
+    assert.strictEqual(room.state.turnDeadline, 0, "clock still frozen");
+
+    a2.send(SplendorMsg.PAUSE, { paused: false });
+    await until(() => room.state.turnDeadline > 0);
+    assert.strictEqual(room.state.paused, false);
+  });
+
+  it("refreezes the next turn when a quitter's seat resolves while paused", async function () {
+    this.timeout(10000);
+    const { room, clients } = await startedGame(59, 3, (r) => {
+      r.state.turnSeconds = 1;
+    });
+    clients[1]!.send(SplendorMsg.PAUSE, { paused: true });
+    await until(() => room.state.paused);
+
+    // The player whose turn it is quits for good during the pause: the ghost
+    // plays their seat out, the turn rotates - and must come up frozen.
+    await clients[0]!.leave(true);
+    await until(() => room.engine.awaiting.seat !== 0 || room.engine.over);
+    assert.strictEqual(room.state.phase, Phase.PLAYING);
+    assert.strictEqual(room.state.paused, true, "still paused after the rotation");
+    assert.strictEqual(room.state.turnDeadline, 0, "new turn's clock is frozen too");
+
+    const before = room.engine;
+    await sleep(1500);
+    assert.strictEqual(room.engine, before, "no timeout while paused");
+
+    clients[1]!.send(SplendorMsg.PAUSE, { paused: false });
+    await until(() => room.state.turnDeadline > 0);
+  });
 });

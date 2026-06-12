@@ -23,6 +23,11 @@ export const SplendorMsg = {
   RESOLVE: "splendor/resolve",
   /** Host-only, lobby-only. Payload: { turnSeconds: 0 | 15 | 30 | ... | 300 }. */
   CONFIG: "splendor/config",
+  /**
+   * Any player, timed games only. Payload: { paused: boolean }. Pausing
+   * freezes the turn clock and blocks moves until someone resumes.
+   */
+  PAUSE: "splendor/pause",
 } as const;
 
 /** Turn-timer options: 0 = off, otherwise 15s steps up to 5 minutes. */
@@ -114,7 +119,11 @@ export class SplendorState extends BaseState {
   @type("uint16") turnSeconds = SPLENDOR_TURN_DEFAULT_SECONDS;
   /**
    * Epoch ms when the current turn expires (clients render the countdown
-   * from this); 0 when untimed, paused for a disconnect, or game over.
+   * from this); 0 when untimed, paused, or game over.
    */
   @type("float64") turnDeadline = 0;
+  /** Game manually paused (timed games only): clock frozen, moves blocked. */
+  @type("boolean") paused = false;
+  /** Nickname of whoever paused, for the banner. */
+  @type("string") pausedBy = "";
 }

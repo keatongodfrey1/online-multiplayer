@@ -95,6 +95,7 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     this.onMessage(SplendorMsg.MOVE, (client, payload) => this.handleMove(client, payload));
     this.onMessage(SplendorMsg.RESOLVE, (client, payload) => this.handleResolve(client, payload));
     this.onMessage(SplendorMsg.CONFIG, (client, payload) => this.handleConfig(client, payload));
+    this.onMessage(SplendorMsg.PAUSE, (client, payload) => this.handlePause(client, payload));
   }
 
   /** Host adjusts the turn timer while in the lobby. */
@@ -104,6 +105,22 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     const turnSeconds = (payload as { turnSeconds?: unknown } | null)?.turnSeconds;
     if (!isValidSplendorTurnSeconds(turnSeconds)) return;
     this.state.turnSeconds = turnSeconds;
+  }
+
+  /**
+   * Any player pauses/resumes a timed game (family-table etiquette: whoever
+   * needs to step away hits pause; whoever is back first hits resume).
+   * Untimed games have nothing to pause - the game already waits forever.
+   */
+  private handlePause(client: Client, payload: unknown): void {
+    if (this.state.phase !== Phase.PLAYING || this.state.turnSeconds === 0) return;
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+    const paused = (payload as { paused?: unknown } | null)?.paused;
+    if (typeof paused !== "boolean" || paused === this.state.paused) return;
+    this.state.paused = paused;
+    this.state.pausedBy = paused ? player.nickname : "";
+    this.syncClock();
   }
 
   protected onGameStart(): void {
@@ -126,6 +143,8 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
       this.regrantReserved(p.sessionId, seat.reserved);
     }
     this.state.lastRound = false;
+    this.state.paused = false;
+    this.state.pausedBy = "";
     this.syncFromEngine();
 
     this.turns?.stop();
@@ -176,6 +195,7 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
 
   private handleMove(client: Client, payload: unknown): void {
     if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.over) return;
+    if (this.state.paused) return;
     if (this.engine.awaiting.inputType !== "MOVE") return;
     if (this.seatOrder[this.engine.awaiting.seat] !== client.sessionId) return;
     const move = parseMove(payload);
@@ -186,6 +206,7 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
 
   private handleResolve(client: Client, payload: unknown): void {
     if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.over) return;
+    if (this.state.paused) return;
     const awaiting = this.engine.awaiting;
     if (awaiting.inputType === "MOVE") return;
     if (this.seatOrder[awaiting.seat] !== client.sessionId) return;
@@ -259,6 +280,32 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     let steps = 0;
     while (target && this.turns && this.turns.current() !== target && ++steps <= this.maxPlayers) {
       this.turns.next();
+    }
+    // Turn rotation starts a fresh clock; refreeze it if the game is paused
+    // (e.g. a quitter's seat was ghost-resolved while everyone was away).
+    this.syncClock();
+  }
+
+  /**
+   * Freeze or run the turn clock to match the current freeze conditions:
+   * a manual pause, or the current player being disconnected. Idempotent;
+   * safe to call after anything that may have rotated or restarted turns.
+   * (Never called from inside onTurnChange - TurnManager only arms the
+   * timer after that callback returns, so pausing there would be a no-op.)
+   */
+  private syncClock(): void {
+    if (this.state.phase !== Phase.PLAYING || this.state.turnSeconds === 0 || !this.turns) return;
+    const current = this.turns.current();
+    const connected = !current || this.state.players.get(current)?.connected !== false;
+    const shouldRun = !this.state.paused && connected;
+    if (!shouldRun && this.state.turnDeadline > 0) {
+      this.turns.pause();
+      this.pausedTurnRemainingMs = Math.max(0, this.state.turnDeadline - Date.now());
+      this.state.turnDeadline = 0;
+    } else if (shouldRun && this.state.turnDeadline === 0 && this.pausedTurnRemainingMs !== undefined) {
+      this.turns.resume();
+      this.state.turnDeadline = Date.now() + this.pausedTurnRemainingMs;
+      this.pausedTurnRemainingMs = undefined;
     }
   }
 
@@ -337,24 +384,11 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
   // ---- framework hooks -------------------------------------------------------
 
   protected override onPlayerDropped(player: BasePlayer): void {
-    if (this.turns?.current() === player.sessionId) {
-      this.turns.pause();
-      if (this.state.turnDeadline > 0) {
-        // Freeze the visible countdown alongside the TurnManager's clock.
-        this.pausedTurnRemainingMs = Math.max(0, this.state.turnDeadline - Date.now());
-        this.state.turnDeadline = 0;
-      }
-    }
+    if (this.turns?.current() === player.sessionId) this.syncClock();
   }
 
   protected override onPlayerReconnected(player: BasePlayer): void {
-    if (this.turns?.current() === player.sessionId) {
-      this.turns.resume();
-      if (this.pausedTurnRemainingMs !== undefined) {
-        this.state.turnDeadline = Date.now() + this.pausedTurnRemainingMs;
-        this.pausedTurnRemainingMs = undefined;
-      }
-    }
+    if (this.turns?.current() === player.sessionId) this.syncClock();
     if (this.state.phase !== Phase.PLAYING) return;
     const idx = this.seatOrder.indexOf(player.sessionId);
     const seat = idx >= 0 ? this.state.seats[idx] : undefined;
@@ -380,6 +414,8 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     this.turns?.stop();
     this.pausedTurnRemainingMs = undefined;
     this.state.turnDeadline = 0;
+    this.state.paused = false;
+    this.state.pausedBy = "";
     this.state.currentTurn = "";
     this.state.awaitingType = "";
   }

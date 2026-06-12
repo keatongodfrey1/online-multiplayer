@@ -513,6 +513,11 @@ button.spl-gem.selected {
   margin: 10px 0;
 }
 
+.spl-pause {
+  margin-left: 10px;
+  font-size: 0.8rem;
+}
+
 /* Reconnecting overlay */
 .overlay {
   position: fixed;

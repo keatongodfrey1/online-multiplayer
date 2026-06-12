@@ -220,6 +220,9 @@ export class SplendorView implements GameView {
       case "pick-noble":
         this.room.send(SplendorMsg.RESOLVE, { kind: "PICK_NOBLE", nobleId: Number(data.nobleId) });
         return;
+      case "toggle-pause":
+        this.room.send(SplendorMsg.PAUSE, { paused: !this.room.state.paused });
+        return;
     }
   }
 
@@ -234,7 +237,7 @@ export class SplendorView implements GameView {
     const mySeatIndex = seats.findIndex((s) => s.sessionId === this.ctx!.mySessionId);
     const me = mySeatIndex >= 0 ? seats[mySeatIndex] : undefined;
     const actorSeat = seats[state.awaitingSeat];
-    const isMyDecision = state.awaitingSeat === mySeatIndex && mySeatIndex >= 0;
+    const isMyDecision = state.awaitingSeat === mySeatIndex && mySeatIndex >= 0 && !state.paused;
     const myMove = isMyDecision && state.awaitingType === "MOVE";
 
     if (state.awaitingType !== "DISCARD" || !isMyDecision) {
@@ -257,6 +260,15 @@ export class SplendorView implements GameView {
 
   private renderStatus(state: SplendorState, actor: SplendorSeat | undefined, mine: boolean): void {
     const banner = state.lastRound ? `<span class="spl-final badge warn">Final round!</span> ` : "";
+    const pauseButton =
+      state.turnSeconds > 0
+        ? ` <button class="subtle spl-pause" data-action="toggle-pause">${state.paused ? "Resume" : "Pause"}</button>`
+        : "";
+    if (state.paused) {
+      this.q("spl-status").innerHTML =
+        `<span class="badge warn">Game paused by ${escapeHtml(state.pausedBy || "...")}</span>${pauseButton}`;
+      return;
+    }
     let text: string;
     if (mine) {
       text =
@@ -275,7 +287,8 @@ export class SplendorView implements GameView {
             : "";
       text = `Waiting for <strong>${name}</strong>${doing}`;
     }
-    this.q("spl-status").innerHTML = `${banner}${text} <span id="spl-timer" class="spl-timer"></span>`;
+    this.q("spl-status").innerHTML =
+      `${banner}${text} <span id="spl-timer" class="spl-timer"></span>${pauseButton}`;
     this.updateTimer();
   }
 
