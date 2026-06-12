@@ -96,6 +96,8 @@ export interface PlayerState {
   devCards: DevCard[]; // includes hidden victoryPoint cards
   knightsPlayed: number;
   piecesLeft: { roads: number; settlements: number; cities: number };
+  /** "CATAN for Two" variant trade tokens (0 outside the variant / for neutrals). */
+  tradeTokens: number;
 }
 
 /** Turn / flow phases. Transition graph lives in stateMachine.ts. */
@@ -108,6 +110,8 @@ export type Phase =
   | "steal"
   | "main"
   | "specialBuild" // 5-6 player extension: build round between turns
+  | "neutralBuild" // 2p variant: owe a free road/settlement to a neutral player
+  | "forcedTradeGive" // 2p variant: owe the opponent 2 cards after a Forced Trade
   | "gameOver";
 
 /** An open domestic (player-to-player) trade offer. Resource-for-resource
@@ -156,6 +160,16 @@ export interface GameState {
   specialBuildQueue: PlayerId[]; // players still to get a build window this round
   specialBuilder: PlayerId | null; // whose special-build window is active
 
+  // Official "CATAN for Two" variant (all defaulted/inert outside it)
+  twoPlayerVariant: boolean;
+  neutralPlayerIds: PlayerId[]; // [] normally; [2, 3] in the variant
+  tokenSupply: number; // trade tokens left beside the board
+  rollsThisTurn: number; // the variant rolls twice per turn
+  firstDice: [number, number] | null; // roll #1 of the turn (UI + differ rule)
+  pendingNeutralBuilds: number; // free neutral builds owed by the current player
+  neutralBuildReturnPhase: Phase; // where play resumes after the neutral build
+  knightDiscardedThisTurn: boolean; // gate: one knight-for-tokens discard per turn
+
   log: GameEvent[];
 }
 
@@ -163,3 +177,7 @@ export const HAND_LIMIT_BEFORE_DISCARD = 7; // discard when hand > 7
 export const LONGEST_ROAD_MIN = 5;
 export const LARGEST_ARMY_MIN = 3;
 export const WINNING_VP = 10;
+
+// "CATAN for Two" variant constants (official rule sheet)
+export const TWO_PLAYER_TOKEN_START = 5; // each player starts with 5 trade tokens
+export const TWO_PLAYER_TOKEN_SUPPLY = 20; // total tokens in the game

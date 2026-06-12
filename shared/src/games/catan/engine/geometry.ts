@@ -325,6 +325,43 @@ export function spiralHexOrder(geo: BoardGeometry, startCorner = 0): HexId[] {
 }
 
 // ----------------------------------------------------------------------------
+// "CATAN for Two": the official sheet pre-places each neutral player's single
+// starting settlement on intersections marked on the (fixed) printed frame.
+// Our geometry is deterministic, so fixed vertex ids ARE fixed board positions;
+// we pick two point-symmetric mid-ring interior vertices (computed, not magic
+// numbers). Since neutrals never produce, only their blocking matters, which
+// the terrain shuffle does not affect.
+// ----------------------------------------------------------------------------
+
+export function defaultNeutralSetupVertices(geo: BoardGeometry): [VertexId, VertexId] {
+  const interior = geo.vertices.filter((v) => v.hexes.length === 3);
+  const radius = (p: Point) => Math.hypot(p.x, p.y);
+  const radii = interior.map((v) => radius(v.point));
+  const target = (Math.min(...radii) + Math.max(...radii)) / 2;
+  const eps = 1e-6;
+  const byScore = [...interior].sort(
+    (a, b) => Math.abs(radius(a.point) - target) - Math.abs(radius(b.point) - target) || a.id - b.id,
+  );
+  for (const v of byScore) {
+    const partner = interior.find(
+      (w) => w.id !== v.id && Math.abs(w.point.x + v.point.x) < eps && Math.abs(w.point.y + v.point.y) < eps,
+    );
+    if (partner) return [Math.min(v.id, partner.id), Math.max(v.id, partner.id)];
+  }
+  // Non-symmetric custom board: fall back to the two interior vertices that
+  // are farthest apart.
+  let best: [VertexId, VertexId] = [interior[0]!.id, interior[interior.length - 1]!.id];
+  let bestD = -1;
+  for (const a of interior)
+    for (const b of interior) {
+      if (a.id >= b.id) continue;
+      const d = Math.hypot(a.point.x - b.point.x, a.point.y - b.point.y);
+      if (d > bestD) { bestD = d; best = [a.id, b.id]; }
+    }
+  return best;
+}
+
+// ----------------------------------------------------------------------------
 // Render helpers (positions only; no styling). A UI should use these so it
 // stays consistent with the topology above.
 // ----------------------------------------------------------------------------

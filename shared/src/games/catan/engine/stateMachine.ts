@@ -39,6 +39,8 @@ import {
   PIECE_LIMITS,
   RESOURCES,
   TERRAIN_RESOURCE,
+  TWO_PLAYER_TOKEN_START,
+  TWO_PLAYER_TOKEN_SUPPLY,
   WINNING_VP,
   emptyBag,
 } from "./types.js";
@@ -56,11 +58,13 @@ import {
   bestTradeRatio,
   coastalEdgesOrdered,
   computeLongestRoadLength,
+  defaultNeutralSetupVertices,
   getValidCities,
   getValidInitialSettlements,
   getValidRoads,
   getValidSettlements,
   portAccess,
+  satisfiesDistanceRule,
   spiralHexOrder,
 } from "./geometry.js";
 
@@ -218,11 +222,22 @@ export interface NewGameOptions {
   numberBag?: number[];
   bankPerResource?: number; // default 19
   devDeck?: Record<DevCardType, number>; // default standard 25-card deck
+  /** The official "CATAN for Two" variant. Requires numPlayers === 2; adds two
+   *  neutral players (ids 2 and 3), trade tokens, the double roll, and the
+   *  free-neutral-build obligation. */
+  twoPlayerVariant?: boolean;
+  /** Override the neutrals' fixed starting settlements (tests / custom maps). */
+  neutralSetupVertices?: [VertexId, VertexId];
 }
 
 export function createInitialGameState(geo: BoardGeometry, opts: NewGameOptions): GameState {
   const numPlayers = opts.numPlayers;
-  if (numPlayers < 3 || numPlayers > 6) throw new Error("supported player counts are 3-6");
+  const twoPlayer = opts.twoPlayerVariant ?? false;
+  if (twoPlayer) {
+    if (numPlayers !== 2) throw new Error("the CATAN-for-Two variant requires exactly 2 players");
+  } else if (numPlayers < 3 || numPlayers > 6) {
+    throw new Error("supported player counts are 3-6 (2 only with the CATAN-for-Two variant)");
+  }
   const start = opts.startingPlayer ?? 0;
   if (!Number.isInteger(start) || start < 0 || start >= numPlayers) throw new Error("startingPlayer out of range");
   const seed = opts.seed ?? ((Math.random() * 2 ** 31) >>> 0);
@@ -252,17 +267,34 @@ export function createInitialGameState(geo: BoardGeometry, opts: NewGameOptions)
     robberHex: firstDesert,
   };
 
+  // In the 2-player variant, seats 0-1 are the humans and seats 2-3 are the
+  // two neutral players ("the two sets of game pieces not chosen").
+  const totalSeats = twoPlayer ? 4 : numPlayers;
+  const neutralPlayerIds: PlayerId[] = twoPlayer ? [2, 3] : [];
   const colors = opts.colors ?? PLAYER_COLORS;
-  const players: PlayerState[] = Array.from({ length: numPlayers }, (_, id) => ({
+  const players: PlayerState[] = Array.from({ length: totalSeats }, (_, id) => ({
     id,
     color: colors[id % colors.length]!,
     hand: emptyBag(),
     devCards: [],
     knightsPlayed: 0,
     piecesLeft: { ...PIECE_LIMITS },
+    tradeTokens: twoPlayer && id < numPlayers ? TWO_PLAYER_TOKEN_START : 0,
   }));
 
-  // Seat `start` leads; the snake runs start, start+1, ... then back.
+  // The neutral starting settlements go down before the human snake draft
+  // (1 settlement each, no road — the official sheet's marked intersections).
+  if (twoPlayer) {
+    const spots = opts.neutralSetupVertices ?? defaultNeutralSetupVertices(geo);
+    neutralPlayerIds.forEach((nid, i) => {
+      const v = spots[i]!;
+      if (!satisfiesDistanceRule(geo, board, v)) throw new Error("neutral setup vertex violates the distance rule");
+      board.vertices[v]!.building = { owner: nid, type: "settlement" };
+      players[nid]!.piecesLeft.settlements--;
+    });
+  }
+
+  // Seat `start` leads; the snake runs the HUMAN seats start, start+1, ... then back.
   const forward: PlayerId[] = [];
   for (let i = 0; i < numPlayers; i++) forward.push((start + i) % numPlayers);
   const setupSequence = [...forward, ...forward.slice().reverse()];
@@ -291,6 +323,14 @@ export function createInitialGameState(geo: BoardGeometry, opts: NewGameOptions)
     specialBuildEnabled: opts.specialBuildPhase ?? numPlayers >= 5,
     specialBuildQueue: [],
     specialBuilder: null,
+    twoPlayerVariant: twoPlayer,
+    neutralPlayerIds,
+    tokenSupply: twoPlayer ? TWO_PLAYER_TOKEN_SUPPLY - numPlayers * TWO_PLAYER_TOKEN_START : 0,
+    rollsThisTurn: 0,
+    firstDice: null,
+    pendingNeutralBuilds: 0,
+    neutralBuildReturnPhase: "main",
+    knightDiscardedThisTurn: false,
     log: [],
   };
 }
@@ -320,7 +360,13 @@ export type Action =
   | { type: "confirmDomesticTrade"; partner: PlayerId }
   | { type: "cancelDomesticTrade" }
   | { type: "endSpecialBuild" }
-  | { type: "endTurn" };
+  | { type: "endTurn" }
+  // "CATAN for Two" variant actions
+  | { type: "buildNeutral"; neutralId: 0 | 1; kind: "road" | "settlement"; edge?: EdgeId; vertex?: VertexId }
+  | { type: "playForcedTrade" }
+  | { type: "forcedTradeGiveBack"; cards: Partial<ResourceBag> }
+  | { type: "playTokenRobber" }
+  | { type: "discardKnightForTokens" };
 
 export interface ReduceOptions {
   /** When true, a client-supplied `dice` value on rollDice is honoured (used by
@@ -355,6 +401,7 @@ export function cloneGameState(s: GameState): GameState {
       hand: cloneBag(p.hand),
       devCards: p.devCards.map((c) => ({ type: c.type, boughtThisTurn: c.boughtThisTurn, played: c.played })),
       piecesLeft: { roads: p.piecesLeft.roads, settlements: p.piecesLeft.settlements, cities: p.piecesLeft.cities },
+      tradeTokens: p.tradeTokens,
     })),
     board: {
       robberHex: s.board.robberHex,
@@ -386,6 +433,14 @@ export function cloneGameState(s: GameState): GameState {
     specialBuildEnabled: s.specialBuildEnabled,
     specialBuildQueue: s.specialBuildQueue.slice(),
     specialBuilder: s.specialBuilder,
+    twoPlayerVariant: s.twoPlayerVariant,
+    neutralPlayerIds: s.neutralPlayerIds.slice(),
+    tokenSupply: s.tokenSupply,
+    rollsThisTurn: s.rollsThisTurn,
+    firstDice: s.firstDice ? [s.firstDice[0], s.firstDice[1]] : null,
+    pendingNeutralBuilds: s.pendingNeutralBuilds,
+    neutralBuildReturnPhase: s.neutralBuildReturnPhase,
+    knightDiscardedThisTurn: s.knightDiscardedThisTurn,
     log: s.log.slice(), // events are append-only and never mutated -> shallow copy is safe
   };
 }
@@ -437,6 +492,73 @@ function requireBuildPhase(state: GameState): void {
   require(state.phase === "main" || state.phase === "specialBuild", "you can only build now during your build phase");
 }
 
+// ---- "CATAN for Two" variant helpers -----------------------------------------
+
+function isNeutral(state: GameState, id: PlayerId): boolean {
+  return state.neutralPlayerIds.includes(id);
+}
+/** Next HUMAN seat in order (neutrals never take turns). */
+function nextHuman(state: GameState, from: PlayerId): PlayerId {
+  const n = state.players.length;
+  let next = (from + 1) % n;
+  while (isNeutral(state, next)) next = (next + 1) % n;
+  return next;
+}
+/** The single human opponent in the 2-player variant. */
+function otherHuman(state: GameState, me: PlayerId): PlayerState {
+  const found = state.players.find((p) => p.id !== me && !isNeutral(state, p.id));
+  require(!!found, "no opponent");
+  return found!;
+}
+/** Token-action price: 1 while not ahead, 2 while ahead — compared on PUBLIC
+ *  victory points (hidden VP cards stay hidden, as at a physical table). */
+function tokenActionCost(state: GameState, me: PlayerId): number {
+  const opp = otherHuman(state, me);
+  return publicVictoryPoints(state, me) <= publicVictoryPoints(state, opp.id) ? 1 : 2;
+}
+function payTokens(state: GameState, p: PlayerState, cost: number): void {
+  require(p.tradeTokens >= cost, `that action costs ${cost} trade token${cost === 1 ? "" : "s"}`);
+  p.tradeTokens -= cost;
+  state.tokenSupply += cost;
+}
+/** Token earnings for a HUMAN settlement: desert-adjacent +2, coastal +1,
+ *  both +3 (also during setup). Capped by the finite 20-token supply. */
+function awardSettlementTokens(state: GameState, geo: BoardGeometry, vertex: VertexId, player: PlayerId): void {
+  if (!state.twoPlayerVariant || isNeutral(state, player)) return;
+  const hexes = geo.vertices[vertex]!.hexes;
+  let earn = 0;
+  if (hexes.some((h) => state.board.hexes[h]!.terrain === "desert")) earn += 2;
+  if (hexes.length < 3) earn += 1; // coastal vertex
+  const take = Math.min(earn, state.tokenSupply);
+  state.players[player]!.tradeTokens += take;
+  state.tokenSupply -= take;
+}
+/** Does ANY neutral have a legal road or settlement placement left? */
+function neutralHasAnyOption(state: GameState, geo: BoardGeometry): boolean {
+  return state.neutralPlayerIds.some((nid) => {
+    const p = state.players[nid]!;
+    if (p.piecesLeft.roads > 0 && getValidRoads(geo, state.board, nid).length > 0) return true;
+    if (p.piecesLeft.settlements > 0 && getValidSettlements(geo, state.board, nid).length > 0) return true;
+    return false;
+  });
+}
+/** Enter (or stay in) the neutralBuild phase while builds are owed and any
+ *  legal option exists; obligations with no legal placement simply lapse. */
+function enterNeutralBuildIfPossible(state: GameState, geo: BoardGeometry): void {
+  if (state.pendingNeutralBuilds > 0 && !neutralHasAnyOption(state, geo)) state.pendingNeutralBuilds = 0;
+  if (state.pendingNeutralBuilds > 0 && state.phase !== "neutralBuild") {
+    state.neutralBuildReturnPhase = state.phase;
+    state.phase = "neutralBuild";
+  }
+}
+/** "Whenever you build a road or a settlement, you must also build (for free)
+ *  1 road or 1 settlement for either of the two neutral players." */
+function queueNeutralBuild(state: GameState, geo: BoardGeometry): void {
+  if (!state.twoPlayerVariant || state.phase === "gameOver") return;
+  state.pendingNeutralBuilds++;
+  enterNeutralBuildIfPossible(state, geo);
+}
+
 // ---- Production with bank-scarcity resolution ------------------------------
 
 function produceResources(state: GameState, geo: BoardGeometry, roll: number): void {
@@ -452,6 +574,7 @@ function produceResources(state: GameState, geo: BoardGeometry, roll: number): v
     for (const v of hex.vertices) {
       const b = state.board.vertices[v]!.building;
       if (!b) continue;
+      if (isNeutral(state, b.owner)) continue; // 2p variant: neutrals never receive resources
       const gain = b.type === "city" ? 2 : 1;
       demand[res].set(b.owner, (demand[res].get(b.owner) ?? 0) + gain);
     }
@@ -500,11 +623,27 @@ function updateLongestRoad(state: GameState, geo: BoardGeometry): void {
   }
 }
 
-function updateLargestArmyAfterKnight(state: GameState, actor: PlayerId): void {
-  const k = state.players[actor]!.knightsPlayed;
-  if (k < LARGEST_ARMY_MIN) return;
-  const holder = state.largestArmyHolder;
-  if (holder === null || k > state.players[holder]!.knightsPlayed) state.largestArmyHolder = actor;
+/**
+ * Largest Army, holder-aware (mirrors updateLongestRoad): needs >= 3 played
+ * knights; transfers only to a STRICTLY larger army; the holder keeps it on a
+ * tie; with no strict leader and the holder below the max (possible only via
+ * the 2p knight-for-tokens discard) the card is set aside. For the base game,
+ * where knight counts only ever increase one at a time on the actor's turn,
+ * this is behavior-identical to the classic "first to 3, then strictly more"
+ * transfer rule (the ported engine tests pin that down).
+ */
+function updateLargestArmy(state: GameState): void {
+  const counts = state.players.map((p) => p.knightsPlayed);
+  const max = Math.max(0, ...counts);
+  if (max < LARGEST_ARMY_MIN) { state.largestArmyHolder = null; return; }
+  const leaders = state.players.filter((p) => counts[p.id] === max).map((p) => p.id);
+  if (leaders.length === 1) {
+    state.largestArmyHolder = leaders[0]!;
+  } else if (state.largestArmyHolder !== null && counts[state.largestArmyHolder] === max) {
+    // tie at the top including the holder -> holder keeps it
+  } else {
+    state.largestArmyHolder = null; // tie among non-holders -> set aside
+  }
 }
 
 // ---- Victory ---------------------------------------------------------------
@@ -555,6 +694,10 @@ function startTurn(state: GameState, player: PlayerId): void {
   state.pendingTrade = null;
   state.specialBuilder = null;
   state.specialBuildQueue = [];
+  state.rollsThisTurn = 0;
+  state.firstDice = null;
+  state.pendingNeutralBuilds = 0;
+  state.knightDiscardedThisTurn = false;
   state.players[player]!.devCards.forEach((c) => (c.boughtThisTurn = false));
   // A player can cross 10 VP on an opponent's turn (Longest Road being
   // transferred when the previous holder's road is cut). They win at the
@@ -568,7 +711,10 @@ function endOfTurnTransition(state: GameState): void {
   if (state.specialBuildEnabled) {
     const ender = state.currentPlayer;
     const queue: PlayerId[] = [];
-    for (let i = 1; i < n; i++) queue.push((ender + i) % n);
+    for (let i = 1; i < n; i++) {
+      const cand = (ender + i) % n;
+      if (!isNeutral(state, cand)) queue.push(cand);
+    }
     state.specialBuildQueue = queue;
     state.specialBuilder = queue[0]!;
     state.phase = "specialBuild";
@@ -576,7 +722,7 @@ function endOfTurnTransition(state: GameState): void {
     state.freeRoads = 0;
     state.devCardPlayedThisTurn = false;
   } else {
-    startTurn(state, (state.currentPlayer + 1) % n);
+    startTurn(state, nextHuman(state, state.currentPlayer));
   }
 }
 
@@ -597,8 +743,9 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
       require(getValidInitialSettlements(geo, state.board).includes(action.vertex), "illegal initial settlement (distance rule)");
       state.board.vertices[action.vertex]!.building = { owner: me.id, type: "settlement" };
       me.piecesLeft.settlements--;
+      awardSettlementTokens(state, geo, action.vertex, me.id); // 2p: "also applies during the set-up phase"
       state.lastSettlementVertex = action.vertex;
-      const isSecondRound = state.setupStep >= state.players.length;
+      const isSecondRound = state.setupStep >= state.setupSequence.length / 2;
       if (isSecondRound) {
         for (const hid of geo.vertices[action.vertex]!.hexes) {
           const res = TERRAIN_RESOURCE[state.board.hexes[hid]!.terrain];
@@ -636,12 +783,35 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
     case "rollDice": {
       require(state.phase === "preRoll", "can only roll at the start of your turn");
       const scripted = action.dice && opts.trustClientRandomness;
-      const d1 = scripted ? action.dice![0] : 1 + Math.floor(advanceRng(state) * 6);
-      const d2 = scripted ? action.dice![1] : 1 + Math.floor(advanceRng(state) * 6);
+      let d1 = scripted ? action.dice![0] : 1 + Math.floor(advanceRng(state) * 6);
+      let d2 = scripted ? action.dice![1] : 1 + Math.floor(advanceRng(state) * 6);
+
+      // 2p variant: two rolls per turn; the SECOND roll's result (sum) must
+      // differ from the first ("roll again until you get a different result").
+      const secondOfTwo = state.twoPlayerVariant && state.rollsThisTurn === 1;
+      if (secondOfTwo) {
+        const firstSum = state.firstDice![0] + state.firstDice![1];
+        if (scripted) {
+          require(d1 + d2 !== firstSum, "the second roll must differ from the first");
+        } else {
+          for (let tries = 0; d1 + d2 === firstSum && tries < 100; tries++) {
+            d1 = 1 + Math.floor(advanceRng(state) * 6);
+            d2 = 1 + Math.floor(advanceRng(state) * 6);
+          }
+        }
+      }
+
       state.dice = [d1, d2];
       const sum = d1 + d2;
+      const firstOfTwo = state.twoPlayerVariant && state.rollsThisTurn === 0;
+      if (firstOfTwo) state.firstDice = [d1, d2];
+      state.rollsThisTurn++;
+      // After roll #1 the variant returns to preRoll for roll #2; a 7 resolves
+      // its full robber sequence first and THEN comes back to preRoll.
+      const after: Phase = firstOfTwo ? "preRoll" : "main";
+
       if (sum === 7) {
-        state.robberReturnPhase = "main";
+        state.robberReturnPhase = after;
         state.pendingDiscards = {};
         for (const p of state.players) {
           const c = handCount(p);
@@ -650,7 +820,7 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
         state.phase = Object.keys(state.pendingDiscards).length > 0 ? "discard" : "moveRobber";
       } else {
         produceResources(state, geo, sum);
-        state.phase = "main";
+        state.phase = after;
       }
       return state;
     }
@@ -697,6 +867,7 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
 
     // ---- Build (allowed in main and during the special building phase) ----
     case "buildRoad": {
+      require(state.phase !== "neutralBuild", "place the neutral piece first");
       require(state.phase === "main" || state.phase === "specialBuild" || state.freeRoads > 0, "cannot build now");
       require(me.piecesLeft.roads > 0, "no road pieces left");
       require(getValidRoads(geo, state.board, me.id).includes(action.edge), "illegal road placement");
@@ -706,6 +877,7 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
       me.piecesLeft.roads--;
       updateLongestRoad(state, geo);
       checkWin(state);
+      queueNeutralBuild(state, geo); // 2p: every road built owes a neutral build (incl. Road Building's)
       return state;
     }
 
@@ -717,8 +889,10 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
       pay(state, me, COSTS.settlement);
       state.board.vertices[action.vertex]!.building = { owner: me.id, type: "settlement" };
       me.piecesLeft.settlements--;
+      awardSettlementTokens(state, geo, action.vertex, me.id); // 2p: desert/coast tokens
       updateLongestRoad(state, geo); // may sever an opponent's road
       checkWin(state);
+      queueNeutralBuild(state, geo); // 2p: every settlement built owes a neutral build
       return state;
     }
 
@@ -753,7 +927,7 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
       card.played = true;
       state.devCardPlayedThisTurn = true;
       me.knightsPlayed++;
-      updateLargestArmyAfterKnight(state, me.id);
+      updateLargestArmy(state);
       checkWin(state);
       if (state.phase !== "gameOver") { state.robberReturnPhase = state.phase; state.phase = "moveRobber"; }
       return state;
@@ -814,7 +988,9 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
       require(state.phase === "main", "you can only propose a trade on your own turn");
       require(bagTotal(action.give) > 0 && bagTotal(action.receive) > 0, "no gifts: both sides must include at least one card");
       require(canAfford(me, action.give), "you don't hold the resources you're offering");
-      const candidates = (action.to && action.to.length ? action.to : state.players.map((p) => p.id)).filter((p) => p !== me.id);
+      const candidates = [...new Set(action.to && action.to.length ? action.to : state.players.map((p) => p.id))].filter(
+        (p) => Number.isInteger(p) && p >= 0 && p < state.players.length && p !== me.id && !isNeutral(state, p),
+      );
       require(candidates.length > 0, "no trade partners specified");
       state.pendingTrade = { proposer: me.id, give: { ...action.give }, receive: { ...action.receive }, candidates, acceptances: [] };
       return state;
@@ -859,7 +1035,7 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
       if (state.specialBuildQueue.length > 0) {
         state.specialBuilder = state.specialBuildQueue[0]!;
       } else {
-        startTurn(state, (state.currentPlayer + 1) % state.players.length);
+        startTurn(state, nextHuman(state, state.currentPlayer));
       }
       return state;
     }
@@ -868,6 +1044,91 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
       require(state.phase === "main", "can only end turn from the main phase");
       state.freeRoads = 0; // any unused Road Building roads are forfeited
       endOfTurnTransition(state);
+      return state;
+    }
+
+    // ---- "CATAN for Two" variant ----
+    case "buildNeutral": {
+      require(state.twoPlayerVariant, "neutral builds exist only in the 2-player game");
+      require(state.phase === "neutralBuild", "no neutral build is owed");
+      const nid = state.neutralPlayerIds[action.neutralId];
+      require(nid !== undefined, "no such neutral player");
+      const np = state.players[nid]!;
+      if (action.kind === "road") {
+        require(action.edge !== undefined, "edge required for a neutral road");
+        require(np.piecesLeft.roads > 0, "that neutral has no road pieces left");
+        require(getValidRoads(geo, state.board, nid).includes(action.edge), "illegal neutral road placement");
+        state.board.edges[action.edge]!.road = { owner: nid };
+        np.piecesLeft.roads--;
+      } else {
+        require(action.kind === "settlement", "kind must be road or settlement");
+        require(action.vertex !== undefined, "vertex required for a neutral settlement");
+        require(np.piecesLeft.settlements > 0, "that neutral has no settlement pieces left");
+        require(getValidSettlements(geo, state.board, nid).includes(action.vertex), "illegal neutral settlement placement");
+        state.board.vertices[action.vertex]!.building = { owner: nid, type: "settlement" };
+        np.piecesLeft.settlements--;
+      }
+      updateLongestRoad(state, geo); // neutrals can take Longest Road / sever trails
+      state.pendingNeutralBuilds--;
+      state.phase = state.neutralBuildReturnPhase;
+      enterNeutralBuildIfPossible(state, geo); // a second owed build (Road Building) re-enters
+      checkWin(state); // a neutral settlement can cut the opponent's road and hand ME Longest Road
+      return state;
+    }
+
+    case "playForcedTrade": {
+      require(state.twoPlayerVariant, "trade tokens exist only in the 2-player game");
+      require(state.phase === "main", "trade tokens are spent during your main phase");
+      const opp = otherHuman(state, me.id);
+      require(handCount(opp) >= 1, "your opponent has no cards to take");
+      require(handCount(me) + Math.min(2, handCount(opp)) >= 2, "you must be able to give back 2 cards");
+      payTokens(state, me, tokenActionCost(state, me.id));
+      const takeN = Math.min(2, handCount(opp));
+      for (let i = 0; i < takeN; i++) {
+        const pool: Resource[] = [];
+        RESOURCES.forEach((r) => { for (let k = 0; k < opp.hand[r]; k++) pool.push(r); });
+        const picked = pool[Math.floor(advanceRng(state) * pool.length)]!;
+        opp.hand[picked]--;
+        me.hand[picked]++;
+      }
+      state.phase = "forcedTradeGive"; // now give back exactly 2 cards of your choice
+      return state;
+    }
+
+    case "forcedTradeGiveBack": {
+      require(state.phase === "forcedTradeGive", "no forced trade to resolve");
+      const cards = action.cards;
+      require(bagTotal(cards) === 2, "give back exactly 2 cards");
+      require(canAfford(me, cards), "you do not hold those cards");
+      moveBag(me, otherHuman(state, me.id), cards);
+      state.phase = "main";
+      return state;
+    }
+
+    case "playTokenRobber": {
+      require(state.twoPlayerVariant, "trade tokens exist only in the 2-player game");
+      require(state.phase === "main", "trade tokens are spent during your main phase");
+      const desert = state.board.hexes.findIndex((h) => h.terrain === "desert");
+      require(desert >= 0, "no desert hex on this board");
+      require(state.board.robberHex !== desert, "the robber is already on the desert");
+      payTokens(state, me, tokenActionCost(state, me.id));
+      state.board.robberHex = desert; // move only — the official action has no steal
+      return state;
+    }
+
+    case "discardKnightForTokens": {
+      require(state.twoPlayerVariant, "trade tokens exist only in the 2-player game");
+      require(state.phase === "main", "trade tokens are handled during your main phase");
+      require(!state.knightDiscardedThisTurn, "only one knight may be discarded per turn");
+      const card = me.devCards.find((c) => c.type === "knight" && c.played);
+      require(card !== undefined, "no face-up knight card to discard");
+      me.devCards.splice(me.devCards.indexOf(card), 1);
+      me.knightsPlayed--;
+      state.knightDiscardedThisTurn = true;
+      const take = Math.min(2, state.tokenSupply);
+      me.tradeTokens += take;
+      state.tokenSupply -= take;
+      updateLargestArmy(state); // may set Largest Army aside (or hand it to the opponent)
       return state;
     }
 
@@ -925,6 +1186,8 @@ export interface PlayerView {
   devCards?: DevCard[]; // viewer only (full detail, incl. hidden cards)
   devCardCount: number; // total dev cards held
   playedVictoryPointCount?: number; // viewer only
+  tradeTokens: number; // public (physical tokens sit on the table)
+  neutral: boolean; // 2p variant neutral player
 }
 
 export interface GameView {
@@ -942,6 +1205,13 @@ export interface GameView {
   winner: PlayerId | null;
   pendingTrade: PendingTrade | null;
   pendingDiscards: Record<PlayerId, number>;
+  // "CATAN for Two" variant (inert defaults outside it)
+  twoPlayerVariant: boolean;
+  neutralPlayerIds: PlayerId[];
+  tokenSupply: number;
+  rollsThisTurn: number;
+  firstDice: [number, number] | null;
+  pendingNeutralBuilds: number;
 }
 
 /** Public VP = buildings + awards (NOT hidden VP cards), what opponents can see. */
@@ -965,6 +1235,8 @@ export function viewForPlayer(state: GameState, viewer: PlayerId): GameView {
       victoryPointsPublic: publicVictoryPoints(s, p.id),
       playedDevCards: p.devCards.filter((c) => c.played),
       devCardCount: p.devCards.length,
+      tradeTokens: p.tradeTokens,
+      neutral: isNeutral(s, p.id),
     };
     if (p.id === viewer) {
       base.hand = p.hand;
@@ -988,6 +1260,12 @@ export function viewForPlayer(state: GameState, viewer: PlayerId): GameView {
     winner: s.winner,
     pendingTrade: s.pendingTrade,
     pendingDiscards: s.pendingDiscards,
+    twoPlayerVariant: s.twoPlayerVariant,
+    neutralPlayerIds: s.neutralPlayerIds,
+    tokenSupply: s.tokenSupply,
+    rollsThisTurn: s.rollsThisTurn,
+    firstDice: s.firstDice,
+    pendingNeutralBuilds: s.pendingNeutralBuilds,
   };
 }
 
@@ -1019,4 +1297,4 @@ export function actionsFromLog(state: GameState): Action[] {
 
 // Re-exports for callers/tests (satisfiesDistanceRule, STANDARD_HEX_COORDS and
 // friends come straight from geometry.js via the barrel).
-export { mulberry32, shuffle, handCount, updateLongestRoad };
+export { mulberry32, shuffle, handCount, updateLongestRoad, actingId, isNeutral, tokenActionCost };

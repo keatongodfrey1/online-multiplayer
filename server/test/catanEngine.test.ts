@@ -16,6 +16,7 @@ const {
   getValidSettlements,
   getValidCities,
   spiralHexOrder,
+  defaultNeutralSetupVertices,
   createInitialGameState,
   reduce,
   tryReduce,
@@ -27,10 +28,14 @@ const {
   replay,
   actionsFromLog,
   updateLongestRoad,
+  actingId,
   emptyBag,
   RESOURCES,
   WINNING_VP,
   SPIRAL_NUMBER_SEQUENCE,
+  TWO_PLAYER_TOKEN_SUPPLY,
+  GreedyPolicy,
+  RandomPolicy,
 } = CatanEngine;
 type GameState = CatanEngine.GameState;
 type BoardState = CatanEngine.BoardState;
@@ -938,5 +943,711 @@ describe("catan engine: property test (random legal playouts)", function () {
       if (s.phase === "gameOver") finished++;
     }
     assert.ok(finished > 0, "at least some random games reach a natural win");
+  });
+});
+
+// =============================================================================
+// "CATAN for Two" — the official 2-player variant
+// =============================================================================
+
+/** Variant game with setup driven to completion (first legal options). */
+function setup2p(seed: number, extra: Partial<CatanEngine.NewGameOptions> = {}): GameState {
+  let s: GameState = createInitialGameState(geo, {
+    numPlayers: 2,
+    seed,
+    numbers: "balanced",
+    twoPlayerVariant: true,
+    ...extra,
+  });
+  let guard = 0;
+  while ((s.phase === "setupSettlement" || s.phase === "setupRoad") && guard++ < 60) {
+    if (s.phase === "setupSettlement") {
+      s = reduce(geo, s, { type: "placeSetupSettlement", vertex: getValidInitialSettlements(geo, s.board)[0]! });
+    } else {
+      s = reduce(geo, s, {
+        type: "placeSetupRoad",
+        edge: getValidRoads(geo, s.board, s.currentPlayer, { setupVertex: s.lastSettlementVertex! })[0]!,
+      });
+    }
+  }
+  return s;
+}
+
+/** Complete the variant's double roll with two non-7, different sums. */
+function to2pMain(s: GameState): GameState {
+  s = reduce(geo, s, { type: "rollDice", dice: [2, 3] }, TRUST); // 5 -> back to preRoll
+  return reduce(geo, s, { type: "rollDice", dice: [3, 3] }, TRUST); // 6 -> main
+}
+
+describe("catan engine: CATAN for Two — setup & neutrals", () => {
+  it("gates the player counts: 2 needs the variant, the variant needs exactly 2", () => {
+    assert.throws(() => createInitialGameState(geo, { numPlayers: 2 }));
+    assert.throws(() => createInitialGameState(geo, { numPlayers: 3, twoPlayerVariant: true }));
+    const s = createInitialGameState(geo, { numPlayers: 2, twoPlayerVariant: true, seed: 1 });
+    assert.equal(s.players.length, 4, "2 humans + 2 neutral piece sets");
+    assert.deepEqual(s.neutralPlayerIds, [2, 3]);
+  });
+
+  it("neutrals start with 1 settlement each (no road) on the symmetric default vertices", () => {
+    const s = createInitialGameState(geo, { numPlayers: 2, twoPlayerVariant: true, seed: 2 });
+    const [vA, vB] = defaultNeutralSetupVertices(geo);
+    assert.equal(s.board.vertices[vA]!.building?.owner, 2);
+    assert.equal(s.board.vertices[vB]!.building?.owner, 3);
+    assert.equal(s.board.vertices[vA]!.building?.type, "settlement");
+    assert.equal(s.players[2]!.piecesLeft.settlements, 4);
+    assert.equal(s.players[3]!.piecesLeft.settlements, 4);
+    assert.equal(s.board.edges.filter((e) => e.road).length, 0, "no neutral roads");
+    // the default spots are interior, point-symmetric, and mutually distant
+    const a = geo.vertices[vA]!;
+    const b = geo.vertices[vB]!;
+    assert.equal(a.hexes.length, 3);
+    assert.equal(b.hexes.length, 3);
+    assert.ok(Math.abs(a.point.x + b.point.x) < 1e-6 && Math.abs(a.point.y + b.point.y) < 1e-6);
+  });
+
+  it("neutral settlements block the distance rule for humans", () => {
+    const s = createInitialGameState(geo, { numPlayers: 2, twoPlayerVariant: true, seed: 3 });
+    const [vA] = defaultNeutralSetupVertices(geo);
+    const valid = getValidInitialSettlements(geo, s.board);
+    assert.ok(!valid.includes(vA), "occupied vertex is invalid");
+    for (const n of geo.vertices[vA]!.neighbors) assert.ok(!valid.includes(n), `neighbor ${n} must be blocked`);
+  });
+
+  it("humans start with 5 trade tokens each; the supply holds the other 10", () => {
+    const s = createInitialGameState(geo, { numPlayers: 2, twoPlayerVariant: true, seed: 4 });
+    assert.equal(s.players[0]!.tradeTokens, 5);
+    assert.equal(s.players[1]!.tradeTokens, 5);
+    assert.equal(s.players[2]!.tradeTokens, 0);
+    assert.equal(s.tokenSupply, TWO_PLAYER_TOKEN_SUPPLY - 10);
+  });
+
+  it("setup settlements earn tokens: coast +1, desert +2, both +3 (supply-capped)", () => {
+    // white-box the terrain so the awards are deterministic, then drive setup
+    const base = createInitialGameState(geo, { numPlayers: 2, twoPlayerVariant: true, seed: 5 });
+    base.board.hexes.forEach((h) => {
+      h.terrain = "fields";
+      h.numberToken = 5;
+    });
+    const tip = (cube: { x: number; y: number; z: number }) => {
+      const hex = geo.hexes.find((h) => h.cube.x === cube.x && h.cube.y === cube.y && h.cube.z === cube.z)!;
+      return { hex, vertex: hex.vertices.find((v) => geo.vertices[v]!.hexes.length === 1)! };
+    };
+    // a desert tip hex -> its lone-corner vertex is coastal AND desert-adjacent
+    const desertTip = tip({ x: 2, y: -2, z: 0 });
+    base.board.hexes[desertTip.hex.id]!.terrain = "desert";
+    base.board.hexes[desertTip.hex.id]!.numberToken = null;
+    // a plain tip on the far side stays "fields" -> coastal only
+    const plainTip = tip({ x: -2, y: 2, z: 0 });
+
+    // P0 settles the desert+coast tip: +3
+    let s = reduce(geo, base, { type: "placeSetupSettlement", vertex: desertTip.vertex });
+    assert.equal(s.players[0]!.tradeTokens, 8);
+    assert.equal(s.tokenSupply, 7);
+    s = reduce(geo, s, {
+      type: "placeSetupRoad",
+      edge: getValidRoads(geo, s.board, 0, { setupVertex: desertTip.vertex })[0]!,
+    });
+    // P1 settles the plain coastal tip: +1
+    s = reduce(geo, s, { type: "placeSetupSettlement", vertex: plainTip.vertex });
+    assert.equal(s.players[1]!.tradeTokens, 6);
+    // P1 again (snake): an interior, non-desert vertex: +0
+    s = reduce(geo, s, {
+      type: "placeSetupRoad",
+      edge: getValidRoads(geo, s.board, 1, { setupVertex: plainTip.vertex })[0]!,
+    });
+    const interior = getValidInitialSettlements(geo, s.board).find(
+      (v) => geo.vertices[v]!.hexes.length === 3 && geo.vertices[v]!.hexes.every((h) => s.board.hexes[h]!.terrain !== "desert"),
+    )!;
+    s = reduce(geo, s, { type: "placeSetupSettlement", vertex: interior });
+    assert.equal(s.players[1]!.tradeTokens, 6, "interior non-desert vertex earns nothing");
+
+    // supply cap: drain the supply, then settle another desert+coast tip
+    s = reduce(geo, s, { type: "placeSetupRoad", edge: getValidRoads(geo, s.board, 1, { setupVertex: interior })[0]! });
+    s.tokenSupply = 1;
+    const desertTip2 = tip({ x: 0, y: -2, z: 2 });
+    s.board.hexes[desertTip2.hex.id]!.terrain = "desert";
+    s.board.hexes[desertTip2.hex.id]!.numberToken = null;
+    s = reduce(geo, s, { type: "placeSetupSettlement", vertex: desertTip2.vertex });
+    assert.equal(s.players[0]!.tradeTokens, 8 + 1, "+3 owed but only 1 token left in the supply");
+    assert.equal(s.tokenSupply, 0);
+  });
+});
+
+describe("catan engine: CATAN for Two — double roll", () => {
+  it("rolls twice per turn; the second result must differ; production resolves each roll", () => {
+    let s = setup2p(6);
+    assert.equal(s.phase, "preRoll");
+    s = reduce(geo, s, { type: "rollDice", dice: [2, 3] }, TRUST); // 5
+    assert.equal(s.phase, "preRoll", "back for the second roll");
+    assert.equal(s.rollsThisTurn, 1);
+    assert.deepEqual(s.firstDice, [2, 3]);
+    assert.throws(() => reduce(geo, s, { type: "rollDice", dice: [4, 1] }, TRUST), /differ/, "same sum (5) rejected");
+    s = reduce(geo, s, { type: "rollDice", dice: [3, 3] }, TRUST); // 6
+    assert.equal(s.phase, "main");
+    assert.equal(s.rollsThisTurn, 2);
+    assert.throws(() => reduce(geo, s, { type: "rollDice", dice: [2, 2] }, TRUST), /start of your turn/, "no third roll");
+    // turn rotation skips the neutral seats entirely
+    s = reduce(geo, s, { type: "endTurn" });
+    assert.equal(s.currentPlayer, 1);
+    s = to2pMain(s);
+    s = reduce(geo, s, { type: "endTurn" });
+    assert.equal(s.currentPlayer, 0);
+  });
+
+  it("a 7 on the first roll resolves the whole robber flow, then returns for roll #2", () => {
+    let s = setup2p(7);
+    s.players[0]!.hand = { ...emptyBag(), wool: 4, grain: 4 }; // 8 cards -> owes 4 on a 7
+    s = reduce(geo, s, { type: "rollDice", dice: [3, 4] }, TRUST); // 7 on roll #1
+    assert.equal(s.phase, "discard");
+    s = reduce(geo, s, { type: "discard", player: 0, cards: { wool: 2, grain: 2 } });
+    assert.equal(s.phase, "moveRobber");
+    s = reduce(geo, s, { type: "moveRobber", hex: geo.hexes.find((h) => h.id !== s.board.robberHex)!.id });
+    if (s.phase === "steal") s = reduce(geo, s, { type: "steal", target: getStealTargets(s, geo)[0] ?? null });
+    assert.equal(s.phase, "preRoll", "after the robber, the SECOND roll is still owed");
+    assert.equal(s.rollsThisTurn, 1);
+    s = reduce(geo, s, { type: "rollDice", dice: [2, 2] }, TRUST); // differs from 7
+    assert.equal(s.phase, "main");
+  });
+
+  it("a knight may be played between the two rolls", () => {
+    let s = setup2p(8);
+    s.players[0]!.devCards.push({ type: "knight", boughtThisTurn: false, played: false });
+    s = reduce(geo, s, { type: "rollDice", dice: [2, 3] }, TRUST); // roll #1
+    s = reduce(geo, s, { type: "playKnight" });
+    assert.equal(s.phase, "moveRobber");
+    s = reduce(geo, s, { type: "moveRobber", hex: geo.hexes.find((h) => h.id !== s.board.robberHex)!.id });
+    if (s.phase === "steal") s = reduce(geo, s, { type: "steal", target: getStealTargets(s, geo)[0] ?? null });
+    assert.equal(s.phase, "preRoll", "knight resolved between the rolls");
+    s = reduce(geo, s, { type: "rollDice", dice: [3, 3] }, TRUST);
+    assert.equal(s.phase, "main");
+  });
+
+  it("untrusted second rolls re-roll until the sum differs", () => {
+    for (let seed = 50; seed < 70; seed++) {
+      let s = setup2p(seed);
+      s = reduce(geo, s, { type: "rollDice" });
+      // resolve a possible 7 (hands are tiny after setup; no discards possible)
+      if (s.phase === "moveRobber") {
+        s = reduce(geo, s, { type: "moveRobber", hex: geo.hexes.find((h) => h.id !== s.board.robberHex)!.id });
+        if (s.phase === "steal") s = reduce(geo, s, { type: "steal", target: getStealTargets(s, geo)[0] ?? null });
+      }
+      const first = s.firstDice![0] + s.firstDice![1];
+      s = reduce(geo, s, { type: "rollDice" });
+      if (s.phase === "moveRobber") {
+        s = reduce(geo, s, { type: "moveRobber", hex: geo.hexes.find((h) => h.id !== s.board.robberHex)!.id });
+        if (s.phase === "steal") s = reduce(geo, s, { type: "steal", target: getStealTargets(s, geo)[0] ?? null });
+      }
+      const second = s.dice![0] + s.dice![1];
+      assert.notEqual(second, first, `seed ${seed}: second roll repeated the first`);
+    }
+  });
+});
+
+describe("catan engine: CATAN for Two — neutral build obligation", () => {
+  it("a human road owes a neutral build; human actions wait until it is placed", () => {
+    let s = to2pMain(setup2p(9));
+    s.players[0]!.hand = { ...emptyBag(), lumber: 2, brick: 2 };
+    const myRoad = getValidRoads(geo, s.board, 0)[0]!;
+    s = reduce(geo, s, { type: "buildRoad", edge: myRoad });
+    assert.equal(s.phase, "neutralBuild");
+    assert.equal(s.pendingNeutralBuilds, 1);
+    assert.throws(() => reduce(geo, s, { type: "buildRoad", edge: getValidRoads(geo, s.board, 0)[0]! }), /neutral piece first/);
+    assert.throws(() => reduce(geo, s, { type: "endTurn" }));
+    // a fresh neutral has no roads -> no legal neutral settlement anywhere
+    assert.equal(getValidSettlements(geo, s.board, 2).length, 0);
+    assert.equal(
+      tryReduce(geo, s, { type: "buildNeutral", neutralId: 0, kind: "settlement", vertex: 10 }).ok,
+      false,
+      "settlement with no neutral road network is illegal",
+    );
+    const nRoad = getValidRoads(geo, s.board, 2)[0]!;
+    s = reduce(geo, s, { type: "buildNeutral", neutralId: 0, kind: "road", edge: nRoad });
+    assert.equal(s.board.edges[nRoad]!.road?.owner, 2);
+    assert.equal(s.players[2]!.piecesLeft.roads, 14);
+    assert.equal(s.phase, "main");
+    assert.equal(s.pendingNeutralBuilds, 0);
+  });
+
+  it("a human settlement owes a neutral build too; cities and dev cards do not", () => {
+    let s = to2pMain(setup2p(10));
+    // city: no obligation
+    const myCity = getValidCities(s.board, 0)[0]!;
+    s.players[0]!.hand = { ...emptyBag(), ore: 3, grain: 2 };
+    s = reduce(geo, s, { type: "buildCity", vertex: myCity });
+    assert.equal(s.phase, "main", "a city build owes nothing");
+    // dev card: no obligation
+    s.players[0]!.hand = { ...emptyBag(), ore: 1, wool: 1, grain: 1 };
+    s = reduce(geo, s, { type: "buyDevCard" });
+    assert.equal(s.phase, "main", "a dev-card buy owes nothing");
+    // settlement: obligation
+    s.players[0]!.hand = { ...emptyBag(), lumber: 2, brick: 2, wool: 1, grain: 1 };
+    let road = getValidRoads(geo, s.board, 0)[0]!;
+    s = reduce(geo, s, { type: "buildRoad", edge: road });
+    s = reduce(geo, s, { type: "buildNeutral", neutralId: 1, kind: "road", edge: getValidRoads(geo, s.board, 3)[0]! });
+    const spot = getValidSettlements(geo, s.board, 0)[0];
+    if (spot !== undefined) {
+      s = reduce(geo, s, { type: "buildSettlement", vertex: spot });
+      assert.equal(s.phase, "neutralBuild", "a settlement build owes a neutral build");
+    }
+  });
+
+  it("Road Building's two free roads owe two neutral builds, resolved one at a time", () => {
+    let s = to2pMain(setup2p(11));
+    s.players[0]!.devCards.push({ type: "roadBuilding", boughtThisTurn: false, played: false });
+    s = reduce(geo, s, { type: "playRoadBuilding" });
+    assert.equal(s.freeRoads, 2);
+    s = reduce(geo, s, { type: "buildRoad", edge: getValidRoads(geo, s.board, 0)[0]! });
+    assert.equal(s.phase, "neutralBuild");
+    s = reduce(geo, s, { type: "buildNeutral", neutralId: 0, kind: "road", edge: getValidRoads(geo, s.board, 2)[0]! });
+    assert.equal(s.phase, "main");
+    assert.equal(s.freeRoads, 1);
+    s = reduce(geo, s, { type: "buildRoad", edge: getValidRoads(geo, s.board, 0)[0]! });
+    assert.equal(s.phase, "neutralBuild");
+    s = reduce(geo, s, { type: "buildNeutral", neutralId: 1, kind: "road", edge: getValidRoads(geo, s.board, 3)[0]! });
+    assert.equal(s.phase, "main");
+    assert.equal(s.freeRoads, 0);
+  });
+
+  it("the obligation lapses when neither neutral has any legal placement", () => {
+    let s = to2pMain(setup2p(12));
+    s.players[2]!.piecesLeft = { roads: 0, settlements: 0, cities: 0 };
+    s.players[3]!.piecesLeft = { roads: 0, settlements: 0, cities: 0 };
+    s.players[0]!.hand = { ...emptyBag(), lumber: 1, brick: 1 };
+    s = reduce(geo, s, { type: "buildRoad", edge: getValidRoads(geo, s.board, 0)[0]! });
+    assert.equal(s.phase, "main", "no neutral options -> play continues");
+    assert.equal(s.pendingNeutralBuilds, 0);
+  });
+
+  it("a neutral can take Longest Road (denying the humans)", () => {
+    const s = to2pMain(setup2p(13));
+    // hand neutral 2 a 5-chain by the white-box route
+    const start = geo.vertices.find((v) => s.board.vertices[v.id]!.building?.owner === 2)!.id;
+    let cur = start;
+    const seen = new Set([cur]);
+    for (let i = 0; i < 5; i++) {
+      const step = geo.vertices[cur]!.edges
+        .map((eid) => {
+          const [a, b] = geo.edges[eid]!.vertices;
+          return { eid, w: a === cur ? b : a };
+        })
+        .find((o) => !seen.has(o.w) && !s.board.edges[o.eid]!.road && !s.board.vertices[o.w]!.building);
+      if (!step) break;
+      s.board.edges[step.eid]!.road = { owner: 2 };
+      seen.add(step.w);
+      cur = step.w;
+    }
+    updateLongestRoad(s, geo);
+    if (computeLongestRoadLength(geo, s.board, 2) >= 5) {
+      assert.equal(s.longestRoadHolder, 2, "the neutral holds Longest Road");
+      assert.ok(victoryPoints(s, 0) < 10 && s.winner === null);
+    }
+  });
+
+  it("neutrals never receive resources from production", () => {
+    let s = setup2p(14);
+    // give neutral 2's settlement hex a known token and roll it
+    const nVertex = s.board.vertices.findIndex((v) => v.building?.owner === 2);
+    const hex = geo.vertices[nVertex]!.hexes[0]!;
+    s.board.hexes[hex]!.terrain = "forest";
+    s.board.hexes[hex]!.numberToken = 4;
+    if (s.board.robberHex === hex) s.board.robberHex = geo.hexes.find((h) => h.id !== hex)!.id;
+    s = reduce(geo, s, { type: "rollDice", dice: [2, 2] }, TRUST); // 4
+    assert.ok(RESOURCES.every((r) => s.players[2]!.hand[r] === 0), "neutral hand stays empty");
+    assert.ok(RESOURCES.every((r) => s.players[3]!.hand[r] === 0));
+  });
+});
+
+describe("catan engine: CATAN for Two — trade tokens", () => {
+  it("forced trade: pay 1 when not ahead, draw 2 random cards, give exactly 2 back", () => {
+    let s = to2pMain(setup2p(15));
+    s.players[0]!.tradeTokens = 5; // setup coast/desert earnings vary by seed; normalize
+    s.players[1]!.tradeTokens = 5;
+    s.players[0]!.hand = { ...emptyBag(), wool: 2 };
+    s.players[1]!.hand = { ...emptyBag(), ore: 3 };
+    const supply = s.tokenSupply;
+    s = reduce(geo, s, { type: "playForcedTrade" });
+    assert.equal(s.players[0]!.tradeTokens, 4, "equal public VP -> costs 1");
+    assert.equal(s.tokenSupply, supply + 1);
+    assert.equal(s.phase, "forcedTradeGive");
+    assert.equal(s.players[0]!.hand.ore, 2, "drew 2 of the opponent's only resource");
+    assert.equal(s.players[1]!.hand.ore, 1);
+    assert.throws(() => reduce(geo, s, { type: "forcedTradeGiveBack", cards: { wool: 1 } }), /exactly 2/);
+    assert.throws(() => reduce(geo, s, { type: "endTurn" }), /main phase/);
+    s = reduce(geo, s, { type: "forcedTradeGiveBack", cards: { wool: 2 } });
+    assert.equal(s.phase, "main");
+    assert.equal(s.players[1]!.hand.wool, 2);
+    assert.equal(CatanEngine.handCount(s.players[0]!), 2, "net hand size unchanged (took 2, gave 2)");
+  });
+
+  it("forced trade edges: 1-card opponent still costs you 2 back; 0-card opponent is illegal", () => {
+    let s = to2pMain(setup2p(16));
+    s.players[0]!.hand = { ...emptyBag(), wool: 3 };
+    s.players[1]!.hand = { ...emptyBag(), brick: 1 };
+    s = reduce(geo, s, { type: "playForcedTrade" });
+    assert.equal(s.players[0]!.hand.brick, 1, "took the single card");
+    s = reduce(geo, s, { type: "forcedTradeGiveBack", cards: { wool: 2 } });
+    assert.equal(CatanEngine.handCount(s.players[1]!), 2);
+
+    s.players[1]!.hand = emptyBag();
+    assert.equal(tryReduce(geo, s, { type: "playForcedTrade" }).ok, false, "no cards to take");
+
+    // 1 own card + the 1 taken = exactly 2 to give back -> still legal
+    s.players[0]!.hand = { ...emptyBag(), wool: 1 };
+    s.players[1]!.hand = { ...emptyBag(), ore: 1 };
+    s.players[0]!.tradeTokens = 5;
+    assert.equal(tryReduce(geo, s, { type: "playForcedTrade" }).ok, true);
+
+    // but with NO cards of your own against a 1-card opponent you cannot give 2
+    s.players[0]!.hand = emptyBag();
+    assert.equal(tryReduce(geo, s, { type: "playForcedTrade" }).ok, false);
+  });
+
+  it("token actions cost 2 once you lead on public VP; hidden VP cards do not count", () => {
+    let s = to2pMain(setup2p(17));
+    s.players[0]!.tradeTokens = 5; // normalize away seed-dependent setup earnings
+    s.players[1]!.tradeTokens = 5;
+    // P0 leads publicly (extra settlement white-boxed in)
+    const spot = getValidInitialSettlements(geo, s.board)[0]!;
+    s.board.vertices[spot]!.building = { owner: 0, type: "settlement" };
+    s.players[0]!.hand = { ...emptyBag(), wool: 2 };
+    s.players[1]!.hand = { ...emptyBag(), ore: 2 };
+    // hidden VP cards for P1 do NOT change the comparison
+    s.players[1]!.devCards.push({ type: "victoryPoint", boughtThisTurn: false, played: false });
+    s.players[1]!.devCards.push({ type: "victoryPoint", boughtThisTurn: false, played: false });
+    s = reduce(geo, s, { type: "playForcedTrade" });
+    assert.equal(s.players[0]!.tradeTokens, 3, "ahead on public VP -> costs 2");
+    s = reduce(geo, s, { type: "forcedTradeGiveBack", cards: { wool: 2 } });
+
+    // tokens run out -> the action is rejected
+    s.players[0]!.tradeTokens = 1;
+    assert.equal(tryReduce(geo, s, { type: "playForcedTrade" }).ok, false, "cannot afford the 2-token price");
+  });
+
+  it("the token robber goes to the desert only, with no steal", () => {
+    let s = to2pMain(setup2p(18));
+    s.players[0]!.tradeTokens = 5; // normalize away seed-dependent setup earnings
+    s.players[1]!.tradeTokens = 5;
+    const desert = s.board.hexes.findIndex((h) => h.terrain === "desert");
+    assert.equal(s.board.robberHex, desert, "robber starts on the desert");
+    assert.equal(tryReduce(geo, s, { type: "playTokenRobber" }).ok, false, "already there -> useless, rejected");
+    s.board.robberHex = geo.hexes.find((h) => h.id !== desert)!.id;
+    s.players[1]!.hand = { ...emptyBag(), ore: 2 };
+    const before = { ...s.players[0]!.hand };
+    s = reduce(geo, s, { type: "playTokenRobber" });
+    assert.equal(s.board.robberHex, desert);
+    assert.equal(s.players[0]!.tradeTokens, 4);
+    assert.deepEqual(s.players[0]!.hand, before, "no steal happened");
+    assert.equal(s.phase, "main");
+  });
+
+  it("discarding a face-up knight pays 2 tokens, once per turn, and can set Largest Army aside", () => {
+    let s = to2pMain(setup2p(19));
+    s.players[0]!.tradeTokens = 5; // normalize away seed-dependent setup earnings
+    s.players[1]!.tradeTokens = 5;
+    const knight = () => ({ type: "knight" as const, boughtThisTurn: false, played: true });
+    s.players[0]!.devCards.push(knight(), knight(), knight());
+    s.players[0]!.knightsPlayed = 3;
+    s.largestArmyHolder = 0;
+    const supply = s.tokenSupply;
+
+    s = reduce(geo, s, { type: "discardKnightForTokens" });
+    assert.equal(s.players[0]!.knightsPlayed, 2);
+    assert.equal(s.players[0]!.tradeTokens, 7);
+    assert.equal(s.tokenSupply, supply - 2);
+    assert.equal(s.largestArmyHolder, null, "dropping below 3 sets Largest Army aside");
+    assert.equal(tryReduce(geo, s, { type: "discardKnightForTokens" }).ok, false, "once per turn");
+
+    // opponent reaches 3 knights afterwards and claims the set-aside card
+    s.players[1]!.devCards.push({ type: "knight", boughtThisTurn: false, played: false });
+    s.players[1]!.knightsPlayed = 2;
+    s = reduce(geo, s, { type: "endTurn" });
+    s = to2pMain(s);
+    s = reduce(geo, s, { type: "playKnight" });
+    assert.equal(s.players[1]!.knightsPlayed, 3);
+    assert.equal(s.largestArmyHolder, 1, "the set-aside card is claimed by the new most-knights player");
+  });
+
+  it("knight discard with a higher-army opponent hands Largest Army straight over; ties keep it aside", () => {
+    let s = to2pMain(setup2p(20));
+    const played = () => ({ type: "knight" as const, boughtThisTurn: false, played: true });
+    // me 4 knights (holder), opp 3: discard -> tie at 3 -> I am among leaders -> I KEEP it
+    s.players[0]!.devCards.push(played(), played(), played(), played());
+    s.players[0]!.knightsPlayed = 4;
+    s.players[1]!.knightsPlayed = 3;
+    s.largestArmyHolder = 0;
+    s = reduce(geo, s, { type: "discardKnightForTokens" });
+    assert.equal(s.largestArmyHolder, 0, "holder keeps the card on a tie");
+    // next turn: discard again -> 2 vs 3 -> opponent is strictly most with >= 3
+    s = reduce(geo, s, { type: "endTurn" });
+    s = to2pMain(s);
+    s = reduce(geo, s, { type: "endTurn" });
+    s = to2pMain(s);
+    s = reduce(geo, s, { type: "discardKnightForTokens" });
+    assert.equal(s.players[0]!.knightsPlayed, 2);
+    assert.equal(s.largestArmyHolder, 1, "opponent with 3 takes the card immediately");
+  });
+});
+
+// =============================================================================
+// Policies (the bot/ghost brains the room will use)
+// =============================================================================
+
+describe("catan engine: policies", function () {
+  this.timeout(120000);
+
+  /** Whose decision is it right now (first owing seat during discards)? */
+  function actingSeat(s: GameState): number {
+    if (s.phase === "discard") return +Object.keys(s.pendingDiscards)[0]!;
+    return actingId(s);
+  }
+
+  function checkInvariants(s: GameState, where: string): void {
+    for (const r of RESOURCES) {
+      let total = s.bank[r];
+      for (const p of s.players) total += p.hand[r];
+      assert.equal(total, 19, `[${where}] conservation broken for ${r}`);
+    }
+    if (s.twoPlayerVariant) {
+      const tokens = s.players.reduce((t, p) => t + p.tradeTokens, 0) + s.tokenSupply;
+      assert.equal(tokens, TWO_PLAYER_TOKEN_SUPPLY, `[${where}] token conservation broken`);
+      for (const nid of s.neutralPlayerIds) {
+        assert.ok(RESOURCES.every((r) => s.players[nid]!.hand[r] === 0), `[${where}] neutral hand not empty`);
+        assert.equal(s.players[nid]!.tradeTokens, 0, `[${where}] neutral holds tokens`);
+      }
+    }
+    if (s.phase !== "gameOver") {
+      for (const p of s.players) {
+        if (s.neutralPlayerIds.includes(p.id)) continue;
+        assert.ok(victoryPoints(s, p.id) < WINNING_VP, `[${where}] missed win for p${p.id}`);
+      }
+    }
+  }
+
+  it("greedy bots finish full 3p and 4p games within bounds", () => {
+    for (const [numPlayers, seed] of [[3, 101], [4, 102], [3, 103], [4, 104]] as const) {
+      let s = createInitialGameState(geo, { numPlayers, seed, numbers: "spiral" });
+      const bots = Array.from({ length: numPlayers }, (_, i) => new GreedyPolicy(seed ^ (i * 0x9e3779b9)));
+      let steps = 0;
+      while (s.phase !== "gameOver" && steps++ < 4000) {
+        const seat = actingSeat(s);
+        s = reduce(geo, s, bots[seat]!.act(geo, s, seat));
+        if (steps % 25 === 0) checkInvariants(s, `greedy-${numPlayers}p-${seed}`);
+      }
+      assert.equal(s.phase, "gameOver", `greedy ${numPlayers}p game (seed ${seed}) must reach a win, took ${steps} steps`);
+      assert.ok(s.winner !== null && victoryPoints(s, s.winner) >= WINNING_VP);
+      checkInvariants(s, "greedy-final");
+    }
+  });
+
+  it("greedy bots finish a full 2-player variant game (neutral builds, double rolls, tokens)", () => {
+    for (const seed of [201, 202, 203]) {
+      let s = createInitialGameState(geo, { numPlayers: 2, seed, numbers: "spiral", twoPlayerVariant: true });
+      const bots = [new GreedyPolicy(seed), new GreedyPolicy(seed ^ 0x55aa55aa)];
+      let steps = 0;
+      while (s.phase !== "gameOver" && steps++ < 6000) {
+        const seat = actingSeat(s);
+        assert.ok(!s.neutralPlayerIds.includes(seat), "a neutral seat must never be asked to act");
+        s = reduce(geo, s, bots[seat]!.act(geo, s, seat));
+        if (steps % 25 === 0) checkInvariants(s, `greedy-2p-${seed}`);
+      }
+      assert.equal(s.phase, "gameOver", `greedy 2p game (seed ${seed}) must reach a win, took ${steps} steps`);
+      assert.ok(s.winner === 0 || s.winner === 1, "only a human can win");
+      checkInvariants(s, "greedy-2p-final");
+    }
+  });
+
+  it("the random ghost keeps any seat alive without ever making an illegal move", () => {
+    // one greedy seat (so the game progresses) + two random ghosts
+    let s = createInitialGameState(geo, { numPlayers: 3, seed: 301, numbers: "balanced" });
+    const brains: Policy[] = [new GreedyPolicy(301), new RandomPolicy(302), new RandomPolicy(303)];
+    let steps = 0;
+    while (s.phase !== "gameOver" && steps++ < 1500) {
+      const seat = actingSeat(s);
+      const out = tryReduce(geo, s, brains[seat]!.act(geo, s, seat));
+      assert.ok(out.ok, `policy produced an illegal action at step ${steps}: ${out.ok === false ? out.error : ""}`);
+      s = out.state;
+    }
+    checkInvariants(s, "ghost-mixed");
+
+    // and in the 2p variant (ghost must handle neutralBuild + forcedTradeGive forms)
+    let v = createInitialGameState(geo, { numPlayers: 2, seed: 304, numbers: "balanced", twoPlayerVariant: true });
+    const vb: Policy[] = [new GreedyPolicy(305), new RandomPolicy(306)];
+    steps = 0;
+    while (v.phase !== "gameOver" && steps++ < 2500) {
+      const seat = actingSeat(v);
+      const out = tryReduce(geo, v, vb[seat]!.act(geo, v, seat));
+      assert.ok(out.ok, `2p policy illegal action at step ${steps}: ${out.ok === false ? out.error : ""}`);
+      v = out.state;
+    }
+    checkInvariants(v, "ghost-2p");
+  });
+});
+
+type Policy = CatanEngine.Policy;
+
+// =============================================================================
+describe("catan engine: CATAN for Two — property test", function () {
+  this.timeout(120000);
+
+  it("40 randomized variant games keep every invariant (resources, tokens, neutrals, wins)", () => {
+    const mulberry = (a: number) => () => {
+      a |= 0;
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+
+    function invariants(s: GameState, where: string): void {
+      for (const r of RESOURCES) {
+        let total = s.bank[r];
+        for (const p of s.players) total += p.hand[r];
+        assert.equal(total, 19, `[${where}] conservation ${r}`);
+        assert.ok(s.bank[r] >= 0, `[${where}] negative bank`);
+      }
+      const tokens = s.players.reduce((t, p) => t + p.tradeTokens, 0) + s.tokenSupply;
+      assert.equal(tokens, TWO_PLAYER_TOKEN_SUPPLY, `[${where}] token conservation`);
+      for (const p of s.players) {
+        assert.ok(RESOURCES.every((r) => p.hand[r] >= 0), `[${where}] negative hand`);
+        assert.ok(p.tradeTokens >= 0, `[${where}] negative tokens`);
+        assert.ok(
+          p.piecesLeft.roads >= 0 && p.piecesLeft.settlements >= 0 && p.piecesLeft.cities >= 0,
+          `[${where}] negative pieces`,
+        );
+      }
+      for (const nid of s.neutralPlayerIds) {
+        assert.ok(RESOURCES.every((r) => s.players[nid]!.hand[r] === 0), `[${where}] neutral got resources`);
+        assert.equal(s.players[nid]!.devCards.length, 0, `[${where}] neutral got dev cards`);
+      }
+      if (s.phase !== "gameOver") {
+        for (const id of [0, 1]) assert.ok(victoryPoints(s, id) < WINNING_VP, `[${where}] missed win p${id}`);
+      } else {
+        assert.ok(s.winner === 0 || s.winner === 1, `[${where}] non-human winner`);
+      }
+    }
+
+    for (let seed = 1; seed <= 40; seed++) {
+      const rng = mulberry(seed * 0x85ebca6b);
+      let s: GameState = createInitialGameState(geo, { numPlayers: 2, seed, numbers: "balanced", twoPlayerVariant: true });
+      let g = 0;
+      while ((s.phase === "setupSettlement" || s.phase === "setupRoad") && g++ < 60) {
+        if (s.phase === "setupSettlement") {
+          const opts = getValidInitialSettlements(geo, s.board);
+          s = reduce(geo, s, { type: "placeSetupSettlement", vertex: opts[Math.floor(rng() * opts.length)]! });
+        } else {
+          const opts = getValidRoads(geo, s.board, s.currentPlayer, { setupVertex: s.lastSettlementVertex! });
+          s = reduce(geo, s, { type: "placeSetupRoad", edge: opts[Math.floor(rng() * opts.length)]! });
+        }
+      }
+
+      let step = 0;
+      while (s.phase !== "gameOver" && step++ < 800) {
+        invariants(s, `seed${seed}@${step}`);
+        const seat = s.phase === "discard" ? +Object.keys(s.pendingDiscards)[0]! : actingId(s);
+        const me = s.players[seat]!;
+        const afford = (c: Partial<Record<Resource, number>>) => RESOURCES.every((r) => me.hand[r] >= (c[r] ?? 0));
+        const playable = (t: string) => me.devCards.some((c) => c.type === t && !c.played && !c.boughtThisTurn);
+        const x = rng();
+
+        switch (s.phase) {
+          case "preRoll":
+            if (x < 0.1 && playable("knight") && !s.devCardPlayedThisTurn) s = reduce(geo, s, { type: "playKnight" });
+            else s = reduce(geo, s, { type: "rollDice" });
+            break;
+          case "discard": {
+            const owed = s.pendingDiscards[seat]!;
+            const cards: Partial<Record<Resource, number>> = {};
+            let need = owed;
+            for (const r of RESOURCES)
+              while (me.hand[r] - (cards[r] ?? 0) > 0 && need > 0) {
+                cards[r] = (cards[r] ?? 0) + 1;
+                need--;
+              }
+            s = reduce(geo, s, { type: "discard", player: seat, cards });
+            break;
+          }
+          case "moveRobber": {
+            const hexes = geo.hexes.filter((h) => h.id !== s.board.robberHex);
+            s = reduce(geo, s, { type: "moveRobber", hex: hexes[Math.floor(rng() * hexes.length)]!.id });
+            break;
+          }
+          case "steal": {
+            const targets = getStealTargets(s, geo);
+            s = reduce(geo, s, { type: "steal", target: targets[Math.floor(rng() * targets.length)] ?? null });
+            break;
+          }
+          case "neutralBuild": {
+            const options: Array<{ n: 0 | 1; kind: "road" | "settlement"; id: number }> = [];
+            s.neutralPlayerIds.forEach((nid, i) => {
+              const np = s.players[nid]!;
+              if (np.piecesLeft.roads > 0)
+                for (const e of getValidRoads(geo, s.board, nid)) options.push({ n: i as 0 | 1, kind: "road", id: e });
+              if (np.piecesLeft.settlements > 0)
+                for (const vtx of getValidSettlements(geo, s.board, nid))
+                  options.push({ n: i as 0 | 1, kind: "settlement", id: vtx });
+            });
+            const o = options[Math.floor(rng() * options.length)]!;
+            s = reduce(
+              geo,
+              s,
+              o.kind === "road"
+                ? { type: "buildNeutral", neutralId: o.n, kind: "road", edge: o.id }
+                : { type: "buildNeutral", neutralId: o.n, kind: "settlement", vertex: o.id },
+            );
+            break;
+          }
+          case "forcedTradeGive": {
+            const cards: Partial<Record<Resource, number>> = {};
+            let need = 2;
+            for (const r of RESOURCES)
+              while (me.hand[r] - (cards[r] ?? 0) > 0 && need > 0) {
+                cards[r] = (cards[r] ?? 0) + 1;
+                need--;
+              }
+            s = reduce(geo, s, { type: "forcedTradeGiveBack", cards });
+            break;
+          }
+          case "main": {
+            const opp = s.players.find((p) => p.id !== seat && !s.neutralPlayerIds.includes(p.id))!;
+            const oppHand = RESOURCES.reduce((t, r) => t + opp.hand[r], 0);
+            const myHand = RESOURCES.reduce((t, r) => t + me.hand[r], 0);
+            const cost = CatanEngine.tokenActionCost(s, seat);
+            const cities = getValidCities(s.board, seat);
+            const setts = getValidSettlements(geo, s.board, seat);
+            const roads = getValidRoads(geo, s.board, seat);
+            if (s.freeRoads > 0) {
+              if (roads.length && me.piecesLeft.roads > 0) s = reduce(geo, s, { type: "buildRoad", edge: roads[0]! });
+              else s = reduce(geo, s, { type: "endTurn" });
+              break;
+            }
+            if (x < 0.08 && me.tradeTokens >= cost && oppHand >= 1 && myHand + Math.min(2, oppHand) >= 2) {
+              s = reduce(geo, s, { type: "playForcedTrade" });
+            } else if (x < 0.12 && me.tradeTokens >= cost && s.board.robberHex !== s.board.hexes.findIndex((h) => h.terrain === "desert") && s.board.hexes.some((h) => h.terrain === "desert")) {
+              s = reduce(geo, s, { type: "playTokenRobber" });
+            } else if (x < 0.16 && !s.knightDiscardedThisTurn && me.devCards.some((c) => c.type === "knight" && c.played)) {
+              s = reduce(geo, s, { type: "discardKnightForTokens" });
+            } else if (x < 0.22 && !s.devCardPlayedThisTurn && playable("knight")) {
+              s = reduce(geo, s, { type: "playKnight" });
+            } else if (x < 0.26 && !s.devCardPlayedThisTurn && playable("roadBuilding")) {
+              s = reduce(geo, s, { type: "playRoadBuilding" });
+            } else if (x < 0.45 && cities.length && afford({ ore: 3, grain: 2 }) && me.piecesLeft.cities > 0) {
+              s = reduce(geo, s, { type: "buildCity", vertex: cities[0]! });
+            } else if (x < 0.6 && setts.length && afford({ lumber: 1, brick: 1, wool: 1, grain: 1 }) && me.piecesLeft.settlements > 0) {
+              s = reduce(geo, s, { type: "buildSettlement", vertex: setts[0]! });
+            } else if (x < 0.75 && roads.length && afford({ lumber: 1, brick: 1 }) && me.piecesLeft.roads > 0) {
+              s = reduce(geo, s, { type: "buildRoad", edge: roads[0]! });
+            } else if (x < 0.85 && afford({ ore: 1, wool: 1, grain: 1 }) && s.devDeck.length) {
+              s = reduce(geo, s, { type: "buyDevCard" });
+            } else {
+              s = reduce(geo, s, { type: "endTurn" });
+            }
+            break;
+          }
+          default:
+            throw new Error(`unexpected phase ${s.phase}`);
+        }
+      }
+      invariants(s, `seed${seed}-final`);
+    }
   });
 });
