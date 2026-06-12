@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/splendor_data.schema.json",
+  "title": "Splendor game data",
+  "$comment": "Structural validation only. JSON Schema CANNOT express: unique card ids, the 40/30/20 tier split, the 8/6/4 per-color-per-tier counts, total prestige = 140, the exact noble shape (exactly two colors at 4, or exactly three at 3), or the official example card. Run tests/validate_data.py for those code-level checks in addition to this schema.",
+  "type": "object",
+  "required": ["meta", "cards", "nobles"],
+  "additionalProperties": false,
+  "$defs": {
+    "color": { "enum": ["white", "blue", "green", "red", "black"] },
+    "costVector": {
+      "type": "object",
+      "required": ["white", "blue", "green", "red", "black"],
+      "additionalProperties": false,
+      "properties": {
+        "white": { "type": "integer", "minimum": 0, "maximum": 7 },
+        "blue":  { "type": "integer", "minimum": 0, "maximum": 7 },
+        "green": { "type": "integer", "minimum": 0, "maximum": 7 },
+        "red":   { "type": "integer", "minimum": 0, "maximum": 7 },
+        "black": { "type": "integer", "minimum": 0, "maximum": 7 }
+      }
+    },
+    "nobleRequirement": {
+      "type": "object",
+      "required": ["white", "blue", "green", "red", "black"],
+      "additionalProperties": false,
+      "$comment": "Values restricted to {0,3,4}; the full 2x4-or-3x3 shape is checked in code.",
+      "properties": {
+        "white": { "type": "integer", "enum": [0, 3, 4] },
+        "blue":  { "type": "integer", "enum": [0, 3, 4] },
+        "green": { "type": "integer", "enum": [0, 3, 4] },
+        "red":   { "type": "integer", "enum": [0, 3, 4] },
+        "black": { "type": "integer", "enum": [0, 3, 4] }
+      }
+    }
+  },
+  "properties": {
+    "meta": { "type": "object" },
+    "cards": {
+      "type": "array",
+      "minItems": 90,
+      "maxItems": 90,
+      "items": {
+        "type": "object",
+        "required": ["id", "tier", "bonus", "points", "cost"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "integer", "minimum": 1, "maximum": 90 },
+          "tier": { "enum": [1, 2, 3] },
+          "bonus": { "$ref": "#/$defs/color" },
+          "points": { "type": "integer", "minimum": 0, "maximum": 5 },
+          "cost": { "$ref": "#/$defs/costVector" }
+        },
+        "allOf": [
+          { "if": { "properties": { "tier": { "const": 1 } } },
+            "then": { "properties": { "points": { "minimum": 0, "maximum": 1 } } } },
+          { "if": { "properties": { "tier": { "const": 2 } } },
+            "then": { "properties": { "points": { "minimum": 1, "maximum": 3 } } } },
+          { "if": { "properties": { "tier": { "const": 3 } } },
+            "then": { "properties": { "points": { "minimum": 3, "maximum": 5 } } } }
+        ]
+      }
+    },
+    "nobles": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "required": ["id", "points", "requirement"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "integer", "minimum": 1, "maximum": 10 },
+          "name": { "type": "string" },
+          "points": { "const": 3 },
+          "requirement": { "$ref": "#/$defs/nobleRequirement" }
+        }
+      }
+    }
+  }
+}

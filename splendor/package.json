@@ -1,0 +1,19 @@
+{
+  "name": "splendor-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Online multiplayer Splendor clone — monorepo (engine implemented; server + web to follow).",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -ws --if-present",
+    "test": "npm run test -ws --if-present",
+    "typecheck": "npm run typecheck -ws --if-present",
+    "gen:data": "npm run gen:data -ws --if-present"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "typescript": "^5.5.4"
+  }
+}
