@@ -703,6 +703,51 @@ button.spl-gem.selected {
   font-size: 0.8rem;
 }
 
+/*
+ * "Your turn" toast: a brief center-screen flash paired with the turn
+ * chime. pointer-events: none keeps the board clickable straight through
+ * it - nobody ever waits for it to clear. The animation runs once and
+ * ends invisible (no JS timer, no dismiss button).
+ */
+#spl-toast {
+  position: fixed;
+  top: 45%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 90; /* above the board, below the reconnect overlay (100) */
+  pointer-events: none;
+  opacity: 0;
+  background: rgba(31, 34, 48, 0.92);
+  border: 1px solid var(--accent);
+  border-radius: 14px;
+  padding: 14px 30px;
+  font-size: 1.5rem;
+  font-weight: 700;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+#spl-toast.show {
+  animation: spl-toast-pop 1.4s ease-out forwards;
+}
+
+@keyframes spl-toast-pop {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.85);
+  }
+  11% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  75% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
 /* Save slots in the lobby */
 .spl-saves {
   margin: 10px 0;
