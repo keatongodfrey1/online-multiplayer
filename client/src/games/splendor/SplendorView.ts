@@ -8,6 +8,7 @@ import type { Room } from "@colyseus/sdk";
 import {
   type BaseState,
   LobbyMsg,
+  Phase,
   SPLENDOR_TURN_MAX_SECONDS,
   SPLENDOR_TURN_STEP_SECONDS,
   SplendorEngine,
@@ -19,10 +20,15 @@ import {
 } from "@backbone/shared";
 import type { GameView, GameViewContext, LobbySettingsContext } from "../../framework/GameView.js";
 import { escapeHtml } from "../../lobby/HomeScreen.js";
+import { clockChime, isMuted, setMuted, turnChime } from "./sounds.js";
 
 const GEMS = ["white", "blue", "green", "red", "black"] as const;
 type Gem = (typeof GEMS)[number];
 type DiscardColor = Gem | "gold";
+
+function totalTokensOf(seat: SplendorSeat): number {
+  return GEMS.reduce((sum, g) => sum + seat.gems[g], seat.gold);
+}
 
 /** Bridge a schema card to the engine type for the affordability helper. */
 function toEngineCard(c: SplendorCard): SplendorEngine.Card {
@@ -55,6 +61,13 @@ function toEnginePlayer(s: SplendorSeat): SplendorEngine.PlayerState {
     built: [],
     nobles: [],
   };
+}
+
+/** The same player as if they had already taken the selected gems. */
+function withSelectedGems(p: SplendorEngine.PlayerState, selected: Set<Gem>): SplendorEngine.PlayerState {
+  const gems = { ...p.gems };
+  for (const g of selected) gems[g] += 1;
+  return { ...p, gems };
 }
 
 function formatSeconds(total: number): string {
@@ -107,9 +120,9 @@ function costPips(cost: { [K in Gem]: number }): string {
     .join("");
 }
 
-function cardHtml(card: SplendorCard, buttons: string): string {
+function cardHtml(card: SplendorCard, buttons: string, highlight = ""): string {
   return `
-    <div class="spl-card spl-bonus-${card.bonus}">
+    <div class="spl-card spl-bonus-${card.bonus} ${highlight}">
       <div class="spl-card-top">
         <span class="spl-card-points">${card.points > 0 ? card.points : ""}</span>
         <span class="spl-pip spl-${card.bonus}"></span>
@@ -143,6 +156,9 @@ export class SplendorView implements GameView {
   private discardPick: Record<DiscardColor, number> = {
     white: 0, blue: 0, green: 0, red: 0, black: 0, gold: 0,
   };
+  /** Chime bookkeeping: fire once per transition, not per render. */
+  private wasMyTurn = false;
+  private clockChimedFor = 0;
 
   mount(root: HTMLElement, room: Room<any, BaseState>, ctx: GameViewContext): void {
     this.root = root;
@@ -156,8 +172,10 @@ export class SplendorView implements GameView {
         <div id="spl-market"></div>
         <div id="spl-bank"></div>
         <div id="spl-modal"></div>
-        <div id="spl-me"></div>
-        <div id="spl-opponents"></div>
+        <div id="spl-players">
+          <div id="spl-me"></div>
+          <div id="spl-opponents"></div>
+        </div>
       </div>
     `;
     root.addEventListener("click", this.onClick);
@@ -234,6 +252,10 @@ export class SplendorView implements GameView {
       case "toggle-pause":
         this.room.send(SplendorMsg.PAUSE, { paused: !this.room.state.paused });
         return;
+      case "toggle-mute":
+        setMuted(!isMuted());
+        this.render();
+        return;
     }
   }
 
@@ -256,10 +278,16 @@ export class SplendorView implements GameView {
     }
     if (!myMove) this.selectedColors.clear();
 
+    // Audio nudge the moment the turn becomes mine (timer or not).
+    const myTurnNow =
+      state.phase === Phase.PLAYING && !state.paused && state.currentTurn === this.ctx.mySessionId;
+    if (myTurnNow && !this.wasMyTurn) turnChime();
+    this.wasMyTurn = myTurnNow;
+
     this.renderStatus(state, actorSeat, isMyDecision);
     this.renderNobles(state);
     this.renderMarket(state, me, myMove);
-    this.renderBank(state, myMove);
+    this.renderBank(state, me, myMove);
     this.renderModal(state, me, isMyDecision);
     this.renderMe(state, me, myMove);
     this.renderOpponents(state, seats, mySeatIndex);
@@ -271,13 +299,15 @@ export class SplendorView implements GameView {
 
   private renderStatus(state: SplendorState, actor: SplendorSeat | undefined, mine: boolean): void {
     const banner = state.lastRound ? `<span class="spl-final badge warn">Final round!</span> ` : "";
+    const muteButton = ` <button class="subtle spl-pause" data-action="toggle-mute"
+        title="${isMuted() ? "Sounds off" : "Sounds on"}">${isMuted() ? "🔕" : "🔔"}</button>`;
     const pauseButton =
       state.turnSeconds > 0
         ? ` <button class="subtle spl-pause" data-action="toggle-pause">${state.paused ? "Resume" : "Pause"}</button>`
         : "";
     if (state.paused) {
       this.q("spl-status").innerHTML =
-        `<span class="badge warn">Game paused by ${escapeHtml(state.pausedBy || "...")}</span>${pauseButton}`;
+        `<span class="badge warn">Game paused by ${escapeHtml(state.pausedBy || "...")}</span>${pauseButton}${muteButton}`;
       return;
     }
     let text: string;
@@ -299,7 +329,7 @@ export class SplendorView implements GameView {
       text = `Waiting for <strong>${name}</strong>${doing}`;
     }
     this.q("spl-status").innerHTML =
-      `${banner}${text} <span id="spl-timer" class="spl-timer"></span>${pauseButton}`;
+      `${banner}${text} <span id="spl-timer" class="spl-timer"></span>${pauseButton}${muteButton}`;
     this.updateTimer();
   }
 
@@ -320,6 +350,16 @@ export class SplendorView implements GameView {
     const left = Math.max(0, Math.ceil((state.turnDeadline - Date.now()) / 1000));
     el.textContent = `· ${formatSeconds(left)}`;
     el.classList.toggle("warn", left <= 15);
+    // Audio nudge at 15s, once per deadline, only for the player on the clock.
+    if (
+      left <= 15 &&
+      left > 0 &&
+      state.currentTurn === this.ctx?.mySessionId &&
+      this.clockChimedFor !== state.turnDeadline
+    ) {
+      this.clockChimedFor = state.turnDeadline;
+      clockChime();
+    }
   }
 
   private renderNobles(state: SplendorState): void {
@@ -329,6 +369,10 @@ export class SplendorView implements GameView {
   private renderMarket(state: SplendorState, me: SplendorSeat | undefined, myMove: boolean): void {
     const canReserve = myMove && me !== undefined && me.reservedCount < 3;
     const pseudo = me ? toEnginePlayer(me) : undefined;
+    // What I could afford after taking the gems I have selected right now -
+    // drives the blue "buyable next turn" highlight while picking tokens.
+    const pseudoAfterTake =
+      pseudo && this.selectedColors.size > 0 ? withSelectedGems(pseudo, this.selectedColors) : undefined;
     const rows: string[] = [];
     for (const tier of [3, 2, 1] as const) {
       const cells: string[] = [];
@@ -347,14 +391,23 @@ export class SplendorView implements GameView {
           cells.push(`<div class="spl-card spl-empty"></div>`);
           continue;
         }
-        const canBuy = myMove && pseudo !== undefined && SplendorEngine.affordable(toEngineCard(card), pseudo);
+        const engineCard = toEngineCard(card);
+        // Green: in reach right now (shown whoever's turn it is).
+        const affordableNow = pseudo !== undefined && SplendorEngine.affordable(engineCard, pseudo);
+        // Blue: would come into reach with the selected gems.
+        const affordableAfterTake =
+          !affordableNow &&
+          pseudoAfterTake !== undefined &&
+          SplendorEngine.affordable(engineCard, pseudoAfterTake);
+        const highlight = affordableNow ? "spl-can-buy" : affordableAfterTake ? "spl-could-buy" : "";
         cells.push(
           cardHtml(
             card,
             `<button data-action="buy-market" data-tier="${tier}" data-index="${index}"
-               ${canBuy ? "" : "disabled"}>Buy</button>
+               ${myMove && affordableNow ? "" : "disabled"}>Buy</button>
              <button class="secondary" data-action="reserve-market" data-tier="${tier}" data-index="${index}"
-               ${canReserve ? "" : "disabled"}>Res.</button>`
+               ${canReserve ? "" : "disabled"}>Res.</button>`,
+            highlight
           )
         );
       }
@@ -363,7 +416,7 @@ export class SplendorView implements GameView {
     this.q("spl-market").innerHTML = rows.join("");
   }
 
-  private renderBank(state: SplendorState, myMove: boolean): void {
+  private renderBank(state: SplendorState, me: SplendorSeat | undefined, myMove: boolean): void {
     const piles = GEMS.map((g) => ({ gem: g, count: state.bank[g] }));
     const availColors = piles.filter((p) => p.count > 0).length;
     const need = Math.min(3, availColors);
@@ -377,21 +430,28 @@ export class SplendorView implements GameView {
           <div class="spl-pile">
             <button class="spl-gem spl-${gem} ${selected ? "selected" : ""}"
               data-action="toggle-take" data-color="${gem}" ${selectable ? "" : "disabled"}>${count}</button>
-            <button class="spl-take2 secondary" data-action="take-two" data-color="${gem}"
-              ${myMove && count >= 4 ? "" : "disabled"}>×2</button>
+            <button class="spl-take2" data-action="take-two" data-color="${gem}"
+              ${myMove && count >= 4 ? "" : "disabled"}>Take 2</button>
           </div>`;
       })
       .join("");
     const gold = `
       <div class="spl-pile">
         <span class="spl-gem spl-gold">${state.bankGold}</span>
-        <span class="spl-take2 muted">gold</span>
+        <span class="spl-gold-label muted">gold</span>
       </div>`;
-    const hint = myMove
-      ? need === 0
-        ? "No tokens to take"
-        : `Pick ${need} different gem${need > 1 ? "s" : ""}, or ×2 from a pile of 4+`
-      : "";
+    let hint = "";
+    if (myMove) {
+      if (need === 0) {
+        hint = "No tokens to take";
+      } else {
+        hint = `Pick ${need} different gem${need > 1 ? "s" : ""}, or Take 2 from a pile of 4+`;
+        if (me && this.selectedColors.size > 0) {
+          const after = totalTokensOf(me) + this.selectedColors.size;
+          hint += ` — you'd hold ${after}/10 tokens${after > 10 ? " (you'll have to discard)" : ""}`;
+        }
+      }
+    }
     this.q("spl-bank").innerHTML = `
       <div class="spl-bank-row">${chips}${gold}
         <button id="spl-take-confirm" data-action="confirm-take" ${canConfirm ? "" : "disabled"}>
@@ -459,18 +519,31 @@ export class SplendorView implements GameView {
       return;
     }
     const pseudo = toEnginePlayer(me);
+    const pseudoAfterTake =
+      this.selectedColors.size > 0 ? withSelectedGems(pseudo, this.selectedColors) : undefined;
     const reserved = [...me.reserved]
-      .map((card) =>
-        cardHtml(
+      .map((card) => {
+        const engineCard = toEngineCard(card);
+        const affordableNow = SplendorEngine.affordable(engineCard, pseudo);
+        const highlight = affordableNow
+          ? "spl-can-buy"
+          : pseudoAfterTake && SplendorEngine.affordable(engineCard, pseudoAfterTake)
+            ? "spl-could-buy"
+            : "";
+        return cardHtml(
           card,
           `<button data-action="buy-reserve" data-card-id="${card.id}"
-            ${myMove && SplendorEngine.affordable(toEngineCard(card), pseudo) ? "" : "disabled"}>Buy</button>`
-        )
-      )
+            ${myMove && affordableNow ? "" : "disabled"}>Buy</button>`,
+          highlight
+        );
+      })
       .join("");
+    const tokens = totalTokensOf(me);
     panel.innerHTML = `
       <div class="spl-seat mine">
-        <div class="spl-seat-head"><strong>You</strong><span class="spl-points">${me.points} pts</span></div>
+        <div class="spl-seat-head"><strong>You</strong>
+          <span class="spl-token-count ${tokens >= 9 ? "warn" : ""}" title="Tokens held (10 max)">${tokens}/10 tokens</span>
+          <span class="spl-points">${me.points} pts</span></div>
         ${this.holdingsHtml(me)}
         ${me.reserved.length > 0 ? `<div class="spl-reserved"><span class="muted">Reserved:</span>${reserved}</div>` : ""}
       </div>`;
@@ -497,6 +570,7 @@ export class SplendorView implements GameView {
         return `
           <div class="spl-seat ${turn}">
             <div class="spl-seat-head"><strong>${escapeHtml(seat.nickname)}</strong>${badge}
+              <span class="spl-token-count" title="Tokens held (10 max)">${totalTokensOf(seat)}/10 tokens</span>
               <span class="spl-points">${seat.points} pts</span></div>
             ${this.holdingsHtml(seat)}
             ${backs}
@@ -506,20 +580,30 @@ export class SplendorView implements GameView {
     this.q("spl-opponents").innerHTML = panels;
   }
 
-  /** Tokens (top row) and card bonuses (bottom row) for one seat. */
+  /**
+   * One seat's purchasing power, grouped per color: the big number is what
+   * the player can actually spend of that color (tokens + card bonuses),
+   * with the token/card split underneath. Gold is tokens only.
+   */
   private holdingsHtml(seat: SplendorSeat): string {
-    const tokens = GEMS.map((g) =>
-      seat.gems[g] > 0 ? `<span class="spl-gem spl-${g}">${seat.gems[g]}</span>` : ""
-    ).join("");
-    const gold = seat.gold > 0 ? `<span class="spl-gem spl-gold">${seat.gold}</span>` : "";
-    const bonuses = GEMS.map((g) =>
-      seat.bonuses[g] > 0 ? `<span class="spl-pip spl-${g}">${seat.bonuses[g]}</span>` : ""
-    ).join("");
-    const nobles = seat.nobles.length > 0 ? `<span class="badge">nobles: ${seat.nobles.length}</span>` : "";
-    return `
-      <div class="spl-holdings">
-        <div class="spl-tokens">${tokens}${gold}</div>
-        <div class="spl-bonuses">${bonuses}${nobles}</div>
+    const cells = GEMS.map((g) => {
+      const tokens = seat.gems[g];
+      const cards = seat.bonuses[g];
+      const total = tokens + cards;
+      return `
+        <div class="spl-power ${total === 0 ? "empty" : ""}"
+             title="${tokens} token${tokens === 1 ? "" : "s"} + ${cards} card${cards === 1 ? "" : "s"}">
+          <span class="spl-power-total spl-${g}">${total}</span>
+          <span class="spl-power-split"><i class="spl-i-tok"></i>${tokens}<i class="spl-i-card"></i>${cards}</span>
+        </div>`;
+    }).join("");
+    const gold = `
+      <div class="spl-power ${seat.gold === 0 ? "empty" : ""}" title="${seat.gold} gold (wild) tokens">
+        <span class="spl-power-total spl-gold">${seat.gold}</span>
+        <span class="spl-power-split"><i class="spl-i-tok"></i>${seat.gold}</span>
       </div>`;
+    const nobles =
+      seat.nobles.length > 0 ? `<span class="badge spl-noble-badge">nobles: ${seat.nobles.length}</span>` : "";
+    return `<div class="spl-holdings">${cells}${gold}${nobles}</div>`;
   }
 }
