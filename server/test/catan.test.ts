@@ -1,0 +1,547 @@
+import assert from "node:assert/strict";
+import { boot, type ColyseusTestServer } from "@colyseus/testing";
+import { defineRoom, defineServer } from "colyseus";
+import { CATAN, CatanEngine, CatanMsg, EndReason, LobbyMsg, Phase } from "@backbone/shared";
+import { CatanRoom } from "../src/games/catan/CatanRoom.js";
+import { sanitizeAction } from "../src/games/catan/sanitize.js";
+import { sleep, until } from "./StubRoom.js";
+
+const {
+  buildBoardGeometry,
+  getValidInitialSettlements,
+  getValidRoads,
+  getStealTargets,
+  victoryPoints,
+  GreedyPolicy,
+} = CatanEngine;
+type GameState = CatanEngine.GameState;
+
+const geo = buildBoardGeometry();
+
+function makeConfig() {
+  return defineServer({
+    rooms: { [CATAN]: defineRoom(CatanRoom) },
+  });
+}
+
+/** Vertices that are pairwise non-adjacent (for white-box board staging). */
+function spacedVertices(count: number, exclude: Set<number> = new Set()): number[] {
+  const picked: number[] = [];
+  const blocked = new Set<number>(exclude);
+  for (const v of geo.vertices) {
+    if (blocked.has(v.id)) continue;
+    picked.push(v.id);
+    blocked.add(v.id);
+    for (const n of v.neighbors) blocked.add(n);
+    if (picked.length === count) break;
+  }
+  if (picked.length !== count) throw new Error("not enough spaced vertices");
+  return picked;
+}
+
+describe("catan", () => {
+  let colyseus: ColyseusTestServer<ReturnType<typeof makeConfig>>;
+
+  before(async () => {
+    colyseus = await boot(makeConfig());
+  });
+  after(async () => colyseus.shutdown());
+  beforeEach(async () => await colyseus.cleanup());
+
+  async function startedGame(seed = 42, playerCount = 2, beforeStart?: (room: CatanRoom) => void) {
+    const room = (await colyseus.createRoom(CATAN, { seed })) as unknown as CatanRoom;
+    const clients = [];
+    for (let i = 0; i < playerCount; i++) {
+      clients.push(await colyseus.connectTo(room, { nickname: `Player${i}` }));
+    }
+    beforeStart?.(room);
+    clients[0]!.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    return { room, clients };
+  }
+
+  /** The connected client owning a given engine seat. */
+  function clientFor(room: CatanRoom, clients: any[], engineSeat: number): any {
+    const sessionId = room.seatOrder[engineSeat];
+    return clients.find((c) => c.sessionId === sessionId);
+  }
+
+  /** Drive the snake draft to completion with first-legal placements. */
+  async function driveSetup(room: CatanRoom, clients: Array<any>): Promise<void> {
+    let guard = 0;
+    while ((room.engine.phase === "setupSettlement" || room.engine.phase === "setupRoad") && guard++ < 40) {
+      const prev = room.engine;
+      const actor = clientFor(room, clients, prev.currentPlayer)!;
+      if (prev.phase === "setupSettlement") {
+        const vertex = getValidInitialSettlements(geo, prev.board)[0]!;
+        actor.send(CatanMsg.ACTION, { type: "placeSetupSettlement", vertex });
+      } else {
+        const edge = getValidRoads(geo, prev.board, prev.currentPlayer, {
+          setupVertex: prev.lastSettlementVertex!,
+        })[0]!;
+        actor.send(CatanMsg.ACTION, { type: "placeSetupRoad", edge });
+      }
+      await until(() => room.engine !== prev);
+    }
+    assert.equal(room.engine.phase, "preRoll", "setup must complete");
+  }
+
+  /** Resolve any pending discard/robber/steal so play can continue. */
+  async function flushRobber(room: CatanRoom, clients: Array<any>): Promise<void> {
+    let guard = 0;
+    while (["discard", "moveRobber", "steal"].includes(room.engine.phase) && guard++ < 30) {
+      const prev = room.engine;
+      if (prev.phase === "discard") {
+        const seat = +Object.keys(prev.pendingDiscards)[0]!;
+        const owed = prev.pendingDiscards[seat]!;
+        const hand = prev.players[seat]!.hand;
+        const cards: Record<string, number> = {};
+        let need = owed;
+        for (const r of ["lumber", "brick", "wool", "grain", "ore"] as const) {
+          const take = Math.min(hand[r] - (cards[r] ?? 0), need);
+          if (take > 0) {
+            cards[r] = take;
+            need -= take;
+          }
+        }
+        clientFor(room, clients, seat)!.send(CatanMsg.ACTION, { type: "discard", cards });
+      } else if (prev.phase === "moveRobber") {
+        const hex = geo.hexes.find((h) => h.id !== prev.board.robberHex)!.id;
+        clientFor(room, clients, prev.currentPlayer)!.send(CatanMsg.ACTION, { type: "moveRobber", hex });
+      } else {
+        const target = getStealTargets(prev, geo)[0] ?? null;
+        clientFor(room, clients, prev.currentPlayer)!.send(CatanMsg.ACTION, { type: "steal", target });
+      }
+      await until(() => room.engine !== prev);
+    }
+  }
+
+  /** Roll (twice in 2p) and resolve robbers until the main phase. */
+  async function toMain(room: CatanRoom, clients: Array<any>): Promise<void> {
+    let guard = 0;
+    while (room.engine.phase !== "main" && guard++ < 12) {
+      if (room.engine.phase === "preRoll") {
+        const prev = room.engine;
+        clientFor(room, clients, prev.currentPlayer)!.send(CatanMsg.ACTION, { type: "rollDice" });
+        await until(() => room.engine !== prev);
+      }
+      await flushRobber(room, clients);
+    }
+    assert.equal(room.engine.phase, "main");
+  }
+
+  it("mirrors the board and runs the setup draft into a 3p game", async () => {
+    const { room, clients } = await startedGame(7, 3);
+    assert.equal(room.state.twoPlayerVariant, false);
+    assert.equal(room.state.seats.length, 3);
+    assert.equal(room.state.hexTerrain.length, 19);
+    assert.equal(room.state.vertexOwner.length, 54);
+    assert.equal(room.state.edgeOwner.length, 72);
+    assert.equal(room.state.portTypes.length, 9);
+    assert.equal(room.state.hexTerrain.filter((t) => t === "desert").length, 1);
+    assert.equal(room.state.hexToken.filter((t) => t === 0).length, 1, "only the desert lacks a token");
+    assert.equal(room.state.phaseDetail, "setupSettlement");
+    assert.equal(room.state.currentTurn, room.seatOrder[room.engine.currentPlayer]);
+
+    await driveSetup(room, clients);
+    assert.equal(room.state.phaseDetail, "preRoll");
+    const placed = room.state.vertexOwner.filter((o) => o >= 0).length;
+    assert.equal(placed, 6, "3 players x 2 settlements mirrored");
+    assert.equal(room.state.edgeOwner.filter((o) => o >= 0).length, 6);
+    // starting resources from the second settlement are mirrored as counts
+    const totalCards = room.state.seats.reduce((t, s) => t + s.handCount, 0);
+    assert.ok(totalCards > 0, "someone has starting resources");
+  });
+
+  it("plays to a win and maps the winner through framework seats", async () => {
+    const { room, clients } = await startedGame(11, 3);
+    await driveSetup(room, clients);
+
+    // White-box stage: blank the board, hand seat 0 a 9-VP position plus the
+    // makings of the winning settlement, then deliver the win by message.
+    const e = room.engine;
+    e.board.vertices.forEach((v) => (v.building = null));
+    e.board.edges.forEach((ed) => (ed.road = null));
+    e.longestRoadHolder = null;
+    const [c1, c2, c3, c4, sett, target] = spacedVertices(6);
+    for (const v of [c1, c2, c3, c4]) e.board.vertices[v!]!.building = { owner: 0, type: "city" };
+    e.board.vertices[sett!]!.building = { owner: 0, type: "settlement" };
+    e.board.edges[geo.vertices[target!]!.edges[0]!]!.road = { owner: 0 };
+    e.players[0]!.hand = { lumber: 1, brick: 1, wool: 1, grain: 1, ore: 0 };
+    e.players[0]!.piecesLeft.settlements = 2;
+    e.phase = "main";
+    e.currentPlayer = 0;
+    assert.equal(victoryPoints(e, 0), 9);
+
+    clientFor(room, clients, 0)!.send(CatanMsg.ACTION, { type: "buildSettlement", vertex: target });
+    await until(() => room.state.phase === Phase.ENDED);
+    const frameworkSeat = room.frameworkSeatByEngineSeat[0]!;
+    assert.equal(room.state.endReason, `${EndReason.WIN_PREFIX}${frameworkSeat}`);
+    assert.equal(room.state.currentTurn, "", "turn cleared after game end");
+    assert.equal(room.state.phaseDetail, "gameOver");
+    assert.ok([...room.state.log].some((l) => l.includes("wins")), "the win is narrated");
+  });
+
+  it("ignores out-of-turn, malformed, and unknown actions", async () => {
+    const { room, clients } = await startedGame(13, 3);
+    const actorSeat = room.engine.currentPlayer;
+    const bystander = clients.find((c) => c.sessionId !== room.seatOrder[actorSeat])!;
+    const actor = clientFor(room, clients, actorSeat)!;
+    const before = room.engine;
+
+    const legalVertex = getValidInitialSettlements(geo, room.engine.board)[0]!;
+    bystander.send(CatanMsg.ACTION, { type: "placeSetupSettlement", vertex: legalVertex }); // not their turn
+    actor.send(CatanMsg.ACTION, { type: "placeSetupSettlement", vertex: 999 }); // out of range
+    actor.send(CatanMsg.ACTION, { type: "placeSetupSettlement", vertex: -1 });
+    actor.send(CatanMsg.ACTION, { type: "placeSetupSettlement", vertex: 1.5 });
+    actor.send(CatanMsg.ACTION, { type: "placeSetupSettlement" }); // missing field
+    actor.send(CatanMsg.ACTION, { type: "buildRoad", edge: 0 }); // wrong phase
+    actor.send(CatanMsg.ACTION, { type: "rollDice" }); // wrong phase
+    actor.send(CatanMsg.ACTION, { type: "moveRobber", hex: 3 }); // wrong phase
+    actor.send(CatanMsg.ACTION, { type: "discard", cards: { wool: 1 } }); // owes nothing
+    actor.send(CatanMsg.ACTION, { type: "buildNeutral", neutralId: 0, kind: "road", edge: 0 }); // not 2p
+    actor.send(CatanMsg.ACTION, { type: "playForcedTrade" }); // not 2p
+    actor.send(CatanMsg.ACTION, { type: "endSpecialBuild" }); // never whitelisted
+    actor.send(CatanMsg.ACTION, { type: "NOPE" });
+    actor.send(CatanMsg.ACTION, "garbage");
+    actor.send(CatanMsg.ACTION, null);
+    await sleep(120);
+    assert.strictEqual(room.engine, before, "engine untouched by garbage");
+
+    actor.send(CatanMsg.ACTION, { type: "placeSetupSettlement", vertex: legalVertex });
+    await until(() => room.engine !== before);
+    assert.equal(room.engine.phase, "setupRoad", "legal action still lands");
+  });
+
+  it("never trusts client dice", async () => {
+    const { room, clients } = await startedGame(17, 3);
+    await driveSetup(room, clients);
+    const prev = room.engine;
+    // a client trying to script box cars gets a server roll instead
+    clientFor(room, clients, prev.currentPlayer)!.send(CatanMsg.ACTION, { type: "rollDice", dice: [6, 6] });
+    await until(() => room.engine !== prev);
+    const expected = CatanEngine.reduce(geo, prev, { type: "rollDice" }); // server RNG path
+    assert.deepEqual(room.engine.dice, expected.dice, "roll comes from the seeded server RNG");
+  });
+
+  it("hides hands and dev cards from opponents, including across a refresh", async () => {
+    const { room, clients } = await startedGame(19, 2);
+    await driveSetup(room, clients);
+    const a = clients.find((c) => c.sessionId === room.seatOrder[0])!;
+    const b = clients.find((c) => c.sessionId === room.seatOrder[1])!;
+
+    // white-box a known hand + a hidden dev card, flushed by the first roll
+    room.engine.players[0]!.hand = { lumber: 0, brick: 0, wool: 1, grain: 0, ore: 3 };
+    room.engine.players[0]!.devCards.push({ type: "victoryPoint", boughtThisTurn: false, played: false });
+    await toMain(room, clients);
+
+    const aState = () => a.state as any;
+    const bState = () => b.state as any;
+    await until(() => aState()?.seats?.at(0)?.handCount >= 4);
+    assert.equal(aState().seats.at(0).hand?.ore, 3, "owner sees the hand detail");
+    assert.equal(aState().seats.at(0).devCards?.at(0)?.kind, "victoryPoint", "owner sees the card identity");
+    assert.ok(bState().seats.at(0).handCount >= 4, "opponent sees the count");
+    assert.equal(bState().seats.at(0).hand?.ore ?? 0, 0, "opponent sees no hand detail");
+    assert.equal(bState().seats.at(0).devCards?.length ?? 0, 0, "opponent sees no card identities");
+    assert.equal(bState().seats.at(0).devCardCount, 1);
+
+    // A refresh-style drop + resume must keep the private view.
+    const token = a.reconnectionToken;
+    const aSessionId = a.sessionId;
+    await a.leave(false);
+    await until(() => room.state.players.get(aSessionId)?.connected === false);
+    const a2 = await colyseus.sdk.reconnect(token);
+    const a2State = () => a2.state as any;
+    await until(() => (a2State()?.seats?.at(0)?.hand?.ore ?? 0) === 3, 5000);
+    assert.equal(a2State().seats.at(0).devCards?.at(0)?.kind, "victoryPoint", "still visible after refresh");
+    assert.equal(bState().seats.at(0).hand?.ore ?? 0, 0, "opponent still blind after the refresh");
+  });
+
+  it("runs a simultaneous discard after a 7, rejecting forged discards", async () => {
+    const { room, clients } = await startedGame(23, 3);
+    await driveSetup(room, clients);
+
+    // White-box straight into the discard phase: seats 0 and 1 owe halves.
+    const e = room.engine;
+    e.players[0]!.hand = { lumber: 8, brick: 0, wool: 0, grain: 0, ore: 0 };
+    e.players[1]!.hand = { lumber: 0, brick: 0, wool: 0, grain: 4, ore: 4 };
+    e.players[2]!.hand = { lumber: 0, brick: 0, wool: 1, grain: 0, ore: 0 };
+    e.phase = "discard";
+    e.pendingDiscards = { 0: 4, 1: 4 };
+    e.robberReturnPhase = "main";
+
+    const a = clientFor(room, clients, 0)!;
+    const b = clientFor(room, clients, 1)!;
+    const c = clientFor(room, clients, 2)!;
+
+    c.send(CatanMsg.ACTION, { type: "discard", cards: { wool: 1 } }); // owes nothing
+    b.send(CatanMsg.ACTION, { type: "discard", cards: { grain: 4, ore: 4 } }); // wrong count
+    b.send(CatanMsg.ACTION, { type: "discard", cards: { lumber: 4 } }); // cards b does not hold
+    await sleep(120);
+    assert.equal(room.engine, e, "bad discards ignored");
+
+    // either owing seat may resolve first; b goes first here
+    b.send(CatanMsg.ACTION, { type: "discard", cards: { grain: 2, ore: 2 } });
+    await until(() => room.engine.pendingDiscards[1] === undefined);
+    assert.equal(room.engine.phase, "discard", "still waiting on seat 0");
+    await until(() => room.state.awaitingSeats.length === 1 && room.state.awaitingSeats[0] === 0);
+    assert.equal(room.state.discardOwed[0], 4);
+    assert.equal(room.state.currentTurn, a.sessionId, "single remaining discarder shown as actor");
+
+    a.send(CatanMsg.ACTION, { type: "discard", cards: { lumber: 4 } });
+    await until(() => room.engine.phase === "moveRobber");
+    assert.equal(room.state.phaseDetail, "moveRobber");
+  });
+
+  it("fans out a domestic trade: respond, forge-proof seats, confirm", async () => {
+    const { room, clients } = await startedGame(29, 3);
+    await driveSetup(room, clients);
+    await toMain(room, clients);
+
+    const proposerSeat = room.engine.currentPlayer;
+    const others = [0, 1, 2].filter((s) => s !== proposerSeat);
+    const proposer = clientFor(room, clients, proposerSeat)!;
+    const partner = clientFor(room, clients, others[0]!)!;
+    const third = clientFor(room, clients, others[1]!)!;
+
+    room.engine.players[proposerSeat]!.hand = { lumber: 0, brick: 0, wool: 0, grain: 0, ore: 2 };
+    room.engine.players[others[0]!]!.hand = { lumber: 0, brick: 0, wool: 3, grain: 0, ore: 0 };
+
+    proposer.send(CatanMsg.ACTION, { type: "proposeDomesticTrade", give: { ore: 2 }, receive: { wool: 2 } });
+    await until(() => room.state.tradeOpen === true);
+    assert.equal(room.state.tradeProposer, proposerSeat);
+    assert.equal(room.state.tradeGive.ore, 2);
+    assert.equal(room.state.tradeReceive.wool, 2);
+    assert.deepEqual([...room.state.tradeCandidates].sort(), others);
+
+    // a forged `player` field cannot make someone else accept
+    partner.send(CatanMsg.ACTION, { type: "respondDomesticTrade", accept: true, player: others[1] });
+    await until(() => room.state.tradeAcceptances.length === 1);
+    assert.equal(room.state.tradeAcceptances[0], others[0], "acceptance recorded for the SENDER");
+
+    // confirming with someone who has not accepted is rejected
+    const pending = room.engine;
+    proposer.send(CatanMsg.ACTION, { type: "confirmDomesticTrade", partner: others[1] });
+    await sleep(120);
+    assert.equal(room.engine, pending, "unaccepted partner rejected");
+
+    third.send(CatanMsg.ACTION, { type: "respondDomesticTrade", accept: false });
+    proposer.send(CatanMsg.ACTION, { type: "confirmDomesticTrade", partner: others[0] });
+    await until(() => room.engine.pendingTrade === null);
+    assert.equal(room.engine.players[proposerSeat]!.hand.wool, 2);
+    assert.equal(room.engine.players[others[0]!]!.hand.ore, 2);
+    await until(() => room.state.tradeOpen === false);
+    assert.ok([...room.state.log].some((l) => l.includes("traded with")), "the trade is narrated");
+  });
+
+  it("lets the ghost play out a quitter's seat in a 3p game (including a pending discard)", async () => {
+    const { room, clients } = await startedGame(31, 3);
+    await driveSetup(room, clients);
+
+    // The quitter leaves while owing a discard - the ghost must resolve it.
+    const e = room.engine;
+    e.players[1]!.hand = { lumber: 12, brick: 0, wool: 0, grain: 0, ore: 0 };
+    e.phase = "discard";
+    e.pendingDiscards = { 1: 6 };
+    e.robberReturnPhase = "main";
+    e.currentPlayer = 0;
+
+    const quitter = clientFor(room, clients, 1)!;
+    const quitterSessionId = quitter.sessionId;
+    await quitter.leave(true);
+    await until(() => room.engine.pendingDiscards[1] === undefined || room.state.phase !== Phase.PLAYING);
+    assert.equal(room.state.phase, Phase.PLAYING, "game continues with 2 of 3 players");
+    assert.equal(
+      Object.values(room.engine.players[1]!.hand).reduce((a, b) => a + b, 0),
+      6,
+      "ghost discarded half",
+    );
+    await until(() => room.state.seats[1]!.gone === true);
+    assert.equal(room.state.seats[1]!.sessionId, "");
+    assert.ok(!room.state.players.has(quitterSessionId));
+    assert.ok([...room.state.log].some((l) => l.includes("autopilot")));
+
+    // Play on: seat 0 finishes the robber + its turn; the ghost then takes
+    // seat 1's whole turn (roll + end) without the game waiting on it.
+    await flushRobber(room, clients);
+    await toMain(room, clients);
+    const beforeEnd = room.engine;
+    clientFor(room, clients, 0)!.send(CatanMsg.ACTION, { type: "endTurn" });
+    await until(() => room.engine !== beforeEnd);
+    await until(() => room.engine.currentPlayer === 2, 5000);
+    assert.equal(room.engine.phase, "preRoll", "ghost rolled and ended seat 1's turn in the same beat");
+    await until(() => room.state.currentTurn === clientFor(room, clients, 2)!.sessionId);
+  });
+
+  it("ends a 2p game as abandoned when a player quits (no ghost completion)", async () => {
+    const { room, clients } = await startedGame(37, 2);
+    await clients[1]!.leave(true);
+    await until(() => room.state.phase === Phase.ENDED);
+    assert.equal(room.state.endReason, EndReason.ABANDONED);
+    assert.equal(room.state.currentTurn, "");
+  });
+
+  it("starts the official 2-player variant for two humans", async () => {
+    const { room, clients } = await startedGame(41, 2);
+    assert.equal(room.state.twoPlayerVariant, true);
+    assert.equal(room.state.seats.length, 4, "2 humans + 2 neutral seats");
+    assert.equal(room.state.seats[2]!.neutral, true);
+    assert.equal(room.state.seats[3]!.neutral, true);
+    assert.ok(room.state.seats[2]!.nickname.startsWith("Neutral"));
+    assert.equal(room.state.vertexOwner.filter((o) => o === 2).length, 1, "neutral A settlement on the board");
+    assert.equal(room.state.vertexOwner.filter((o) => o === 3).length, 1);
+    assert.equal(room.state.seats[0]!.tradeTokens, 5);
+    assert.equal(room.state.tokenSupply, 10);
+
+    await driveSetup(room, clients);
+    // double roll mirrored: after roll #1 we are back in preRoll with firstDice
+    const prev = room.engine;
+    clientFor(room, clients, prev.currentPlayer)!.send(CatanMsg.ACTION, { type: "rollDice" });
+    await until(() => room.engine !== prev);
+    await flushRobber(room, clients);
+    if (room.engine.phase === "preRoll") {
+      assert.equal(room.state.rollsThisTurn, 1);
+      assert.ok(room.state.firstDice1 >= 1, "first roll mirrored");
+    }
+    await toMain(room, clients);
+    assert.equal(room.state.rollsThisTurn, 2);
+
+    // the neutral-build obligation flows through the schema
+    const me = room.engine.currentPlayer;
+    room.engine.players[me]!.hand = { lumber: 1, brick: 1, wool: 0, grain: 0, ore: 0 };
+    const road = getValidRoads(geo, room.engine.board, me)[0]!;
+    clientFor(room, clients, me)!.send(CatanMsg.ACTION, { type: "buildRoad", edge: road });
+    await until(() => room.state.phaseDetail === "neutralBuild");
+    assert.equal(room.state.pendingNeutralBuilds, 1);
+    const nRoad = getValidRoads(geo, room.engine.board, 2)[0]!;
+    clientFor(room, clients, me)!.send(CatanMsg.ACTION, { type: "buildNeutral", neutralId: 0, kind: "road", edge: nRoad });
+    await until(() => room.state.phaseDetail === "main");
+    assert.equal(room.state.edgeOwner[nRoad], 2, "neutral road mirrored");
+
+    // a forced trade round-trip
+    room.engine.players[me]!.hand = { lumber: 0, brick: 0, wool: 2, grain: 0, ore: 0 };
+    const opp = me === 0 ? 1 : 0;
+    room.engine.players[opp]!.hand = { lumber: 0, brick: 0, wool: 0, grain: 3, ore: 0 };
+    const tokensBefore = room.engine.players[me]!.tradeTokens;
+    clientFor(room, clients, me)!.send(CatanMsg.ACTION, { type: "playForcedTrade" });
+    await until(() => room.state.phaseDetail === "forcedTradeGive");
+    assert.equal(room.engine.players[me]!.hand.grain, 2, "took 2 random cards");
+    clientFor(room, clients, me)!.send(CatanMsg.ACTION, { type: "forcedTradeGiveBack", cards: { wool: 2 } });
+    await until(() => room.state.phaseDetail === "main");
+    assert.equal(room.engine.players[opp]!.hand.wool, 2);
+    assert.equal(room.state.seats[me]!.tradeTokens, tokensBefore - 1, "equal public VP -> 1 token spent");
+  });
+
+  it("rematch fully resets the game and re-grants private views", async () => {
+    const { room, clients } = await startedGame(43, 2);
+    await driveSetup(room, clients);
+
+    // Deliver a quick white-box win for engine seat 0.
+    const e = room.engine;
+    e.board.vertices.forEach((v) => (v.building = null));
+    e.board.edges.forEach((ed) => (ed.road = null));
+    e.longestRoadHolder = null;
+    const taken = new Set<number>();
+    const [c1, c2, c3, c4, sett, target] = spacedVertices(6, taken);
+    for (const v of [c1, c2, c3, c4]) e.board.vertices[v!]!.building = { owner: 0, type: "city" };
+    e.board.vertices[sett!]!.building = { owner: 0, type: "settlement" };
+    e.board.edges[geo.vertices[target!]!.edges[0]!]!.road = { owner: 0 };
+    e.players[0]!.hand = { lumber: 1, brick: 1, wool: 1, grain: 1, ore: 0 };
+    e.players[0]!.piecesLeft.settlements = 2;
+    e.phase = "main";
+    e.currentPlayer = 0;
+    const a = clientFor(room, clients, 0)!;
+    const b = clientFor(room, clients, 1)!;
+    a.send(CatanMsg.ACTION, { type: "buildSettlement", vertex: target });
+    await until(() => room.state.phase === Phase.ENDED);
+
+    const oldEngine = room.engine;
+    a.send(LobbyMsg.REMATCH, {});
+    await sleep(80);
+    assert.equal(room.state.phase, Phase.ENDED, "one vote is not enough");
+    b.send(LobbyMsg.REMATCH, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+
+    assert.notStrictEqual(room.engine, oldEngine, "fresh engine");
+    assert.equal(room.state.phaseDetail, "setupSettlement");
+    assert.equal(room.state.vertexOwner.filter((o) => o >= 0).length, 2, "only the neutral settlements remain");
+    assert.equal(room.state.edgeOwner.filter((o) => o >= 0).length, 0);
+    assert.equal(room.state.turnCount, 0);
+    assert.equal(room.state.longestRoadHolder, 255);
+    for (const seat of room.state.seats) {
+      assert.equal(seat.publicVP, seat.neutral ? 1 : 0, "human VP reset (neutral settlement is 1)");
+      assert.equal(seat.handCount, 0);
+      assert.equal(seat.gone, false);
+    }
+
+    // the rematch built new seat objects - the re-granted views must follow
+    await driveSetup(room, clients);
+    room.engine.players[0]!.devCards.push({ type: "monopoly", boughtThisTurn: false, played: false });
+    await toMain(room, clients);
+    const aState = () => a.state as any;
+    await until(() => (aState()?.seats?.at(0)?.devCards?.length ?? 0) === 1, 5000);
+    assert.equal(aState().seats.at(0).devCards.at(0).kind, "monopoly", "owner sees the new game's card");
+    const bState = () => b.state as any;
+    assert.equal(bState().seats.at(0).devCards?.length ?? 0, 0, "opponent still blind");
+  });
+
+  it("lets the host seat bots and a solo human finishes a full game against one", async function () {
+    this.timeout(120000);
+    const room = (await colyseus.createRoom(CATAN, { seed: 47 })) as unknown as CatanRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Solo" });
+    const guestRoom = room; // alias for clarity
+
+    host.send(LobbyMsg.ADD_BOT, {});
+    await until(() => guestRoom.state.players.size === 2);
+    const bot = [...guestRoom.state.players.values()].find((p) => p.isBot)!;
+    assert.ok(bot.sessionId.startsWith("bot:"));
+
+    room.botDelayMs = 1; // pacing is UX, not logic
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    assert.equal(room.state.twoPlayerVariant, true, "1 human + 1 bot plays the official 2p variant");
+
+    const policy = new GreedyPolicy(5);
+    const hostSeat = room.seatOrder.indexOf(host.sessionId);
+    let guard = 0;
+    while (room.state.phase === Phase.PLAYING) {
+      assert.ok(++guard < 6000, "game did not terminate");
+      const prev = room.engine;
+      const mustAct =
+        prev.phase === "discard"
+          ? Object.keys(prev.pendingDiscards).map(Number).includes(hostSeat)
+          : prev.currentPlayer === hostSeat;
+      if (mustAct) {
+        host.send(CatanMsg.ACTION, policy.act(geo, prev, hostSeat));
+      }
+      // either our message lands or the bot acts unprompted
+      await until(() => room.engine !== prev || room.state.phase !== Phase.PLAYING, 8000);
+    }
+
+    assert.equal(room.state.phase, Phase.ENDED);
+    assert.ok(room.state.endReason.startsWith(EndReason.WIN_PREFIX), "someone won outright");
+    const winnerSeat = room.engine.winner!;
+    assert.equal(
+      room.state.endReason,
+      `${EndReason.WIN_PREFIX}${room.frameworkSeatByEngineSeat[winnerSeat]}`,
+    );
+  });
+
+  it("sanitize: forges and junk shapes are rejected, player fields are forced", () => {
+    const limits = { hexes: 19, vertices: 54, edges: 72, seats: 4 };
+    assert.equal(sanitizeAction(null, 0, limits), null);
+    assert.equal(sanitizeAction("x", 0, limits), null);
+    assert.equal(sanitizeAction({ type: "endSpecialBuild" }, 0, limits), null);
+    assert.equal(sanitizeAction({ type: "moveRobber", hex: 19 }, 0, limits), null);
+    assert.equal(sanitizeAction({ type: "playYearOfPlenty", resources: ["ore"] }, 0, limits), null);
+    assert.equal(sanitizeAction({ type: "playYearOfPlenty", resources: ["ore", "gold"] }, 0, limits), null);
+    assert.equal(sanitizeAction({ type: "discard", cards: { gold: 1 } }, 0, limits), null);
+    assert.equal(sanitizeAction({ type: "discard", cards: { ore: 1.5 } }, 0, limits), null);
+    const forged = sanitizeAction({ type: "discard", player: 3, cards: { ore: 2 } }, 1, limits);
+    assert.deepEqual(forged, { type: "discard", player: 1, cards: { ore: 2 } });
+    const respond = sanitizeAction({ type: "respondDomesticTrade", player: 2, accept: true }, 0, limits);
+    assert.deepEqual(respond, { type: "respondDomesticTrade", player: 0, accept: true });
+    const roll = sanitizeAction({ type: "rollDice", dice: [6, 6] }, 0, limits);
+    assert.deepEqual(roll, { type: "rollDice" }, "client dice stripped");
+  });
+});
