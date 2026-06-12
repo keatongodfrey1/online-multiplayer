@@ -44,4 +44,10 @@ export interface GameDefinition {
     room: Room<any, BaseState>,
     ctx: LobbySettingsContext
   ): void;
+  /**
+   * Optional game-over summary rendered on the ended screen, above the
+   * rematch button (e.g. a final score table). Called on every ended-phase
+   * re-render with an empty container; read from room.state.
+   */
+  renderGameSummary?(container: HTMLElement, room: Room<any, BaseState>, ctx: GameViewContext): void;
 }
