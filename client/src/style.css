@@ -496,6 +496,28 @@ button.spl-gem.selected {
   margin-top: 6px;
 }
 
+.spl-timer {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.spl-timer.warn {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.spl-lobby-setting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.spl-pause {
+  margin-left: 10px;
+  font-size: 0.8rem;
+}
+
 /* Reconnecting overlay */
 .overlay {
   position: fixed;

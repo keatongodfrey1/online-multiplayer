@@ -42,6 +42,14 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
   abstract readonly maxPlayers: number;
   /** Allow joining while a game is in progress (e.g. drop-in arena games). */
   allowLateJoin = false;
+  /**
+   * Allow the host to seat AI players from the lobby (LobbyMsg.ADD_BOT).
+   * The framework only manages the roster entry - playing the bot's turns
+   * is entirely the game room's job (key its logic off player.isBot).
+   */
+  supportsBots = false;
+  /** Names handed to bots in order; override for themed names. */
+  protected botNicknames = ["Botty", "Chip", "Gizmo", "Pixel", "Widget", "Sprocket"];
   /** Seconds a disconnected player's seat is held during a game. */
   reconnectionGraceSeconds = 60;
   /** Seconds a disconnected player's seat is held in the lobby. */
@@ -96,6 +104,7 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
       this.handleKick(client, payload)
     );
     this.onMessage(LobbyMsg.REMATCH, (client) => this.handleRematch(client));
+    this.onMessage(LobbyMsg.ADD_BOT, (client) => this.handleAddBot(client));
 
     // Connection keepalive (see ConnectionMsg). A quiet WebSocket can be
     // idle-closed by hosting proxies seconds after connecting, so we keep both
@@ -274,9 +283,44 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
 
     if (this.state.players.size < this.minPlayers) return;
     for (const p of this.state.players.values()) {
-      if (!p.wantsRematch) return;
+      if (!p.wantsRematch && !p.isBot) return; // bots are always up for another
     }
     this.startGame();
+  }
+
+  /** Host seats an AI player (lobby only, games with supportsBots). */
+  private handleAddBot(client: Client): void {
+    if (!this.supportsBots) return;
+    if (this.state.phase !== Phase.LOBBY) return;
+    if (client.sessionId !== this.state.hostSessionId) return;
+    if (this.state.players.size >= this.maxPlayers) return;
+
+    const seat = this.lowestFreeSeat();
+    const bot = this.createPlayer(seat);
+    bot.sessionId = this.nextBotSessionId();
+    bot.nickname = this.nextBotNickname();
+    bot.seat = seat;
+    bot.connected = true; // a bot is never "away"
+    bot.isBot = true;
+    this.state.players.set(bot.sessionId, bot);
+  }
+
+  /** "bot:N" - colons never appear in real Colyseus session ids. */
+  private nextBotSessionId(): string {
+    let n = 1;
+    while (this.state.players.has(`bot:${n}`)) n++;
+    return `bot:${n}`;
+  }
+
+  private nextBotNickname(): string {
+    const taken = new Set<string>();
+    for (const p of this.state.players.values()) taken.add(p.nickname.toLowerCase());
+    for (const name of this.botNicknames) {
+      if (!taken.has(name.toLowerCase())) return name;
+    }
+    let n = 1;
+    while (taken.has(`bot ${n}`)) n++;
+    return `Bot ${n}`;
   }
 
   private removePlayerForGood(sessionId: string): void {
@@ -298,17 +342,21 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
     }
     // A pending rematch may now be unanimous among the remaining players.
     if (this.state.phase === Phase.ENDED && this.state.players.size >= this.minPlayers) {
-      let all = this.state.players.size > 0;
+      let humans = 0;
+      let all = true;
       for (const p of this.state.players.values()) {
+        if (p.isBot) continue; // bots are always up for another
+        humans++;
         if (!p.wantsRematch) all = false;
       }
-      if (all) this.startGame();
+      if (all && humans > 0) this.startGame();
     }
   }
 
   private migrateHost(): void {
     let next: BasePlayer | undefined;
     for (const p of this.state.players.values()) {
+      if (p.isBot) continue; // a bot can't run the lobby
       if (!next || p.seat < next.seat) next = p;
     }
     if (next) {

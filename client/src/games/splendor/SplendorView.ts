@@ -7,6 +7,9 @@
 import type { Room } from "@colyseus/sdk";
 import {
   type BaseState,
+  LobbyMsg,
+  SPLENDOR_TURN_MAX_SECONDS,
+  SPLENDOR_TURN_STEP_SECONDS,
   SplendorEngine,
   SplendorMsg,
   type SplendorCard,
@@ -14,7 +17,7 @@ import {
   type SplendorSeat,
   type SplendorState,
 } from "@backbone/shared";
-import type { GameView, GameViewContext } from "../../framework/GameView.js";
+import type { GameView, GameViewContext, LobbySettingsContext } from "../../framework/GameView.js";
 import { escapeHtml } from "../../lobby/HomeScreen.js";
 
 const GEMS = ["white", "blue", "green", "red", "black"] as const;
@@ -54,6 +57,50 @@ function toEnginePlayer(s: SplendorSeat): SplendorEngine.PlayerState {
   };
 }
 
+function formatSeconds(total: number): string {
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${s}s`;
+}
+
+/**
+ * Lobby settings (GameDefinition.renderLobbySettings): the turn-timer picker.
+ * The host gets a live dropdown; everyone else sees the current choice.
+ * The server validates (host-only, lobby-only, 15s steps).
+ */
+export function renderSplendorLobbySettings(
+  container: HTMLElement,
+  room: Room<any, BaseState>,
+  ctx: LobbySettingsContext
+): void {
+  const state = room.state as unknown as SplendorState;
+  const current = state.turnSeconds ?? 0;
+  const options: string[] = [`<option value="0" ${current === 0 ? "selected" : ""}>Off</option>`];
+  for (let s = SPLENDOR_TURN_STEP_SECONDS; s <= SPLENDOR_TURN_MAX_SECONDS; s += SPLENDOR_TURN_STEP_SECONDS) {
+    options.push(`<option value="${s}" ${current === s ? "selected" : ""}>${formatSeconds(s)}</option>`);
+  }
+  const seatsLeft = state.maxPlayers - state.players.size;
+  const addBot = ctx.isHost
+    ? `<button id="spl-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>
+         ${seatsLeft > 0 ? "+ Add AI opponent" : "Table is full"}
+       </button>`
+    : "";
+  container.innerHTML = `
+    <label class="spl-lobby-setting">
+      Turn timer
+      <select id="spl-turn-seconds" ${ctx.isHost ? "" : "disabled"}>${options.join("")}</select>
+      ${ctx.isHost ? "" : '<span class="muted">(host chooses)</span>'}
+    </label>
+    ${addBot}`;
+  container.querySelector<HTMLSelectElement>("#spl-turn-seconds")?.addEventListener("change", (ev) => {
+    const turnSeconds = Number((ev.target as HTMLSelectElement).value);
+    room.send(SplendorMsg.CONFIG, { turnSeconds });
+  });
+  container.querySelector<HTMLButtonElement>("#spl-add-bot")?.addEventListener("click", () => {
+    room.send(LobbyMsg.ADD_BOT, {});
+  });
+}
+
 function costPips(cost: { [K in Gem]: number }): string {
   return GEMS.filter((g) => cost[g] > 0)
     .map((g) => `<span class="spl-pip spl-${g}">${cost[g]}</span>`)
@@ -87,6 +134,8 @@ export class SplendorView implements GameView {
   private ctx?: GameViewContext;
   private readonly onState = () => this.render();
   private readonly onClick = (ev: Event) => this.handleClick(ev);
+  /** Ticks the countdown between patches (the deadline itself is synced). */
+  private ticker?: ReturnType<typeof setInterval>;
 
   /** Take-3 pile selection; survives re-renders, cleared after sending. */
   private selectedColors = new Set<Gem>();
@@ -113,10 +162,13 @@ export class SplendorView implements GameView {
     `;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
+    this.ticker = setInterval(() => this.updateTimer(), 500);
     this.render();
   }
 
   unmount(): void {
+    if (this.ticker) clearInterval(this.ticker);
+    this.ticker = undefined;
     this.room?.onStateChange.remove(this.onState);
     this.root?.removeEventListener("click", this.onClick);
     this.root = undefined;
@@ -179,6 +231,9 @@ export class SplendorView implements GameView {
       case "pick-noble":
         this.room.send(SplendorMsg.RESOLVE, { kind: "PICK_NOBLE", nobleId: Number(data.nobleId) });
         return;
+      case "toggle-pause":
+        this.room.send(SplendorMsg.PAUSE, { paused: !this.room.state.paused });
+        return;
     }
   }
 
@@ -193,7 +248,7 @@ export class SplendorView implements GameView {
     const mySeatIndex = seats.findIndex((s) => s.sessionId === this.ctx!.mySessionId);
     const me = mySeatIndex >= 0 ? seats[mySeatIndex] : undefined;
     const actorSeat = seats[state.awaitingSeat];
-    const isMyDecision = state.awaitingSeat === mySeatIndex && mySeatIndex >= 0;
+    const isMyDecision = state.awaitingSeat === mySeatIndex && mySeatIndex >= 0 && !state.paused;
     const myMove = isMyDecision && state.awaitingType === "MOVE";
 
     if (state.awaitingType !== "DISCARD" || !isMyDecision) {
@@ -216,6 +271,15 @@ export class SplendorView implements GameView {
 
   private renderStatus(state: SplendorState, actor: SplendorSeat | undefined, mine: boolean): void {
     const banner = state.lastRound ? `<span class="spl-final badge warn">Final round!</span> ` : "";
+    const pauseButton =
+      state.turnSeconds > 0
+        ? ` <button class="subtle spl-pause" data-action="toggle-pause">${state.paused ? "Resume" : "Pause"}</button>`
+        : "";
+    if (state.paused) {
+      this.q("spl-status").innerHTML =
+        `<span class="badge warn">Game paused by ${escapeHtml(state.pausedBy || "...")}</span>${pauseButton}`;
+      return;
+    }
     let text: string;
     if (mine) {
       text =
@@ -234,7 +298,28 @@ export class SplendorView implements GameView {
             : "";
       text = `Waiting for <strong>${name}</strong>${doing}`;
     }
-    this.q("spl-status").innerHTML = banner + text;
+    this.q("spl-status").innerHTML =
+      `${banner}${text} <span id="spl-timer" class="spl-timer"></span>${pauseButton}`;
+    this.updateTimer();
+  }
+
+  /** Refresh just the countdown span; cheap enough to run twice a second. */
+  private updateTimer(): void {
+    const el = this.root?.querySelector<HTMLElement>("#spl-timer");
+    const state = this.room?.state;
+    if (!el || !state) return;
+    if (!state.turnSeconds) {
+      el.textContent = "";
+      return;
+    }
+    if (state.turnDeadline === 0) {
+      el.textContent = "· timer paused";
+      el.classList.remove("warn");
+      return;
+    }
+    const left = Math.max(0, Math.ceil((state.turnDeadline - Date.now()) / 1000));
+    el.textContent = `· ${formatSeconds(left)}`;
+    el.classList.toggle("warn", left <= 15);
   }
 
   private renderNobles(state: SplendorState): void {
@@ -395,12 +480,14 @@ export class SplendorView implements GameView {
     const panels = seats
       .map((seat, i) => {
         if (i === mySeatIndex) return "";
-        const connected = seat.sessionId === "" ? false : state.players.get(seat.sessionId)?.connected !== false;
+        const player = seat.sessionId === "" ? undefined : state.players.get(seat.sessionId);
         const badge = seat.gone
           ? `<span class="badge warn">left - auto-play</span>`
-          : connected
-            ? ""
-            : `<span class="badge warn">reconnecting</span>`;
+          : player?.isBot
+            ? `<span class="badge">AI</span>`
+            : player?.connected === false
+              ? `<span class="badge warn">reconnecting</span>`
+              : "";
         const turn = state.awaitingSeat === i && state.awaitingType !== "" ? "active" : "";
         const backs = seat.reservedCount > 0
           ? `<div class="spl-reserved"><span class="muted">Reserved:</span>${

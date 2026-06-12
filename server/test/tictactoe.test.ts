@@ -135,4 +135,12 @@ describe("tic-tac-toe", () => {
     assert.strictEqual(room.state.endReason, EndReason.ABANDONED);
     assert.strictEqual(room.state.currentTurn, "", "turn cleared after game end");
   });
+
+  it("ignores add-bot requests (bots not supported here)", async () => {
+    const room = (await colyseus.createRoom(TICTACTOE, {})) as unknown as TicTacToeRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Xena" });
+    host.send(LobbyMsg.ADD_BOT, {});
+    await sleep(100);
+    assert.strictEqual(room.state.players.size, 1, "no bot was seated");
+  });
 });
