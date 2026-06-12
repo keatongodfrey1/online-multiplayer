@@ -365,6 +365,7 @@ export class SplendorView implements GameView {
           <div id="spl-me"></div>
           <div id="spl-opponents"></div>
         </div>
+        <div id="spl-toast" aria-live="polite"></div>
       </div>
     `;
     root.addEventListener("click", this.onClick);
@@ -488,10 +489,13 @@ export class SplendorView implements GameView {
     }
     if (!myMove) this.selectedColors.clear();
 
-    // Audio nudge the moment the turn becomes mine (timer or not).
+    // Audio + visual nudge the moment the turn becomes mine (timer or not).
     const myTurnNow =
       state.phase === Phase.PLAYING && !state.paused && state.currentTurn === this.ctx.mySessionId;
-    if (myTurnNow && !this.wasMyTurn) turnChime();
+    if (myTurnNow && !this.wasMyTurn) {
+      turnChime();
+      this.flashToast("Your turn!");
+    }
     this.wasMyTurn = myTurnNow;
 
     this.renderStatus(state, actorSeat, isMyDecision);
@@ -505,6 +509,21 @@ export class SplendorView implements GameView {
 
   private q(id: string): HTMLElement {
     return this.root!.querySelector<HTMLElement>(`#${id}`)!;
+  }
+
+  /**
+   * Center-screen flash that dismisses itself (a "toast"). It is
+   * click-through (pointer-events: none in CSS), so a player can start
+   * acting underneath it before it has even faded - it never gates input.
+   * Re-adding the class restarts the CSS animation for back-to-back turns.
+   */
+  private flashToast(text: string): void {
+    const toast = this.root?.querySelector<HTMLElement>("#spl-toast");
+    if (!toast) return;
+    toast.textContent = text;
+    toast.classList.remove("show");
+    void toast.offsetWidth; // force a reflow so the animation restarts
+    toast.classList.add("show");
   }
 
   private renderStatus(state: SplendorState, actor: SplendorSeat | undefined, mine: boolean): void {
