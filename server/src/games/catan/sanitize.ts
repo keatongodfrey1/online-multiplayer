@@ -74,6 +74,8 @@ export function sanitizeAction(raw: unknown, senderSeat: number, limits: BoardLi
       const target = parseIndex(a.target, limits.seats);
       return target === null ? null : { type: "steal", target };
     }
+    case "robberTake":
+      return { type: "robberTake" }; // robberBounty house rule (engine-gated)
     case "buildRoad": {
       const edge = parseIndex(a.edge, limits.edges);
       return edge === null ? null : { type: "buildRoad", edge };

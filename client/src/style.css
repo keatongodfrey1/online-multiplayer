@@ -1165,3 +1165,28 @@ button.spl-gem.selected {
   font-weight: 700;
   margin-left: auto;
 }
+
+.catan-lobby-setting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  font-size: 0.9rem;
+}
+
+.catan-lobby-setting select {
+  flex: 1;
+  padding: 8px;
+}
+
+.catan-lobby-check {
+  align-items: flex-start;
+  text-align: left;
+}
+
+.catan-lobby-check input {
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  flex: none;
+}

@@ -42,7 +42,15 @@ import {
   getValidSettlements,
   portAccess,
 } from "./geometry.js";
-import { type Action, getStealTargets, handCount, isNeutral, mulberry32, tokenActionCost } from "./stateMachine.js";
+import {
+  type Action,
+  getStealTargets,
+  handCount,
+  isNeutral,
+  mulberry32,
+  robberBountyResource,
+  tokenActionCost,
+} from "./stateMachine.js";
 
 export interface Policy {
   act(geo: BoardGeometry, state: GameState, seat: PlayerId): Action;
@@ -156,7 +164,9 @@ export class RandomPolicy implements Policy {
       }
       case "steal": {
         const targets = getStealTargets(state, geo);
-        return { type: "steal", target: targets.length ? this.pick(targets) : null };
+        if (targets.length) return { type: "steal", target: this.pick(targets) };
+        // robberBounty house rule: with no one to rob, take the tile's resource
+        return robberBountyResource(state) !== null ? { type: "robberTake" } : { type: "steal", target: null };
       }
       case "neutralBuild": {
         const opts = neutralBuildOptions(geo, state);
@@ -221,6 +231,10 @@ export class GreedyPolicy implements Policy {
         return { type: "moveRobber", hex: this.robberTarget(geo, state, seat) };
       case "steal": {
         const targets = getStealTargets(state, geo);
+        if (!targets.length) {
+          // robberBounty house rule: nothing to steal, so take the tile's resource
+          return robberBountyResource(state) !== null ? { type: "robberTake" } : { type: "steal", target: null };
+        }
         const best = this.bestBy(targets, (t) => handCount(state.players[t]!));
         return { type: "steal", target: best };
       }

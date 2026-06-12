@@ -24,6 +24,9 @@ export const CATAN = "catan";
  */
 export const CatanMsg = {
   ACTION: "catan/action",
+  /** Host-only, lobby-only. Payload: { useTwoPlayerVariant?: boolean;
+   *  robberBounty?: boolean } - the pre-game rule toggles. */
+  CONFIG: "catan/config",
 } as const;
 
 /** Sentinel for "nobody holds this award" in the holder fields below. */
@@ -130,6 +133,12 @@ export class CatanState extends BaseState {
   /** 2p variant: free neutral builds the current player owes. */
   @type("uint8") pendingNeutralBuilds = 0;
   @type("boolean") twoPlayerVariant = false;
+  /** Lobby toggle: with exactly 2 players, use the official CATAN-for-Two
+   *  variant (true, default) or the plain standard rules (false). */
+  @type("boolean") useTwoPlayerVariant = true;
+  /** Lobby toggle (house rule): the robber's mover may take 1 of the tile's
+   *  resource from the bank instead of stealing. */
+  @type("boolean") robberBounty = false;
   /** 2p variant: trade tokens left beside the board. */
   @type("uint8") tokenSupply = 0;
   /** 2p variant: the once-per-turn knight discard has been used. */

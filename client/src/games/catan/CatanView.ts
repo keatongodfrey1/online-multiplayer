@@ -67,8 +67,8 @@ function boardFromState(state: CatanState): CatanEngine.BoardState {
   };
 }
 
-/** Lobby settings hook: the host's add-bot button, plus a heads-up (for
- *  everyone) that a 2-player table plays the official CATAN-for-Two rules. */
+/** Lobby settings hook: rule toggles (host-live, read-only for guests) and
+ *  the host's add-bot button. The server validates (host-only, lobby-only). */
 export function renderCatanLobbySettings(
   container: HTMLElement,
   room: Room<any, BaseState>,
@@ -76,20 +76,49 @@ export function renderCatanLobbySettings(
 ): void {
   const state = room.state as unknown as CatanState;
   const seatsLeft = state.maxPlayers - state.players.size;
-  const note =
-    state.players.size === 2
-      ? `<p class="catan-lobby-note">With <strong>2 players</strong> you'll play the official
-          <strong>CATAN for Two</strong> rules: two <em>neutral</em> piece sets start on the board
-          with one settlement each (they never take turns or score), every road or settlement you
-          build also places a free piece for a neutral, and trade tokens unlock Forced Trades.
-          Seat a third player or an AI for the standard game.</p>`
-      : "";
+  const isTwo = state.players.size === 2;
+  const official = state.useTwoPlayerVariant;
+
+  const twoRules = isTwo
+    ? `<label class="catan-lobby-setting">
+        2-player rules
+        <select id="catan-two-rules" ${ctx.isHost ? "" : "disabled"}>
+          <option value="official" ${official ? "selected" : ""}>Official "CATAN for Two"</option>
+          <option value="plain" ${official ? "" : "selected"}>Plain standard rules</option>
+        </select>
+        ${ctx.isHost ? "" : '<span class="muted">(host chooses)</span>'}
+      </label>`
+    : "";
+  const note = isTwo
+    ? official
+      ? `<p class="catan-lobby-note">Official <strong>CATAN for Two</strong>: two <em>neutral</em>
+          piece sets start on the board with one settlement each (they never take turns or score),
+          every road or settlement you build also places a free piece for a neutral, and trade
+          tokens unlock Forced Trades. Seat a third player or an AI for the standard game.</p>`
+      : `<p class="catan-lobby-note"><strong>Plain standard rules</strong> with 2 players — no
+          neutral pieces, no trade tokens. Quicker to learn, but trading and the robber are less
+          balanced head-to-head.</p>`
+    : "";
+  const robber = `
+    <label class="catan-lobby-setting catan-lobby-check">
+      <input type="checkbox" id="catan-robber-bounty" ${state.robberBounty ? "checked" : ""} ${
+        ctx.isHost ? "" : "disabled"
+      }/>
+      <span>House rule: whoever moves the robber may <strong>take 1 of the tile's resource</strong>
+      from the bank instead of stealing</span>
+    </label>`;
   const addBot = ctx.isHost
     ? `<button id="catan-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>
         ${seatsLeft > 0 ? "+ Add AI opponent" : "Table is full"}
       </button>`
     : "";
-  container.innerHTML = note + addBot;
+  container.innerHTML = twoRules + note + robber + addBot;
+  container.querySelector<HTMLSelectElement>("#catan-two-rules")?.addEventListener("change", (ev) => {
+    room.send(CatanMsg.CONFIG, { useTwoPlayerVariant: (ev.target as HTMLSelectElement).value === "official" });
+  });
+  container.querySelector<HTMLInputElement>("#catan-robber-bounty")?.addEventListener("change", (ev) => {
+    room.send(CatanMsg.CONFIG, { robberBounty: (ev.target as HTMLInputElement).checked });
+  });
   container.querySelector<HTMLButtonElement>("#catan-add-bot")?.addEventListener("click", () => {
     room.send(LobbyMsg.ADD_BOT, {});
   });
@@ -245,6 +274,10 @@ export class CatanView implements GameView {
   private canAfford(cost: Partial<Bag>): boolean {
     const hand = this.myHand();
     return RESOURCES.every((r) => hand[r] >= (cost[r] ?? 0));
+  }
+
+  private bankOf(s: CatanState): Bag {
+    return { lumber: s.bank.lumber, brick: s.bank.brick, wool: s.bank.wool, grain: s.bank.grain, ore: s.bank.ore };
   }
 
   private nickname(seatIdx: number): string {
@@ -448,17 +481,23 @@ export class CatanView implements GameView {
     }
     if (mine && s.phaseDetail === "steal") {
       const targets = this.stealTargets(s, me);
+      // robberBounty house rule: the tile's resource may be taken instead
+      const terrain = s.hexTerrain[s.robberHex] ?? "desert";
+      const res = CatanEngine.TERRAIN_RESOURCE[terrain as CatanEngine.Terrain];
+      const canTake = s.robberBounty && res !== null && this.bankOf(s)[res] > 0;
+      const buttons = targets.map(
+        (t) =>
+          `<button data-action="steal" data-id="${t}">Steal from ${this.nickname(t)} (${this.seat(t)?.handCount ?? 0} cards)</button>`,
+      );
+      if (canTake) {
+        buttons.push(
+          `<button data-action="robber-take">Take 1 ${resourceIcon(res!)} ${res} from the bank</button>`,
+        );
+      }
       el.innerHTML = `
         <div class="catan-panel">
-          <h3>Steal one random card from…</h3>
-          <div class="catan-row">
-            ${targets
-              .map(
-                (t) =>
-                  `<button data-action="steal" data-id="${t}">${this.nickname(t)} (${this.seat(t)?.handCount ?? 0} cards)</button>`,
-              )
-              .join("")}
-          </div>
+          <h3>${targets.length ? "The robber strikes…" : "No one to rob here"}</h3>
+          <div class="catan-row">${buttons.join("")}</div>
         </div>`;
       return;
     }
@@ -834,9 +873,12 @@ export class CatanView implements GameView {
           this.render();
         }
         return;
-      // steal
+      // steal / robberBounty take
       case "steal":
         this.send({ type: "steal", target: id });
+        return;
+      case "robber-take":
+        this.send({ type: "robberTake" });
         return;
       // neutral build picker
       case "neutral-pick":
