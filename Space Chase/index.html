@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Space Chase</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="stars-bg"></div>
+
+    <!-- ── Setup Screen ── -->
+    <div id="setup-screen">
+        <h1>SPACE CHASE</h1>
+        <h2>How many players?</h2>
+        <div class="player-count-buttons">
+            <button class="player-count-btn" data-count="2">2</button>
+            <button class="player-count-btn" data-count="3">3</button>
+            <button class="player-count-btn" data-count="4">4</button>
+            <button class="player-count-btn" data-count="5">5</button>
+        </div>
+        <div id="player-names"></div>
+        <button id="start-game">Launch!</button>
+    </div>
+
+    <!-- ── Game Screen ── -->
+    <div id="game-screen">
+        <div id="board-container">
+            <div id="board"></div>
+            <svg id="portal-overlay"></svg>
+        </div>
+
+        <div id="sidebar">
+            <div id="player-status-panel"></div>
+
+            <div id="action-panel">
+                <div id="current-player-info"></div>
+                <div class="action-buttons">
+                    <button id="roll-dice-btn" disabled>
+                        <div class="action-icon">🎲</div>
+                        <div class="action-label">Roll Dice</div>
+                        <div class="action-sub">Safe &amp; steady</div>
+                    </button>
+                    <button id="draw-card-btn" disabled>
+                        <img src="space_chase_cards/space_chase_back.png" alt="Draw" class="card-back-mini">
+                        <div class="action-label">Draw Card</div>
+                        <div class="action-sub">Take a gamble!</div>
+                    </button>
+                </div>
+                <div id="dice-display"></div>
+                <div id="message-area"></div>
+                <div id="deck-count"></div>
+            </div>
+
+            <div id="turn-log"></div>
+            <button id="end-game-btn">End Game</button>
+        </div>
+    </div>
+
+    <!-- ── Modal Overlay ── -->
+    <div id="modal-overlay"></div>
+
+    <!-- ── Card Modal ── -->
+    <div id="card-modal">
+        <img id="card-image" src="" alt="Card">
+        <div id="card-name"></div>
+        <div id="card-desc"></div>
+        <div id="card-actions"></div>
+    </div>
+
+    <!-- ── Target Selection Modal ── -->
+    <div id="target-modal">
+        <div id="target-prompt"></div>
+        <div id="target-buttons"></div>
+    </div>
+
+    <!-- ── Choice Modal ── -->
+    <div id="choice-modal">
+        <div id="choice-title"></div>
+        <div id="choice-prompt"></div>
+        <div id="choice-buttons"></div>
+    </div>
+
+    <!-- ── Space Select Modal ── -->
+    <div id="space-select-modal">
+        <div id="space-select-prompt"></div>
+        <input type="number" id="space-select-input" min="1" max="67">
+        <button class="btn btn-primary" id="space-select-ok">OK</button>
+    </div>
+
+    <!-- ── Satellite Modal ── -->
+    <div id="satellite-modal">
+        <div style="font-family: 'Orbitron', sans-serif; font-size: 1rem;">Satellite — Pick Card Order</div>
+        <div style="font-size: 0.8rem; color: #aab;">Click cards in the order you want them drawn</div>
+        <div id="satellite-cards"></div>
+        <div class="satellite-buttons">
+            <button class="btn" id="satellite-reset">Reset</button>
+            <button class="btn" id="satellite-view-board">View Board</button>
+            <button class="btn btn-primary" id="satellite-ok" disabled>Confirm Order</button>
+        </div>
+    </div>
+    <!-- ── Satellite View Board Return Button ── -->
+    <button id="satellite-return-btn" style="display:none;">Back to Satellite</button>
+
+    <!-- ── Win Screen ── -->
+    <div id="win-screen">
+        <div id="confetti-container"></div>
+        <h1>🏆 WINNER 🏆</h1>
+        <div id="win-player-name"></div>
+        <button id="play-again">Play Again</button>
+    </div>
+
+    <script src="js/board.js"></script>
+    <script src="js/cards.js"></script>
+    <script src="js/ui.js"></script>
+    <script src="js/game.js"></script>
+</body>
+</html>
