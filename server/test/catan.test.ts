@@ -169,9 +169,10 @@ describe("catan", () => {
     e.board.edges[geo.vertices[target!]!.edges[0]!]!.road = { owner: 0 };
     e.players[0]!.hand = { lumber: 1, brick: 1, wool: 1, grain: 1, ore: 0 };
     e.players[0]!.piecesLeft.settlements = 2;
+    e.players[0]!.devCards.push({ type: "victoryPoint", boughtThisTurn: false, played: false }); // hidden until the end
     e.phase = "main";
     e.currentPlayer = 0;
-    assert.equal(victoryPoints(e, 0), 9);
+    assert.equal(victoryPoints(e, 0), 10, "9 building VP + 1 hidden VP card");
 
     clientFor(room, clients, 0)!.send(CatanMsg.ACTION, { type: "buildSettlement", vertex: target });
     await until(() => room.state.phase === Phase.ENDED);
@@ -180,6 +181,9 @@ describe("catan", () => {
     assert.equal(room.state.currentTurn, "", "turn cleared after game end");
     assert.equal(room.state.phaseDetail, "gameOver");
     assert.ok([...room.state.log].some((l) => l.includes("wins")), "the win is narrated");
+    // The final score reveals hidden VP cards: publicVP becomes the FULL total.
+    assert.equal(room.state.seats[0]!.publicVP, victoryPoints(room.engine, 0));
+    assert.equal(room.state.seats[0]!.publicVP, 11, "10 building VP + the revealed VP card");
   });
 
   it("ignores out-of-turn, malformed, and unknown actions", async () => {

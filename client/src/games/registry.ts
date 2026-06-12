@@ -5,7 +5,7 @@
 import { ARENA, CATAN, SPLENDOR, TICTACTOE } from "@backbone/shared";
 import type { GameDefinition } from "../framework/GameView.js";
 import { ArenaView } from "./arena/ArenaView.js";
-import { CatanView, renderCatanLobbySettings } from "./catan/CatanView.js";
+import { CatanView, renderCatanGameSummary, renderCatanLobbySettings } from "./catan/CatanView.js";
 import {
   renderSplendorGameSummary,
   renderSplendorLobbySettings,
@@ -40,6 +40,7 @@ export const games: GameDefinition[] = [
     description: "2-4 players (2p = official variant)",
     createView: () => new CatanView(),
     renderLobbySettings: renderCatanLobbySettings,
+    renderGameSummary: renderCatanGameSummary,
   },
 ];
 

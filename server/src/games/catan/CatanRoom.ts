@@ -159,11 +159,15 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     fillArray(this.state.portVertices, this.engine.board.ports.length * 2, 0);
 
     this.state.log.clear();
-    this.pushLog(
-      twoPlayerVariant
-        ? "Two-player game: official CATAN-for-Two rules (neutral players & trade tokens)."
-        : "Game started.",
-    );
+    if (twoPlayerVariant) {
+      const colorOf = (i: number) => this.engine.players[i]?.color ?? "";
+      this.pushLog("Two players — official CATAN-for-Two rules: trade tokens are in play.");
+      this.pushLog(
+        `Neutral A (${colorOf(2)}) and Neutral B (${colorOf(3)}) start with one settlement each and never play a turn — but every road or settlement you build also places a free piece for a neutral of your choice.`,
+      );
+    } else {
+      this.pushLog("Game started.");
+    }
     this.pushLog(`${this.nickname(this.engine.currentPlayer)} places first.`);
     this.project();
     this.maybeScheduleBot(); // a bot can hold the first setup placement
@@ -320,6 +324,7 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
   private project(): void {
     const e = this.engine;
     const s = this.state;
+    const over = e.winner !== null;
 
     e.board.hexes.forEach((h, i) => {
       if (s.hexTerrain[i] !== h.terrain) s.hexTerrain[i] = h.terrain;
@@ -354,7 +359,9 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
       if (seat.handCount !== handCount) seat.handCount = handCount;
       if (seat.devCardCount !== ep.devCards.length) seat.devCardCount = ep.devCards.length;
       if (seat.knightsPlayed !== ep.knightsPlayed) seat.knightsPlayed = ep.knightsPlayed;
-      const pubVP = publicVictoryPoints(e, i);
+      // While playing, hidden VP cards stay hidden; once the game is over the
+      // final scores reveal them (the table moment where everyone shows cards).
+      const pubVP = over ? victoryPoints(e, i) : publicVictoryPoints(e, i);
       if (seat.publicVP !== pubVP) seat.publicVP = pubVP;
       const lr = e.longestRoadHolder === i;
       const la = e.largestArmyHolder === i;
@@ -374,7 +381,6 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
       }
     });
 
-    const over = e.winner !== null;
     s.phaseDetail = over ? "gameOver" : e.phase;
     s.currentSeat = e.currentPlayer;
     const awaiting = over ? [] : this.awaitingEngineSeats();

@@ -161,6 +161,12 @@ export function renderBoardSvg(geo: BoardGeometry, state: CatanState, ui: BoardU
       parts.push(
         `<path d="M ${x - 9} ${y + 8} L ${x - 9} ${y - 2} L ${x} ${y - 10} L ${x + 9} ${y - 2} L ${x + 9} ${y + 8} Z" fill="${color}" stroke="#10131c" stroke-width="2.5"/>`,
       );
+      // 2p variant: letter the neutral pieces so they match "Neutral A/B"
+      if (state.seats[owner]?.neutral) {
+        parts.push(
+          `<text x="${x}" y="${y + 2}" text-anchor="middle" dominant-baseline="central" class="catan-neutral-letter">${owner === 2 ? "A" : "B"}</text>`,
+        );
+      }
     }
   });
 

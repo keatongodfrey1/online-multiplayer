@@ -1120,3 +1120,48 @@ button.spl-gem.selected {
   max-height: 7.5em;
   overflow-y: auto;
 }
+
+.catan-lobby-note {
+  background: #1b2438;
+  border: 1px solid #2c3a5c;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 0.85rem;
+  margin: 0 0 10px;
+}
+
+.catan-neutral-letter {
+  font-size: 11px;
+  font-weight: 800;
+  fill: #10131c;
+  pointer-events: none;
+}
+
+.catan-summary {
+  text-align: left;
+  margin: 8px 0 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.catan-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #161927;
+  border: 1px solid #353a4f;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 0.92rem;
+  flex-wrap: wrap;
+}
+
+.catan-summary-winner {
+  border-color: var(--ok);
+}
+
+.catan-summary-vp {
+  font-weight: 700;
+  margin-left: auto;
+}
