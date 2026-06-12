@@ -224,8 +224,12 @@ export interface NewGameOptions {
   devDeck?: Record<DevCardType, number>; // default standard 25-card deck
   /** The official "CATAN for Two" variant. Requires numPlayers === 2; adds two
    *  neutral players (ids 2 and 3), trade tokens, the double roll, and the
-   *  free-neutral-build obligation. */
+   *  free-neutral-build obligation. Without it, 2 players play the plain
+   *  standard rules. */
   twoPlayerVariant?: boolean;
+  /** House rule: after moving the robber (7 or Knight), the mover may take
+   *  1 card of the robbed tile's resource from the bank instead of stealing. */
+  robberBounty?: boolean;
   /** Override the neutrals' fixed starting settlements (tests / custom maps). */
   neutralSetupVertices?: [VertexId, VertexId];
 }
@@ -235,8 +239,9 @@ export function createInitialGameState(geo: BoardGeometry, opts: NewGameOptions)
   const twoPlayer = opts.twoPlayerVariant ?? false;
   if (twoPlayer) {
     if (numPlayers !== 2) throw new Error("the CATAN-for-Two variant requires exactly 2 players");
-  } else if (numPlayers < 3 || numPlayers > 6) {
-    throw new Error("supported player counts are 3-6 (2 only with the CATAN-for-Two variant)");
+  } else if (numPlayers < 2 || numPlayers > 6) {
+    // 2 players without the variant = the plain standard rules (house choice).
+    throw new Error("supported player counts are 2-6");
   }
   const start = opts.startingPlayer ?? 0;
   if (!Number.isInteger(start) || start < 0 || start >= numPlayers) throw new Error("startingPlayer out of range");
@@ -323,6 +328,7 @@ export function createInitialGameState(geo: BoardGeometry, opts: NewGameOptions)
     specialBuildEnabled: opts.specialBuildPhase ?? numPlayers >= 5,
     specialBuildQueue: [],
     specialBuilder: null,
+    robberBounty: opts.robberBounty ?? false,
     twoPlayerVariant: twoPlayer,
     neutralPlayerIds,
     tokenSupply: twoPlayer ? TWO_PLAYER_TOKEN_SUPPLY - numPlayers * TWO_PLAYER_TOKEN_START : 0,
@@ -346,6 +352,7 @@ export type Action =
   | { type: "discard"; player: PlayerId; cards: Partial<ResourceBag> }
   | { type: "moveRobber"; hex: HexId }
   | { type: "steal"; target: PlayerId | null }
+  | { type: "robberTake" } // robberBounty house rule: take the tile's resource instead
   | { type: "buildRoad"; edge: EdgeId }
   | { type: "buildSettlement"; vertex: VertexId }
   | { type: "buildCity"; vertex: VertexId }
@@ -433,6 +440,7 @@ export function cloneGameState(s: GameState): GameState {
     specialBuildEnabled: s.specialBuildEnabled,
     specialBuildQueue: s.specialBuildQueue.slice(),
     specialBuilder: s.specialBuilder,
+    robberBounty: s.robberBounty,
     twoPlayerVariant: s.twoPlayerVariant,
     neutralPlayerIds: s.neutralPlayerIds.slice(),
     tokenSupply: s.tokenSupply,
@@ -683,6 +691,14 @@ function finishRobber(state: GameState): void {
   state.phase = state.robberReturnPhase;
 }
 
+/** robberBounty house rule: the resource the robber's tile would yield, when
+ *  the rule is on and the bank can still pay it. */
+export function robberBountyResource(state: GameState): Resource | null {
+  if (!state.robberBounty) return null;
+  const res = TERRAIN_RESOURCE[state.board.hexes[state.board.robberHex]!.terrain];
+  return res !== null && state.bank[res] > 0 ? res : null;
+}
+
 // ---- Turn boundaries -------------------------------------------------------
 
 function startTurn(state: GameState, player: PlayerId): void {
@@ -845,7 +861,9 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
       require(action.hex >= 0 && action.hex < geo.hexes.length, "no such hex");
       state.board.robberHex = action.hex;
       const targets = getStealTargets(state, geo);
-      if (targets.length === 0) finishRobber(state);
+      // robberBounty house rule: even with no one to rob, the mover may still
+      // owe a choice (take the tile's resource), so stay in the steal phase.
+      if (targets.length === 0 && robberBountyResource(state) === null) finishRobber(state);
       else state.phase = "steal";
       return state;
     }
@@ -853,6 +871,7 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
     case "steal": {
       require(state.phase === "steal", "not time to steal");
       const targets = getStealTargets(state, geo);
+      // No targets: a no-op steal skips (also declines a pending bounty take).
       if (targets.length === 0) { finishRobber(state); return state; }
       require(action.target !== null && targets.includes(action.target), "invalid steal target");
       const victim = state.players[action.target]!;
@@ -861,6 +880,18 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
       const picked = pool[Math.floor(advanceRng(state) * pool.length)]!;
       victim.hand[picked]--;
       me.hand[picked]++;
+      finishRobber(state);
+      return state;
+    }
+
+    case "robberTake": {
+      // robberBounty house rule: instead of stealing, take 1 card of the
+      // robbed tile's resource from the bank.
+      require(state.phase === "steal", "not time to rob");
+      const res = robberBountyResource(state);
+      require(res !== null, "the robber's tile has no resource to take");
+      me.hand[res]++;
+      state.bank[res]--;
       finishRobber(state);
       return state;
     }
@@ -1205,6 +1236,7 @@ export interface GameView {
   winner: PlayerId | null;
   pendingTrade: PendingTrade | null;
   pendingDiscards: Record<PlayerId, number>;
+  robberBounty: boolean;
   // "CATAN for Two" variant (inert defaults outside it)
   twoPlayerVariant: boolean;
   neutralPlayerIds: PlayerId[];
@@ -1260,6 +1292,7 @@ export function viewForPlayer(state: GameState, viewer: PlayerId): GameView {
     winner: s.winner,
     pendingTrade: s.pendingTrade,
     pendingDiscards: s.pendingDiscards,
+    robberBounty: s.robberBounty,
     twoPlayerVariant: s.twoPlayerVariant,
     neutralPlayerIds: s.neutralPlayerIds,
     tokenSupply: s.tokenSupply,

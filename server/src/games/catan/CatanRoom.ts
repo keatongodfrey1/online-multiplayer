@@ -48,6 +48,7 @@ const {
   createInitialGameState,
   victoryPoints,
   publicVictoryPoints,
+  robberBountyResource,
   tryReduce,
   mulberry32,
   GreedyPolicy,
@@ -107,6 +108,16 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     const seed = (options as { seed?: unknown } | null)?.seed;
     if (typeof seed === "number" && Number.isFinite(seed)) this.seedOption = seed >>> 0;
     this.onMessage(CatanMsg.ACTION, (client, payload) => this.handleAction(client, payload));
+    this.onMessage(CatanMsg.CONFIG, (client, payload) => this.handleConfig(client, payload));
+  }
+
+  /** Host adjusts the pre-game rule toggles while in the lobby. */
+  private handleConfig(client: Client, payload: unknown): void {
+    if (this.state.phase !== Phase.LOBBY) return;
+    if (client.sessionId !== this.state.hostSessionId) return;
+    const p = payload as { useTwoPlayerVariant?: unknown; robberBounty?: unknown } | null;
+    if (typeof p?.useTwoPlayerVariant === "boolean") this.state.useTwoPlayerVariant = p.useTwoPlayerVariant;
+    if (typeof p?.robberBounty === "boolean") this.state.robberBounty = p.robberBounty;
   }
 
   protected onGameStart(): void {
@@ -115,7 +126,7 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     this.seatOrder = players.map((p) => p.sessionId);
     this.frameworkSeatByEngineSeat = players.map((p) => p.seat);
     const seed = this.seedOption ?? Math.floor(Math.random() * 0xffffffff) >>> 0;
-    const twoPlayerVariant = players.length === 2;
+    const twoPlayerVariant = players.length === 2 && this.state.useTwoPlayerVariant;
     // The official "highest roll starts": a seeded-random starting seat.
     const startingPlayer = Math.floor(mulberry32(seed ^ 0x5eed1e55)() * players.length);
     this.engine = createInitialGameState(geo, {
@@ -124,6 +135,7 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
       numbers: "spiral",
       startingPlayer,
       twoPlayerVariant,
+      robberBounty: this.state.robberBounty,
     });
     this.ghost = new RandomPolicy((seed ^ 0x9e3779b9) >>> 0);
     this.botBrains.clear();
@@ -159,11 +171,20 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     fillArray(this.state.portVertices, this.engine.board.ports.length * 2, 0);
 
     this.state.log.clear();
-    this.pushLog(
-      twoPlayerVariant
-        ? "Two-player game: official CATAN-for-Two rules (neutral players & trade tokens)."
-        : "Game started.",
-    );
+    if (twoPlayerVariant) {
+      const colorOf = (i: number) => this.engine.players[i]?.color ?? "";
+      this.pushLog("Two players — official CATAN-for-Two rules: trade tokens are in play.");
+      this.pushLog(
+        `Neutral A (${colorOf(2)}) and Neutral B (${colorOf(3)}) start with one settlement each and never play a turn — but every road or settlement you build also places a free piece for a neutral of your choice.`,
+      );
+    } else if (players.length === 2) {
+      this.pushLog("Two players — plain standard rules (no neutral players or trade tokens).");
+    } else {
+      this.pushLog("Game started.");
+    }
+    if (this.state.robberBounty) {
+      this.pushLog("House rule on: the robber's mover may take the tile's resource from the bank instead of stealing.");
+    }
     this.pushLog(`${this.nickname(this.engine.currentPlayer)} places first.`);
     this.project();
     this.maybeScheduleBot(); // a bot can hold the first setup placement
@@ -320,6 +341,7 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
   private project(): void {
     const e = this.engine;
     const s = this.state;
+    const over = e.winner !== null;
 
     e.board.hexes.forEach((h, i) => {
       if (s.hexTerrain[i] !== h.terrain) s.hexTerrain[i] = h.terrain;
@@ -354,7 +376,9 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
       if (seat.handCount !== handCount) seat.handCount = handCount;
       if (seat.devCardCount !== ep.devCards.length) seat.devCardCount = ep.devCards.length;
       if (seat.knightsPlayed !== ep.knightsPlayed) seat.knightsPlayed = ep.knightsPlayed;
-      const pubVP = publicVictoryPoints(e, i);
+      // While playing, hidden VP cards stay hidden; once the game is over the
+      // final scores reveal them (the table moment where everyone shows cards).
+      const pubVP = over ? victoryPoints(e, i) : publicVictoryPoints(e, i);
       if (seat.publicVP !== pubVP) seat.publicVP = pubVP;
       const lr = e.longestRoadHolder === i;
       const la = e.largestArmyHolder === i;
@@ -374,7 +398,6 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
       }
     });
 
-    const over = e.winner !== null;
     s.phaseDetail = over ? "gameOver" : e.phase;
     s.currentSeat = e.currentPlayer;
     const awaiting = over ? [] : this.awaitingEngineSeats();
@@ -488,6 +511,9 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
           const after = RESOURCES.reduce((t, r) => t + next.players[action.target!]!.hand[r], 0);
           if (after < before) this.pushLog(`${who} stole a card from ${this.nickname(action.target)}.`);
         }
+        break;
+      case "robberTake":
+        this.pushLog(`${who} took 1 ${robberBountyResource(prev) ?? "card"} from the bank with the robber.`);
         break;
       case "buildRoad":
         this.pushLog(`${who} built a road.`);

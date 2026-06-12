@@ -169,9 +169,10 @@ describe("catan", () => {
     e.board.edges[geo.vertices[target!]!.edges[0]!]!.road = { owner: 0 };
     e.players[0]!.hand = { lumber: 1, brick: 1, wool: 1, grain: 1, ore: 0 };
     e.players[0]!.piecesLeft.settlements = 2;
+    e.players[0]!.devCards.push({ type: "victoryPoint", boughtThisTurn: false, played: false }); // hidden until the end
     e.phase = "main";
     e.currentPlayer = 0;
-    assert.equal(victoryPoints(e, 0), 9);
+    assert.equal(victoryPoints(e, 0), 10, "9 building VP + 1 hidden VP card");
 
     clientFor(room, clients, 0)!.send(CatanMsg.ACTION, { type: "buildSettlement", vertex: target });
     await until(() => room.state.phase === Phase.ENDED);
@@ -180,6 +181,9 @@ describe("catan", () => {
     assert.equal(room.state.currentTurn, "", "turn cleared after game end");
     assert.equal(room.state.phaseDetail, "gameOver");
     assert.ok([...room.state.log].some((l) => l.includes("wins")), "the win is narrated");
+    // The final score reveals hidden VP cards: publicVP becomes the FULL total.
+    assert.equal(room.state.seats[0]!.publicVP, victoryPoints(room.engine, 0));
+    assert.equal(room.state.seats[0]!.publicVP, 11, "10 building VP + the revealed VP card");
   });
 
   it("ignores out-of-turn, malformed, and unknown actions", async () => {
@@ -525,6 +529,83 @@ describe("catan", () => {
       room.state.endReason,
       `${EndReason.WIN_PREFIX}${room.frameworkSeatByEngineSeat[winnerSeat]}`,
     );
+  });
+
+  it("rule toggles are host-only and lobby-only", async () => {
+    const room = (await colyseus.createRoom(CATAN, { seed: 53 })) as unknown as CatanRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Host" });
+    const guest = await colyseus.connectTo(room, { nickname: "Guest" });
+    assert.equal(room.state.useTwoPlayerVariant, true, "official 2p rules by default");
+    assert.equal(room.state.robberBounty, false, "house rule off by default");
+
+    host.send(CatanMsg.CONFIG, { robberBounty: true });
+    await until(() => room.state.robberBounty === true);
+    host.send(CatanMsg.CONFIG, { useTwoPlayerVariant: false });
+    await until(() => room.state.useTwoPlayerVariant === false);
+
+    guest.send(CatanMsg.CONFIG, { robberBounty: false, useTwoPlayerVariant: true }); // not the host
+    host.send(CatanMsg.CONFIG, { robberBounty: "yes", useTwoPlayerVariant: 1 }); // wrong types
+    host.send(CatanMsg.CONFIG, {});
+    await sleep(100);
+    assert.equal(room.state.robberBounty, true, "junk and non-host configs ignored");
+    assert.equal(room.state.useTwoPlayerVariant, false);
+
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    host.send(CatanMsg.CONFIG, { robberBounty: false }); // mid-game: ignored
+    await sleep(100);
+    assert.equal(room.state.robberBounty, true);
+    assert.equal(room.engine.robberBounty, true, "the toggle reached the engine");
+  });
+
+  it("two humans with the variant toggled off play the plain standard rules", async () => {
+    const { room, clients } = await startedGame(59, 2, (r) => {
+      r.state.useTwoPlayerVariant = false;
+    });
+    assert.equal(room.state.twoPlayerVariant, false);
+    assert.equal(room.state.seats.length, 2, "no neutral seats");
+    assert.ok(room.state.vertexOwner.every((o) => o === -1), "no pre-placed settlements");
+    assert.ok([...room.state.log].some((l) => l.includes("plain standard rules")));
+
+    await driveSetup(room, clients);
+    const prev = room.engine;
+    clientFor(room, clients, prev.currentPlayer)!.send(CatanMsg.ACTION, { type: "rollDice" });
+    await until(() => room.engine !== prev);
+    await flushRobber(room, clients);
+    assert.equal(room.engine.phase, "main", "single roll per turn");
+    assert.equal(room.state.rollsThisTurn, 1);
+  });
+
+  it("the robber-bounty house rule flows end to end", async () => {
+    const { room, clients } = await startedGame(61, 3, (r) => {
+      r.state.robberBounty = true;
+    });
+    await driveSetup(room, clients);
+    assert.ok([...room.state.log].some((l) => l.includes("House rule")));
+
+    // white-box to the robber decision, aimed at an unoccupied resource hex
+    const e = room.engine;
+    e.phase = "moveRobber";
+    e.robberReturnPhase = "main";
+    e.currentPlayer = 0;
+    const hex = geo.hexes.find((h) => {
+      const hs = e.board.hexes[h.id]!;
+      const res = CatanEngine.TERRAIN_RESOURCE[hs.terrain];
+      if (h.id === e.board.robberHex || res === null) return false;
+      return h.vertices.every((v) => e.board.vertices[v]!.building === null);
+    })!.id;
+    const res = CatanEngine.TERRAIN_RESOURCE[e.board.hexes[hex]!.terrain]!;
+    const actor = clientFor(room, clients, 0)!;
+
+    actor.send(CatanMsg.ACTION, { type: "moveRobber", hex });
+    await until(() => room.state.phaseDetail === "steal");
+    assert.equal(room.state.currentTurn, actor.sessionId, "the mover owes the choice even with no targets");
+
+    const before = room.engine.players[0]!.hand[res];
+    actor.send(CatanMsg.ACTION, { type: "robberTake" });
+    await until(() => room.state.phaseDetail === "main");
+    assert.equal(room.engine.players[0]!.hand[res], before + 1, "took the tile's resource");
+    assert.ok([...room.state.log].some((l) => l.includes("from the bank with the robber")));
   });
 
   it("sanitize: forges and junk shapes are rejected, player fields are forced", () => {

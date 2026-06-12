@@ -216,9 +216,40 @@ describe("catan engine: setup", () => {
     assert.deepEqual(a, b);
   });
 
-  it("rejects player counts outside 3-6", () => {
-    assert.throws(() => createInitialGameState(geo, { numPlayers: 2 }));
+  it("rejects player counts outside 2-6 (2 = plain house rules)", () => {
+    assert.throws(() => createInitialGameState(geo, { numPlayers: 1 }));
     assert.throws(() => createInitialGameState(geo, { numPlayers: 7 }));
+    const plain = createInitialGameState(geo, { numPlayers: 2, seed: 5 });
+    assert.equal(plain.players.length, 2, "plain 2p: just the two humans");
+    assert.deepEqual(plain.neutralPlayerIds, []);
+    assert.equal(plain.twoPlayerVariant, false);
+  });
+
+  it("plain 2-player games use the standard flow (no variant mechanics)", () => {
+    let s = createInitialGameState(geo, { numPlayers: 2, seed: 6 });
+    assert.deepEqual(s.setupSequence, [0, 1, 1, 0]);
+    assert.equal(s.players[0]!.tradeTokens, 0, "no trade tokens");
+    assert.equal(s.board.vertices.filter((v) => v.building).length, 0, "no pre-placed settlements");
+    let guard = 0;
+    while ((s.phase === "setupSettlement" || s.phase === "setupRoad") && guard++ < 60) {
+      if (s.phase === "setupSettlement")
+        s = reduce(geo, s, { type: "placeSetupSettlement", vertex: getValidInitialSettlements(geo, s.board)[0]! });
+      else
+        s = reduce(geo, s, {
+          type: "placeSetupRoad",
+          edge: getValidRoads(geo, s.board, s.currentPlayer, { setupVertex: s.lastSettlementVertex! })[0]!,
+        });
+    }
+    assert.equal(s.phase, "preRoll");
+    s = reduce(geo, s, { type: "rollDice", dice: [2, 3] }, TRUST); // 5
+    assert.equal(s.phase, "main", "ONE roll per turn — straight to main");
+    // a road build owes nothing to anyone
+    s.players[0]!.hand = { ...emptyBag(), lumber: 1, brick: 1 };
+    s = reduce(geo, s, { type: "buildRoad", edge: getValidRoads(geo, s.board, 0)[0]! });
+    assert.equal(s.phase, "main", "no neutral-build obligation");
+    s = reduce(geo, s, { type: "endTurn" });
+    assert.equal(s.currentPlayer, 1, "plain rotation between the two humans");
+    assert.equal(tryReduce(geo, s, { type: "playForcedTrade" }).ok, false, "no token actions");
   });
 
   it("terrain, numbers, robber and ports are dealt correctly", () => {
@@ -980,9 +1011,9 @@ function to2pMain(s: GameState): GameState {
 }
 
 describe("catan engine: CATAN for Two — setup & neutrals", () => {
-  it("gates the player counts: 2 needs the variant, the variant needs exactly 2", () => {
-    assert.throws(() => createInitialGameState(geo, { numPlayers: 2 }));
+  it("gates the player counts: the variant needs exactly 2 players", () => {
     assert.throws(() => createInitialGameState(geo, { numPlayers: 3, twoPlayerVariant: true }));
+    assert.throws(() => createInitialGameState(geo, { numPlayers: 4, twoPlayerVariant: true }));
     const s = createInitialGameState(geo, { numPlayers: 2, twoPlayerVariant: true, seed: 1 });
     assert.equal(s.players.length, 4, "2 humans + 2 neutral piece sets");
     assert.deepEqual(s.neutralPlayerIds, [2, 3]);
@@ -1387,6 +1418,109 @@ describe("catan engine: CATAN for Two — trade tokens", () => {
     assert.equal(s.largestArmyHolder, 1, "opponent with 3 takes the card immediately");
   });
 });
+
+// =============================================================================
+// robberBounty house rule: steal OR take the tile's resource from the bank
+// =============================================================================
+
+describe("catan engine: robberBounty house rule", () => {
+  /** A 3p game with the rule on, white-boxed to the moveRobber decision. */
+  function atRobber(seed: number, on = true): GameState {
+    const s = setupGame(3, seed, { robberBounty: on });
+    s.phase = "moveRobber";
+    s.robberReturnPhase = "main";
+    s.currentPlayer = 0;
+    return s;
+  }
+  /** A hex with a resource, an open bank pile, and no buildings around it. */
+  function lonelyResourceHex(s: GameState): number {
+    return geo.hexes.find((h) => {
+      const hex = s.board.hexes[h.id]!;
+      const res = CatanEngine.TERRAIN_RESOURCE[hex.terrain];
+      if (h.id === s.board.robberHex || res === null || s.bank[res] <= 0) return false;
+      return h.vertices.every((v) => s.board.vertices[v]!.building === null);
+    })!.id;
+  }
+
+  it("with no one to rob, the mover still gets the take-from-bank choice", () => {
+    let s = atRobber(60);
+    const hex = lonelyResourceHex(s);
+    const res = CatanEngine.TERRAIN_RESOURCE[s.board.hexes[hex]!.terrain]!;
+    const bankBefore = s.bank[res];
+    const handBefore = s.players[0]!.hand[res];
+    s = reduce(geo, s, { type: "moveRobber", hex });
+    assert.equal(s.phase, "steal", "stays open for the bounty choice");
+    s = reduce(geo, s, { type: "robberTake" });
+    assert.equal(s.players[0]!.hand[res], handBefore + 1, "took 1 of the tile's resource");
+    assert.equal(s.bank[res], bankBefore - 1, "paid by the bank");
+    assert.equal(s.phase, "main");
+  });
+
+  it("with someone to rob, the mover chooses: steal or take", () => {
+    let s = atRobber(61);
+    const hex = lonelyResourceHex(s);
+    const res = CatanEngine.TERRAIN_RESOURCE[s.board.hexes[hex]!.terrain]!;
+    // park an opponent settlement with cards on the hex
+    const v = geo.hexes[hex]!.vertices.find((vv) => s.board.vertices[vv]!.building === null)!;
+    s.board.vertices[v]!.building = { owner: 1, type: "settlement" };
+    s.players[1]!.hand = { ...emptyBag(), wool: 2 };
+    const handBefore = s.players[0]!.hand[res];
+    s = reduce(geo, s, { type: "moveRobber", hex });
+    assert.equal(s.phase, "steal");
+    assert.deepEqual(getStealTargets(s, geo), [1], "the normal steal is still on the table");
+    const taken = reduce(geo, s, { type: "robberTake" });
+    assert.equal(taken.players[0]!.hand[res], handBefore + 1, "…but the mover may take the tile resource instead");
+    assert.equal(taken.players[1]!.hand.wool, 2, "no card was stolen");
+    const stolen = reduce(geo, s, { type: "steal", target: 1 });
+    assert.equal(handCountOf(stolen.players[1]!), 1, "…or steal normally");
+  });
+
+  it("no bounty from the desert or an empty bank pile; rule off rejects robberTake", () => {
+    // desert: no resource -> robber resolves immediately when no targets
+    let s = atRobber(62);
+    s.players.forEach((p) => (p.hand = emptyBag())); // empty hands = no steal targets anywhere
+    const desert = s.board.hexes.findIndex((h) => h.terrain === "desert");
+    if (s.board.robberHex === desert) s.board.robberHex = geo.hexes.find((h) => h.id !== desert)!.id;
+    const out = reduce(geo, s, { type: "moveRobber", hex: desert });
+    assert.equal(out.phase, "main", "desert offers nothing to take");
+
+    // empty bank pile: the take option vanishes
+    let t = atRobber(63);
+    const hex = lonelyResourceHex(t);
+    const res = CatanEngine.TERRAIN_RESOURCE[t.board.hexes[hex]!.terrain]!;
+    t.bank[res] = 0;
+    const out2 = reduce(geo, t, { type: "moveRobber", hex });
+    assert.equal(out2.phase, "main", "no bank cards -> nothing to take");
+
+    // rule off: classic behavior, robberTake is illegal
+    let u = atRobber(64, false);
+    const hex2 = lonelyResourceHex(u);
+    const out3 = reduce(geo, u, { type: "moveRobber", hex: hex2 });
+    assert.equal(out3.phase, "main", "no targets and no rule -> robber just resolves");
+    u = atRobber(65, false);
+    const lh = lonelyResourceHex(u);
+    const vtx = geo.hexes[lh]!.vertices[0]!;
+    u.board.vertices[vtx]!.building = { owner: 1, type: "settlement" };
+    u.players[1]!.hand = { ...emptyBag(), ore: 1 };
+    u = reduce(geo, u, { type: "moveRobber", hex: lh });
+    assert.equal(u.phase, "steal");
+    assert.equal(tryReduce(geo, u, { type: "robberTake" }).ok, false, "robberTake needs the house rule");
+  });
+
+  it("policies handle the bounty: with no targets they take instead of stalling", () => {
+    const s = atRobber(66);
+    const hex = lonelyResourceHex(s);
+    const inSteal = reduce(geo, s, { type: "moveRobber", hex });
+    assert.equal(inSteal.phase, "steal");
+    assert.deepEqual(getStealTargets(inSteal, geo), []);
+    assert.deepEqual(new RandomPolicy(1).act(geo, inSteal, 0), { type: "robberTake" });
+    assert.deepEqual(new GreedyPolicy(1).act(geo, inSteal, 0), { type: "robberTake" });
+  });
+});
+
+function handCountOf(p: CatanEngine.PlayerState): number {
+  return RESOURCES.reduce((t, r) => t + p.hand[r], 0);
+}
 
 // =============================================================================
 // Policies (the bot/ghost brains the room will use)

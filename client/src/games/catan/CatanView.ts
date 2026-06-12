@@ -67,22 +67,131 @@ function boardFromState(state: CatanState): CatanEngine.BoardState {
   };
 }
 
-/** Lobby settings hook: just the host's add-bot button. */
+/** Lobby settings hook: rule toggles (host-live, read-only for guests) and
+ *  the host's add-bot button. The server validates (host-only, lobby-only). */
 export function renderCatanLobbySettings(
   container: HTMLElement,
   room: Room<any, BaseState>,
   ctx: LobbySettingsContext,
 ): void {
-  if (!ctx.isHost) return;
   const state = room.state as unknown as CatanState;
   const seatsLeft = state.maxPlayers - state.players.size;
-  container.innerHTML = `
-    <button id="catan-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>
-      ${seatsLeft > 0 ? "+ Add AI opponent" : "Table is full"}
-    </button>`;
+  const isTwo = state.players.size === 2;
+  const official = state.useTwoPlayerVariant;
+
+  const twoRules = isTwo
+    ? `<label class="catan-lobby-setting">
+        2-player rules
+        <select id="catan-two-rules" ${ctx.isHost ? "" : "disabled"}>
+          <option value="official" ${official ? "selected" : ""}>Official "CATAN for Two"</option>
+          <option value="plain" ${official ? "" : "selected"}>Plain standard rules</option>
+        </select>
+        ${ctx.isHost ? "" : '<span class="muted">(host chooses)</span>'}
+      </label>`
+    : "";
+  const note = isTwo
+    ? official
+      ? `<p class="catan-lobby-note">Official <strong>CATAN for Two</strong>: two <em>neutral</em>
+          piece sets start on the board with one settlement each (they never take turns or score),
+          every road or settlement you build also places a free piece for a neutral, and trade
+          tokens unlock Forced Trades. Seat a third player or an AI for the standard game.</p>`
+      : `<p class="catan-lobby-note"><strong>Plain standard rules</strong> with 2 players — no
+          neutral pieces, no trade tokens. Quicker to learn, but trading and the robber are less
+          balanced head-to-head.</p>`
+    : "";
+  const robber = `
+    <label class="catan-lobby-setting catan-lobby-check">
+      <input type="checkbox" id="catan-robber-bounty" ${state.robberBounty ? "checked" : ""} ${
+        ctx.isHost ? "" : "disabled"
+      }/>
+      <span>House rule: whoever moves the robber may <strong>take 1 of the tile's resource</strong>
+      from the bank instead of stealing</span>
+    </label>`;
+  const addBot = ctx.isHost
+    ? `<button id="catan-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>
+        ${seatsLeft > 0 ? "+ Add AI opponent" : "Table is full"}
+      </button>`
+    : "";
+  container.innerHTML = twoRules + note + robber + addBot;
+  container.querySelector<HTMLSelectElement>("#catan-two-rules")?.addEventListener("change", (ev) => {
+    room.send(CatanMsg.CONFIG, { useTwoPlayerVariant: (ev.target as HTMLSelectElement).value === "official" });
+  });
+  container.querySelector<HTMLInputElement>("#catan-robber-bounty")?.addEventListener("change", (ev) => {
+    room.send(CatanMsg.CONFIG, { robberBounty: (ev.target as HTMLInputElement).checked });
+  });
   container.querySelector<HTMLButtonElement>("#catan-add-bot")?.addEventListener("click", () => {
     room.send(LobbyMsg.ADD_BOT, {});
   });
+}
+
+/** Game-over summary (GameDefinition.renderGameSummary): the final score
+ *  table. By the end of the game seat.publicVP is the FULL total - the server
+ *  reveals hidden Victory Point cards once the game is over. */
+export function renderCatanGameSummary(
+  container: HTMLElement,
+  room: Room<any, BaseState>,
+  ctx: GameViewContext,
+): void {
+  const state = room.state as unknown as CatanState;
+  if (!state.seats.length) return;
+
+  // building counts per seat, straight off the public board
+  const settlements = new Array<number>(state.seats.length).fill(0);
+  const cities = new Array<number>(state.seats.length).fill(0);
+  state.vertexOwner.forEach((owner, v) => {
+    if (owner < 0) return;
+    if (state.vertexIsCity[v]) cities[owner]!++;
+    else settlements[owner]!++;
+  });
+
+  // endReason carries the FRAMEWORK seat; map it back to an engine seat
+  let winnerSeat = -1;
+  if (state.endReason.startsWith("win:")) {
+    const frameworkSeat = Number(state.endReason.slice(4));
+    for (const p of state.players.values()) {
+      if (p.seat === frameworkSeat) {
+        winnerSeat = [...state.seats].findIndex((s) => s.sessionId === p.sessionId);
+        break;
+      }
+    }
+  }
+
+  const rows = [...state.seats]
+    .map((seat, i) => ({ seat, i }))
+    .filter(({ seat }) => !seat.neutral)
+    .sort((a, b) => b.seat.publicVP - a.seat.publicVP || a.i - b.i)
+    .map(({ seat, i }) => {
+      const devVP = Math.max(
+        0,
+        seat.publicVP -
+          settlements[i]! -
+          2 * cities[i]! -
+          (seat.hasLongestRoad ? 2 : 0) -
+          (seat.hasLargestArmy ? 2 : 0),
+      );
+      const bits: string[] = [];
+      if (settlements[i]) bits.push(`🏠×${settlements[i]}`);
+      if (cities[i]) bits.push(`🏛×${cities[i]}`);
+      if (seat.hasLongestRoad) bits.push("🛤 Longest Road +2");
+      if (seat.hasLargestArmy) bits.push("♞ Largest Army +2");
+      if (devVP > 0) bits.push(`⭐ VP cards ×${devVP}`);
+      const you = seat.sessionId && seat.sessionId === ctx.mySessionId ? " (you)" : "";
+      return `
+        <div class="catan-summary-row ${i === winnerSeat ? "catan-summary-winner" : ""}">
+          <span class="catan-color" style="background:${PLAYER_COLOR[seat.color] ?? "#999"}"></span>
+          <strong>${i === winnerSeat ? "👑 " : ""}${escapeHtml(seat.nickname)}${you}</strong>
+          <span class="catan-summary-vp">${seat.publicVP} VP</span>
+          <span class="muted">${bits.join(" · ") || "—"}</span>
+        </div>`;
+    })
+    .join("");
+
+  const neutralLR = [...state.seats].find((s) => s.neutral && s.hasLongestRoad);
+  container.innerHTML = `
+    <div class="catan-summary">
+      ${rows}
+      ${neutralLR ? `<p class="muted">Longest Road ended with ${escapeHtml(neutralLR.nickname)} — nobody scores it.</p>` : ""}
+    </div>`;
 }
 
 export class CatanView implements GameView {
@@ -165,6 +274,10 @@ export class CatanView implements GameView {
   private canAfford(cost: Partial<Bag>): boolean {
     const hand = this.myHand();
     return RESOURCES.every((r) => hand[r] >= (cost[r] ?? 0));
+  }
+
+  private bankOf(s: CatanState): Bag {
+    return { lumber: s.bank.lumber, brick: s.bank.brick, wool: s.bank.wool, grain: s.bank.grain, ore: s.bank.ore };
   }
 
   private nickname(seatIdx: number): string {
@@ -368,17 +481,23 @@ export class CatanView implements GameView {
     }
     if (mine && s.phaseDetail === "steal") {
       const targets = this.stealTargets(s, me);
+      // robberBounty house rule: the tile's resource may be taken instead
+      const terrain = s.hexTerrain[s.robberHex] ?? "desert";
+      const res = CatanEngine.TERRAIN_RESOURCE[terrain as CatanEngine.Terrain];
+      const canTake = s.robberBounty && res !== null && this.bankOf(s)[res] > 0;
+      const buttons = targets.map(
+        (t) =>
+          `<button data-action="steal" data-id="${t}">Steal from ${this.nickname(t)} (${this.seat(t)?.handCount ?? 0} cards)</button>`,
+      );
+      if (canTake) {
+        buttons.push(
+          `<button data-action="robber-take">Take 1 ${resourceIcon(res!)} ${res} from the bank</button>`,
+        );
+      }
       el.innerHTML = `
         <div class="catan-panel">
-          <h3>Steal one random card from…</h3>
-          <div class="catan-row">
-            ${targets
-              .map(
-                (t) =>
-                  `<button data-action="steal" data-id="${t}">${this.nickname(t)} (${this.seat(t)?.handCount ?? 0} cards)</button>`,
-              )
-              .join("")}
-          </div>
+          <h3>${targets.length ? "The robber strikes…" : "No one to rob here"}</h3>
+          <div class="catan-row">${buttons.join("")}</div>
         </div>`;
       return;
     }
@@ -754,9 +873,12 @@ export class CatanView implements GameView {
           this.render();
         }
         return;
-      // steal
+      // steal / robberBounty take
       case "steal":
         this.send({ type: "steal", target: id });
+        return;
+      case "robber-take":
+        this.send({ type: "robberTake" });
         return;
       // neutral build picker
       case "neutral-pick":

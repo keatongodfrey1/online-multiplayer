@@ -160,6 +160,10 @@ export interface GameState {
   specialBuildQueue: PlayerId[]; // players still to get a build window this round
   specialBuilder: PlayerId | null; // whose special-build window is active
 
+  /** House rule: after moving the robber, the mover may take 1 of the tile's
+   *  resource from the bank instead of stealing. */
+  robberBounty: boolean;
+
   // Official "CATAN for Two" variant (all defaulted/inert outside it)
   twoPlayerVariant: boolean;
   neutralPlayerIds: PlayerId[]; // [] normally; [2, 3] in the variant
