@@ -12,7 +12,7 @@ import {
 import { SplendorRoom } from "../src/games/splendor/SplendorRoom.js";
 import { sleep, until } from "./StubRoom.js";
 
-const { GreedyPolicy, assertInvariants, ranking } = SplendorEngine;
+const { GreedyPolicy, RandomPolicy, assertInvariants, ranking } = SplendorEngine;
 
 function makeConfig() {
   return defineServer({
@@ -524,7 +524,7 @@ describe("splendor", () => {
     await until(() => room.state.players.size === 3);
     const bot = [...room.state.players.values()].find((p) => p.isBot)!;
     assert.ok(bot.sessionId.startsWith("bot:"));
-    assert.strictEqual(bot.nickname, "Botty");
+    assert.strictEqual(bot.nickname, "Botty (hard)", "default difficulty is hard");
     assert.strictEqual(bot.connected, true);
     assert.strictEqual(bot.seat, 2, "bot takes the lowest free seat");
 
@@ -640,5 +640,33 @@ describe("splendor", () => {
       [...room.state.players.values()].some((p) => p.isBot),
       "bot still at the table"
     );
+  });
+
+  it("gives easy and hard bots the matching policies", async () => {
+    const room = (await colyseus.createRoom(SPLENDOR, { seed: 73 })) as unknown as SplendorRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Solo" });
+    host.send(LobbyMsg.ADD_BOT, { difficulty: "easy" });
+    await until(() => room.state.players.size === 2);
+    host.send(LobbyMsg.ADD_BOT, { difficulty: "hard" });
+    await until(() => room.state.players.size === 3);
+    host.send(LobbyMsg.ADD_BOT, { difficulty: "nonsense" }); // unknown -> hard
+    await until(() => room.state.players.size === 4);
+
+    const bots = [...room.state.players.values()].filter((p) => p.isBot);
+    const easy = bots.find((p) => p.nickname.endsWith("(easy)"))!;
+    assert.strictEqual(bots.filter((p) => p.nickname.endsWith("(hard)")).length, 2);
+
+    room.botDelayMs = 1;
+    room.state.turnSeconds = 0;
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    // RandomPolicy extends GreedyPolicy, so check the easy one positively
+    // and the hard ones negatively.
+    assert.ok(room.botBrains.get(easy.sessionId) instanceof RandomPolicy, "easy bot plays randomly");
+    for (const bot of bots) {
+      if (bot === easy) continue;
+      const brain = room.botBrains.get(bot.sessionId)!;
+      assert.ok(brain instanceof GreedyPolicy && !(brain instanceof RandomPolicy), "hard bot plays greedy");
+    }
   });
 });

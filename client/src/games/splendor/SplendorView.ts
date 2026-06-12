@@ -93,10 +93,13 @@ export function renderSplendorLobbySettings(
     options.push(`<option value="${s}" ${current === s ? "selected" : ""}>${formatSeconds(s)}</option>`);
   }
   const seatsLeft = state.maxPlayers - state.players.size;
-  const addBot = ctx.isHost
-    ? `<button id="spl-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>
-         ${seatsLeft > 0 ? "+ Add AI opponent" : "Table is full"}
-       </button>`
+  const addBots = ctx.isHost
+    ? seatsLeft > 0
+      ? `<div class="spl-lobby-setting">AI opponent
+           <button class="spl-add-bot" data-difficulty="easy">+ Easy AI</button>
+           <button class="spl-add-bot" data-difficulty="hard">+ Hard AI</button>
+         </div>`
+      : `<div class="spl-lobby-setting muted">Table is full</div>`
     : "";
   container.innerHTML = `
     <label class="spl-lobby-setting">
@@ -104,13 +107,15 @@ export function renderSplendorLobbySettings(
       <select id="spl-turn-seconds" ${ctx.isHost ? "" : "disabled"}>${options.join("")}</select>
       ${ctx.isHost ? "" : '<span class="muted">(host chooses)</span>'}
     </label>
-    ${addBot}`;
+    ${addBots}`;
   container.querySelector<HTMLSelectElement>("#spl-turn-seconds")?.addEventListener("change", (ev) => {
     const turnSeconds = Number((ev.target as HTMLSelectElement).value);
     room.send(SplendorMsg.CONFIG, { turnSeconds });
   });
-  container.querySelector<HTMLButtonElement>("#spl-add-bot")?.addEventListener("click", () => {
-    room.send(LobbyMsg.ADD_BOT, {});
+  container.querySelectorAll<HTMLButtonElement>(".spl-add-bot").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      room.send(LobbyMsg.ADD_BOT, { difficulty: btn.dataset.difficulty });
+    });
   });
 }
 

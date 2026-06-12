@@ -74,8 +74,10 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
 
   /** Plays vacated seats (and their pending sub-decisions). Reseeded per game. */
   private ghost = new RandomPolicy(1);
-  /** Brains for seated AI players, by bot sessionId. Rebuilt per game. */
-  private botBrains = new Map<string, Policy>();
+  /** Brains for seated AI players, by bot sessionId. Rebuilt per game. Public for tests. */
+  public botBrains = new Map<string, Policy>();
+  /** Difficulty per bot sessionId, chosen when the host seats it. */
+  private botDifficulty = new Map<string, "easy" | "hard">();
   /**
    * Pace of bot decisions. Instant bot turns would make the board mutate
    * with no visible cause; ~a second reads as "the bot took its turn".
@@ -120,6 +122,14 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     this.state.turnSeconds = turnSeconds;
   }
 
+  /** Read the host's difficulty pick for a freshly seated bot. */
+  protected override onBotAdded(bot: BasePlayer, options: unknown): void {
+    const difficulty = (options as { difficulty?: unknown } | null)?.difficulty;
+    const easy = difficulty === "easy";
+    this.botDifficulty.set(bot.sessionId, easy ? "easy" : "hard");
+    bot.nickname = `${bot.nickname} (${easy ? "easy" : "hard"})`;
+  }
+
   /**
    * Any player pauses/resumes a timed game (family-table etiquette: whoever
    * needs to step away hits pause; whoever is back first hits resume).
@@ -147,7 +157,10 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     this.ghost = new RandomPolicy(seed ^ 0x9e3779b9);
     this.botBrains.clear();
     players.forEach((p, i) => {
-      if (p.isBot) this.botBrains.set(p.sessionId, new GreedyPolicy((seed ^ (i + 1) * 0x5bd1e995) >>> 0));
+      if (!p.isBot) return;
+      const botSeed = (seed ^ ((i + 1) * 0x5bd1e995)) >>> 0;
+      const easy = this.botDifficulty.get(p.sessionId) === "easy";
+      this.botBrains.set(p.sessionId, easy ? new RandomPolicy(botSeed) : new GreedyPolicy(botSeed));
     });
 
     this.state.seats.clear();
@@ -457,6 +470,7 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
   protected override onPlayerLeftForGood(player: BasePlayer): void {
     this.turns?.remove(player.sessionId);
     this.grantedReserved.delete(player.sessionId);
+    this.botDifficulty.delete(player.sessionId);
     if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.over) return;
     // With too few humans left, the framework ends the game as "abandoned"
     // right after this hook - do not ghost-complete it first.
