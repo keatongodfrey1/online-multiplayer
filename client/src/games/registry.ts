@@ -2,9 +2,10 @@
  * Every game registers itself here with one entry.
  * The home screen's "create a game" menu is generated from this list.
  */
-import { ARENA, SPLENDOR, TICTACTOE } from "@backbone/shared";
+import { ARENA, CATAN, SPLENDOR, TICTACTOE } from "@backbone/shared";
 import type { GameDefinition } from "../framework/GameView.js";
 import { ArenaView } from "./arena/ArenaView.js";
+import { CatanView, renderCatanLobbySettings } from "./catan/CatanView.js";
 import { renderSplendorLobbySettings, SplendorView } from "./splendor/SplendorView.js";
 import { TicTacToeView } from "./tictactoe/TicTacToeView.js";
 
@@ -27,6 +28,13 @@ export const games: GameDefinition[] = [
     description: "2-4 players",
     createView: () => new SplendorView(),
     renderLobbySettings: renderSplendorLobbySettings,
+  },
+  {
+    gameType: CATAN,
+    displayName: "Catan",
+    description: "2-4 players (2p = official variant)",
+    createView: () => new CatanView(),
+    renderLobbySettings: renderCatanLobbySettings,
   },
 ];
 

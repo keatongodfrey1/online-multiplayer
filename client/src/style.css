@@ -535,3 +535,277 @@ button.spl-gem.selected {
   border-radius: 12px;
   font-size: 1.1rem;
 }
+
+/* ---- Catan ----------------------------------------------------------- */
+
+.catan {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.catan-status {
+  text-align: center;
+  font-size: 0.95rem;
+  min-height: 1.4em;
+}
+
+.catan-dice {
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
+/* Full-bleed board: break out of #app's 480px column on small screens. */
+.catan-board-wrap {
+  margin: 0 calc(50% - 50vw);
+  display: flex;
+  justify-content: center;
+}
+
+.catan-board-wrap > div {
+  width: min(100vw, 640px);
+}
+
+.catan-svg {
+  width: 100%;
+  height: auto;
+  max-height: 62vh;
+  display: block;
+  touch-action: manipulation;
+}
+
+@media (orientation: landscape) {
+  .catan-svg {
+    max-height: 70vh;
+  }
+}
+
+.catan-token {
+  font-size: 15px;
+  font-weight: 700;
+  fill: #2a2417;
+}
+
+.catan-token-pips {
+  font-size: 11px;
+  letter-spacing: 1px;
+  fill: #2a2417;
+}
+
+.catan-token-red {
+  fill: #c0392b;
+}
+
+.catan-port-label {
+  font-size: 10px;
+  fill: var(--text);
+}
+
+.catan-hl-spot {
+  fill: rgba(91, 140, 255, 0.45);
+  stroke: var(--accent);
+  stroke-width: 2;
+  cursor: pointer;
+  animation: catan-pulse 1.2s ease-in-out infinite;
+}
+
+.catan-hl-edge-line {
+  stroke: rgba(91, 140, 255, 0.5);
+  stroke-width: 8;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.catan-hl-hex {
+  fill: rgba(91, 140, 255, 0.25);
+  stroke: var(--accent);
+  stroke-width: 3;
+  cursor: pointer;
+}
+
+@keyframes catan-pulse {
+  0%, 100% { opacity: 0.95; }
+  50% { opacity: 0.5; }
+}
+
+.catan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+.catan-actions button {
+  padding: 10px 12px;
+  font-size: 0.92rem;
+}
+
+.catan-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.catan-mode-on {
+  outline: 2px solid var(--accent);
+  background: #233052;
+}
+
+.catan-free-roads {
+  align-self: center;
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.catan-panel {
+  background: var(--card);
+  border: 1px solid #353a4f;
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.catan-panel h3 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+}
+
+.catan-panel h4 {
+  margin: 10px 0 6px;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.catan-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.catan-row button {
+  padding: 10px 12px;
+}
+
+.catan-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.catan-picker-row span:first-child {
+  min-width: 64px;
+}
+
+.catan-picker-row button {
+  width: 44px;
+  height: 40px;
+  padding: 0;
+  font-size: 1.2rem;
+}
+
+.catan-panel > button.primary {
+  margin-top: 10px;
+  width: 100%;
+}
+
+.catan-trade-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.catan-me,
+.catan-opponents {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.catan-mine,
+.catan-opp {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  background: var(--card);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 0.92rem;
+}
+
+.catan-color {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  border: 1px solid #10131c;
+  flex: none;
+}
+
+.catan-vp {
+  font-weight: 700;
+}
+
+.catan-hand {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.catan-chip {
+  background: #161927;
+  border: 1px solid #353a4f;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.95rem;
+}
+
+.catan-devs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.catan-dev {
+  background: #161927;
+  border: 1px solid #353a4f;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 0.85rem;
+}
+
+.catan-dev-new {
+  opacity: 0.6;
+}
+
+.catan-dev button {
+  padding: 4px 8px;
+  margin-left: 4px;
+  font-size: 0.8rem;
+}
+
+.catan-badge {
+  background: #2a2f44;
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 0.75rem;
+}
+
+.catan-badge-warn {
+  color: var(--warn);
+}
+
+.catan-badge-turn {
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  background: transparent;
+}
+
+.catan-log {
+  background: #11141d;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  max-height: 7.5em;
+  overflow-y: auto;
+}

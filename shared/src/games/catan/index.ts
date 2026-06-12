@@ -115,6 +115,8 @@ export class CatanState extends BaseState {
   @type(["uint8"]) awaitingSeats = new ArraySchema<number>();
   /** Cards each awaiting seat owes (parallel to awaitingSeats; discard only). */
   @type(["uint8"]) discardOwed = new ArraySchema<number>();
+  /** During setupRoad: the settlement just placed (the road must touch it). */
+  @type("int8") lastSettlementVertex = -1;
   /** Latest roll (0,0 = none yet this turn). */
   @type("uint8") dice1 = 0;
   @type("uint8") dice2 = 0;

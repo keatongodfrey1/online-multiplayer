@@ -384,6 +384,7 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
       e.phase === "discard" ? awaiting.map((seat) => this.engine.pendingDiscards[seat] ?? 0) : [],
     );
     s.currentTurn = !over && awaiting.length === 1 ? this.seatOrder[awaiting[0]!] ?? "" : "";
+    s.lastSettlementVertex = e.lastSettlementVertex ?? -1;
     s.dice1 = e.dice?.[0] ?? 0;
     s.dice2 = e.dice?.[1] ?? 0;
     s.firstDice1 = e.firstDice?.[0] ?? 0;
