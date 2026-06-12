@@ -156,6 +156,7 @@ export class RoomScreen {
               <span class="dot ${p.connected ? "on" : "off"}"></span>
               ${escapeHtml(p.nickname)}
               ${p.isHost ? '<span class="badge">host</span>' : ""}
+              ${p.isBot ? '<span class="badge">AI</span>' : ""}
               ${!p.connected ? '<span class="badge warn">reconnecting</span>' : ""}
               ${
                 isHost && p.sessionId !== this.room.sessionId

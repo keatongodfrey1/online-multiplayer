@@ -18,6 +18,8 @@ export class BasePlayer extends Schema {
   @type("boolean") isHost = false;
   /** True while this player has voted to play again (ended phase only). */
   @type("boolean") wantsRematch = false;
+  /** Server-driven AI player (no client behind it). The game supplies the brain. */
+  @type("boolean") isBot = false;
 }
 
 export class BaseState extends Schema {

@@ -7,6 +7,7 @@
 import type { Room } from "@colyseus/sdk";
 import {
   type BaseState,
+  LobbyMsg,
   SPLENDOR_TURN_MAX_SECONDS,
   SPLENDOR_TURN_STEP_SECONDS,
   SplendorEngine,
@@ -78,15 +79,25 @@ export function renderSplendorLobbySettings(
   for (let s = SPLENDOR_TURN_STEP_SECONDS; s <= SPLENDOR_TURN_MAX_SECONDS; s += SPLENDOR_TURN_STEP_SECONDS) {
     options.push(`<option value="${s}" ${current === s ? "selected" : ""}>${formatSeconds(s)}</option>`);
   }
+  const seatsLeft = state.maxPlayers - state.players.size;
+  const addBot = ctx.isHost
+    ? `<button id="spl-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>
+         ${seatsLeft > 0 ? "+ Add AI opponent" : "Table is full"}
+       </button>`
+    : "";
   container.innerHTML = `
     <label class="spl-lobby-setting">
       Turn timer
       <select id="spl-turn-seconds" ${ctx.isHost ? "" : "disabled"}>${options.join("")}</select>
       ${ctx.isHost ? "" : '<span class="muted">(host chooses)</span>'}
-    </label>`;
+    </label>
+    ${addBot}`;
   container.querySelector<HTMLSelectElement>("#spl-turn-seconds")?.addEventListener("change", (ev) => {
     const turnSeconds = Number((ev.target as HTMLSelectElement).value);
     room.send(SplendorMsg.CONFIG, { turnSeconds });
+  });
+  container.querySelector<HTMLButtonElement>("#spl-add-bot")?.addEventListener("click", () => {
+    room.send(LobbyMsg.ADD_BOT, {});
   });
 }
 
@@ -469,12 +480,14 @@ export class SplendorView implements GameView {
     const panels = seats
       .map((seat, i) => {
         if (i === mySeatIndex) return "";
-        const connected = seat.sessionId === "" ? false : state.players.get(seat.sessionId)?.connected !== false;
+        const player = seat.sessionId === "" ? undefined : state.players.get(seat.sessionId);
         const badge = seat.gone
           ? `<span class="badge warn">left - auto-play</span>`
-          : connected
-            ? ""
-            : `<span class="badge warn">reconnecting</span>`;
+          : player?.isBot
+            ? `<span class="badge">AI</span>`
+            : player?.connected === false
+              ? `<span class="badge warn">reconnecting</span>`
+              : "";
         const turn = state.awaitingSeat === i && state.awaitingType !== "" ? "active" : "";
         const backs = seat.reservedCount > 0
           ? `<div class="spl-reserved"><span class="muted">Reserved:</span>${

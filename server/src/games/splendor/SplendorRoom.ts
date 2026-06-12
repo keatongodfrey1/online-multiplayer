@@ -16,6 +16,7 @@
  * RandomPolicy ghost; 2p games end "abandoned" via the framework instead.
  */
 import type { Client } from "colyseus";
+import type { Delayed } from "@colyseus/timer";
 import { ArraySchema } from "@colyseus/schema";
 import {
   type BasePlayer,
@@ -42,12 +43,14 @@ const {
   applyPass,
   applyResolution,
   createGame,
+  GreedyPolicy,
   isLegalMove,
   legalMoves,
   playerPoints,
   ranking,
   RandomPolicy,
 } = SplendorEngine;
+type Policy = SplendorEngine.Policy;
 type GameState = SplendorEngine.GameState;
 type EngineCard = SplendorEngine.Card;
 type EngineNoble = SplendorEngine.Noble;
@@ -60,6 +63,7 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
   state = new SplendorState();
   readonly minPlayers = 2;
   readonly maxPlayers = 4;
+  override supportsBots = true;
 
   /** Server-only engine truth (never synced). Public for white-box tests. */
   public engine!: GameState;
@@ -70,6 +74,15 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
 
   /** Plays vacated seats (and their pending sub-decisions). Reseeded per game. */
   private ghost = new RandomPolicy(1);
+  /** Brains for seated AI players, by bot sessionId. Rebuilt per game. */
+  private botBrains = new Map<string, Policy>();
+  /**
+   * Pace of bot decisions. Instant bot turns would make the board mutate
+   * with no visible cause; ~a second reads as "the bot took its turn".
+   * Public so tests can shrink it.
+   */
+  public botDelayMs = 900;
+  private botTimer?: Delayed;
   private seedOption?: number;
   /** The reserved-cards ArraySchema each session was granted (re-granted per game). */
   private grantedReserved = new Map<string, ArraySchema<SplendorCard>>();
@@ -121,6 +134,7 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     this.state.paused = paused;
     this.state.pausedBy = paused ? player.nickname : "";
     this.syncClock();
+    this.maybeScheduleBot(); // cancels a pending bot move on pause, re-arms on resume
   }
 
   protected onGameStart(): void {
@@ -131,6 +145,10 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     const seed = this.seedOption ?? Math.floor(Math.random() * 0xffffffff) >>> 0;
     this.engine = createGame(players.length, seed);
     this.ghost = new RandomPolicy(seed ^ 0x9e3779b9);
+    this.botBrains.clear();
+    players.forEach((p, i) => {
+      if (p.isBot) this.botBrains.set(p.sessionId, new GreedyPolicy((seed ^ (i + 1) * 0x5bd1e995) >>> 0));
+    });
 
     this.state.seats.clear();
     this.state.market.clear();
@@ -160,6 +178,7 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
       onTimeout: (sessionId) => this.handleTurnTimeout(sessionId),
     });
     this.turns.start(this.seatOrder);
+    this.maybeScheduleBot(); // a bot can hold the first seat
   }
 
   /**
@@ -249,21 +268,55 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     }
   }
 
+  /** The brain for a seat: its bot policy if it is a bot, else the ghost. */
+  private policyFor(engineSeat: number): Policy {
+    return this.botBrains.get(this.seatOrder[engineSeat] ?? "") ?? this.ghost;
+  }
+
+  private isBotSeat(engineSeat: number): boolean {
+    const sessionId = this.seatOrder[engineSeat];
+    return !!sessionId && this.state.players.get(sessionId)?.isBot === true;
+  }
+
   /**
-   * Have the ghost policy act once for a seat (its move OR pending
-   * sub-decision). Also the hook point for a future turn-timer timeout.
+   * Have the seat's policy act once (its move OR pending sub-decision).
+   * Used by the ghost loop, the turn-timer timeout, and the paced bot turns.
    */
   private playOneDecisionFor(engineSeat: number): SplendorEngine.ApplyResult {
     const awaiting = this.engine.awaiting;
     if (awaiting.seat !== engineSeat) throw new Error("not this seat's decision");
+    const policy = this.policyFor(engineSeat);
     if (awaiting.inputType === "MOVE") {
-      const move = this.ghost.move(this.engine);
+      const move = policy.move(this.engine);
       return move ? applyMove(this.engine, move) : applyPass(this.engine);
     }
     if (awaiting.inputType === "PICK_NOBLE") {
-      return applyResolution(this.engine, this.ghost.pickNoble(this.engine));
+      return applyResolution(this.engine, policy.pickNoble(this.engine));
     }
-    return applyResolution(this.engine, this.ghost.discard(this.engine));
+    return applyResolution(this.engine, policy.discard(this.engine));
+  }
+
+  /**
+   * If a bot must act next, schedule its decision one beat from now.
+   * Each decision runs afterApply(), which calls back here - so a bot's
+   * chained sub-decisions, and back-to-back bot seats, each get their own
+   * visible beat. Cleared and re-armed on every call; paused games
+   * reschedule when someone resumes.
+   */
+  private maybeScheduleBot(): void {
+    this.botTimer?.clear();
+    this.botTimer = undefined;
+    if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.over) return;
+    if (this.state.paused) return;
+    if (!this.isBotSeat(this.engine.awaiting.seat)) return;
+    this.botTimer = this.clock.setTimeout(() => {
+      this.botTimer = undefined;
+      if (this.state.phase !== Phase.PLAYING || this.engine.over || this.state.paused) return;
+      const seat = this.engine.awaiting.seat;
+      if (!this.isBotSeat(seat)) return;
+      this.engine = this.playOneDecisionFor(seat).state;
+      this.afterApply();
+    }, this.botDelayMs);
   }
 
   /** Run after every accepted engine input (and after a mid-game departure). */
@@ -284,6 +337,7 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     // Turn rotation starts a fresh clock; refreeze it if the game is paused
     // (e.g. a quitter's seat was ghost-resolved while everyone was away).
     this.syncClock();
+    this.maybeScheduleBot();
   }
 
   /**
@@ -412,6 +466,8 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
 
   protected override onGameEnded(): void {
     this.turns?.stop();
+    this.botTimer?.clear();
+    this.botTimer = undefined;
     this.pausedTurnRemainingMs = undefined;
     this.state.turnDeadline = 0;
     this.state.paused = false;

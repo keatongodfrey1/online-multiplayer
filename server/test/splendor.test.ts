@@ -514,4 +514,131 @@ describe("splendor", () => {
     clients[1]!.send(SplendorMsg.PAUSE, { paused: false });
     await until(() => room.state.turnDeadline > 0);
   });
+
+  it("lets the host seat and remove AI players in the lobby", async () => {
+    const room = (await colyseus.createRoom(SPLENDOR, {})) as unknown as SplendorRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Host" });
+    const guest = await colyseus.connectTo(room, { nickname: "Guest" });
+
+    host.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 3);
+    const bot = [...room.state.players.values()].find((p) => p.isBot)!;
+    assert.ok(bot.sessionId.startsWith("bot:"));
+    assert.strictEqual(bot.nickname, "Botty");
+    assert.strictEqual(bot.connected, true);
+    assert.strictEqual(bot.seat, 2, "bot takes the lowest free seat");
+
+    guest.send(LobbyMsg.ADD_BOT, {}); // not the host
+    await sleep(100);
+    assert.strictEqual(room.state.players.size, 3, "only the host can add bots");
+
+    host.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 4);
+    host.send(LobbyMsg.ADD_BOT, {}); // table full
+    await sleep(100);
+    assert.strictEqual(room.state.players.size, 4, "cannot exceed maxPlayers");
+
+    host.send(LobbyMsg.KICK, { sessionId: bot.sessionId }); // bots are kickable
+    await until(() => !room.state.players.has(bot.sessionId));
+    assert.strictEqual(room.state.players.size, 3);
+  });
+
+  it("a solo human plays a full game against an AI opponent", async function () {
+    this.timeout(60000);
+    const room = (await colyseus.createRoom(SPLENDOR, { seed: 61 })) as unknown as SplendorRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Solo" });
+    host.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 2);
+    room.botDelayMs = 1; // pacing is UX, not logic - shrink it for the test
+    room.state.turnSeconds = 0;
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+
+    const policy = new GreedyPolicy(1);
+    let guard = 0;
+    while (room.state.phase === Phase.PLAYING) {
+      assert.ok(++guard < 3000, "game did not terminate");
+      const prev = room.engine;
+      if (room.seatOrder[prev.awaiting.seat] === host.sessionId) {
+        if (prev.awaiting.inputType === "MOVE") {
+          const move = policy.move(prev);
+          assert.ok(move, "server should have auto-passed a no-move seat");
+          host.send(SplendorMsg.MOVE, move);
+        } else if (prev.awaiting.inputType === "PICK_NOBLE") {
+          host.send(SplendorMsg.RESOLVE, policy.pickNoble(prev));
+        } else {
+          host.send(SplendorMsg.RESOLVE, policy.discard(prev));
+        }
+      }
+      // Either our message lands or the bot takes its own turn unprompted.
+      await until(() => room.engine !== prev || room.state.phase !== Phase.PLAYING, 5000);
+      assertInvariants(room.engine);
+    }
+
+    assert.strictEqual(room.state.phase, Phase.ENDED);
+    const winners = ranking(room.engine).filter((r) => r.rank === 1);
+    if (winners.length === 1) {
+      const frameworkSeat = room.frameworkSeatByEngineSeat[winners[0]!.seat]!;
+      assert.strictEqual(room.state.endReason, `${EndReason.WIN_PREFIX}${frameworkSeat}`);
+    } else {
+      assert.strictEqual(room.state.endReason, EndReason.DRAW);
+    }
+  });
+
+  it("bots hold their move while the game is paused", async function () {
+    this.timeout(10000);
+    const room = (await colyseus.createRoom(SPLENDOR, { seed: 67 })) as unknown as SplendorRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Solo" });
+    host.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 2);
+    room.botDelayMs = 300;
+    room.state.turnSeconds = 15; // timed, so pause is available
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+
+    // Hand the turn to the bot, then pause inside its 300ms thinking beat.
+    host.send(SplendorMsg.MOVE, { kind: "TAKE_THREE", colors: ["white", "blue", "green"] });
+    await until(() => room.engine.awaiting.seat === 1);
+    host.send(SplendorMsg.PAUSE, { paused: true });
+    await until(() => room.state.paused);
+
+    const before = room.engine;
+    await sleep(600); // well past the bot's beat
+    assert.strictEqual(room.engine, before, "bot does not act while paused");
+
+    host.send(SplendorMsg.PAUSE, { paused: false });
+    await until(() => room.engine !== before, 3000); // bot resumes and moves
+    assert.strictEqual(room.engine.awaiting.seat, 0, "back to the human");
+  });
+
+  it("rematch with a bot starts on the human's vote alone", async function () {
+    this.timeout(15000);
+    const room = (await colyseus.createRoom(SPLENDOR, { seed: 71 })) as unknown as SplendorRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Solo" });
+    host.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 2);
+    room.botDelayMs = 1;
+    room.state.turnSeconds = 0;
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+
+    // Hand the human a 15-point finish; the bot completes the final round
+    // on its own (finishRound mode) and the game ends.
+    const zero = { white: 0, blue: 0, green: 0, red: 0, black: 0 };
+    const me = room.engine.players[0]!;
+    me.built.push({ id: 88, tier: 3, bonus: "white", points: 14, cost: { ...zero } });
+    me.reserved.push({ id: 89, tier: 1, bonus: "white", points: 1, cost: { ...zero } });
+    host.send(SplendorMsg.MOVE, { kind: "BUY", from: { reserve: { cardId: 89 } } });
+    await until(() => room.state.phase === Phase.ENDED, 5000);
+    assert.strictEqual(room.state.endReason, `${EndReason.WIN_PREFIX}0`);
+
+    const oldEngine = room.engine;
+    host.send(LobbyMsg.REMATCH, {}); // the bot never votes - it is always in
+    await until(() => room.state.phase === Phase.PLAYING);
+    assert.notStrictEqual(room.engine, oldEngine, "fresh game");
+    assert.ok(
+      [...room.state.players.values()].some((p) => p.isBot),
+      "bot still at the table"
+    );
+  });
 });

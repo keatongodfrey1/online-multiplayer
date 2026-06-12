@@ -29,6 +29,12 @@ export const LobbyMsg = {
   KICK: "lobby/kick",
   /** Any player, ended phase: vote to play again. */
   REMATCH: "lobby/rematch",
+  /**
+   * Host only, lobby only, games with supportsBots: seat an AI player.
+   * Bots count toward min/max players, appear in the roster, and are
+   * removed with the regular KICK message.
+   */
+  ADD_BOT: "lobby/addBot",
 } as const;
 
 /** Framework-level messages (server -> client). */
