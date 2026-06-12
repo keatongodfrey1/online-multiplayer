@@ -264,6 +264,20 @@ button.subtle {
 }
 
 /* Splendor */
+
+/*
+ * Splendor is played on laptops/tablets: when its view is mounted, let the
+ * app shell grow well past the mobile-first 480px. (Browsers without :has()
+ * simply keep the narrow layout - nothing breaks.)
+ */
+#app:has(.spl) {
+  max-width: 1140px;
+}
+
+.spl {
+  font-size: 1rem;
+}
+
 .spl-nobles {
   display: flex;
   gap: 8px;
@@ -298,6 +312,26 @@ button.subtle {
   flex-direction: column;
   justify-content: space-between;
   border-top: 3px solid transparent;
+  border-left: 2px solid transparent;
+  border-right: 2px solid transparent;
+  border-bottom: 2px solid transparent;
+}
+
+/* Green: you can buy this right now (tokens + card bonuses cover it).
+   Only the side/bottom borders change - the top band stays the bonus color. */
+.spl-card.spl-can-buy {
+  border-left-color: var(--ok);
+  border-right-color: var(--ok);
+  border-bottom-color: var(--ok);
+  box-shadow: 0 0 8px rgba(65, 201, 138, 0.35);
+}
+
+/* Blue: within reach next turn with the gems you have selected. */
+.spl-card.spl-could-buy {
+  border-left-color: var(--accent);
+  border-right-color: var(--accent);
+  border-bottom-color: var(--accent);
+  box-shadow: 0 0 8px rgba(91, 140, 255, 0.4);
 }
 
 .spl-card.spl-empty {
@@ -409,9 +443,36 @@ button.spl-gem.selected {
   gap: 4px;
 }
 
+/* An unmistakable button: filled, bordered, with hover/active feedback. */
 .spl-take2 {
-  font-size: 0.7rem;
-  padding: 2px 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 4px 8px;
+  background: #2a3046;
+  border: 1px solid var(--accent);
+  color: var(--text);
+  border-radius: 8px;
+}
+
+.spl-take2:not(:disabled):hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.spl-take2:not(:disabled):active {
+  background: var(--accent-press);
+}
+
+.spl-take2:disabled {
+  border-color: #353a4f;
+  color: var(--muted);
+  background: transparent;
+  cursor: default;
+}
+
+.spl-gold-label {
+  font-size: 0.75rem;
+  padding: 5px 0;
 }
 
 .spl-hint {
@@ -475,17 +536,141 @@ button.spl-gem.selected {
 
 .spl-holdings {
   display: flex;
-  gap: 12px;
+  gap: 6px;
   align-items: center;
   flex-wrap: wrap;
-  margin-top: 6px;
+  margin-top: 8px;
 }
 
-.spl-tokens,
-.spl-bonuses {
+/* One color's purchasing power: big total, token+card split underneath. */
+.spl-power {
   display: flex;
-  gap: 4px;
+  flex-direction: column;
   align-items: center;
+  gap: 2px;
+  min-width: 44px;
+  padding: 4px 2px;
+  border-radius: 8px;
+  background: #181b28;
+}
+
+.spl-power.empty {
+  opacity: 0.35;
+}
+
+.spl-power-total {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  font-weight: 700;
+}
+
+.spl-power-split {
+  font-size: 0.7rem;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+/* Tiny legend glyphs: circle = tokens, rounded square = cards. */
+.spl-i-tok,
+.spl-i-card {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: var(--muted);
+}
+
+.spl-i-tok {
+  border-radius: 50%;
+}
+
+.spl-i-card {
+  border-radius: 2px;
+  margin-left: 5px;
+}
+
+.spl-noble-badge {
+  align-self: center;
+}
+
+.spl-token-count {
+  font-size: 0.8rem;
+  color: var(--muted);
+  background: #181b28;
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+
+.spl-token-count.warn {
+  color: var(--warn);
+}
+
+#spl-players {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+/* Laptop/tablet width: my panel beside the opponents, larger pieces. */
+@media (min-width: 900px) {
+  #app:has(.spl) {
+    padding: 16px 24px;
+  }
+
+  #spl-players {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .spl-card {
+    min-height: 118px;
+    padding: 10px;
+  }
+
+  .spl-pip {
+    min-width: 22px;
+    height: 22px;
+    font-size: 0.85rem;
+  }
+
+  .spl-gem {
+    width: 44px;
+    height: 44px;
+    font-size: 1.1rem;
+  }
+
+  .spl-card-points {
+    font-size: 1.5rem;
+  }
+
+  .spl-card-actions button {
+    font-size: 0.85rem;
+    padding: 6px 8px;
+  }
+
+  .spl-deck-count {
+    font-size: 0.95rem;
+  }
+
+  .spl-power {
+    min-width: 52px;
+  }
+
+  .spl-power-total {
+    width: 36px;
+    height: 36px;
+    font-size: 1.05rem;
+  }
+
+  .spl-power-split {
+    font-size: 0.78rem;
+  }
 }
 
 .spl-reserved {
@@ -516,6 +701,87 @@ button.spl-gem.selected {
 .spl-pause {
   margin-left: 10px;
   font-size: 0.8rem;
+}
+
+/* Save slots in the lobby */
+.spl-saves {
+  margin: 10px 0;
+}
+
+.spl-saves summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.spl-saves ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.spl-save-slot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid #2a2e40;
+  font-size: 0.9rem;
+}
+
+.spl-save-slot button {
+  font-size: 0.8rem;
+  padding: 5px 10px;
+}
+
+.spl-loaded-save {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+  flex-wrap: wrap;
+}
+
+/* Final score table on the ended screen */
+.spl-summary {
+  margin: 8px auto 4px;
+  border-collapse: collapse;
+  text-align: center;
+}
+
+.spl-summary th,
+.spl-summary td {
+  padding: 6px 10px;
+  border-bottom: 1px solid #2a2e40;
+  font-size: 0.9rem;
+}
+
+.spl-summary th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.spl-summary .spl-sum-name {
+  text-align: left;
+  font-weight: 600;
+}
+
+.spl-summary .spl-sum-total {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.spl-summary tr.winner td {
+  color: var(--ok);
+}
+
+.spl-summary tr.gone td {
+  opacity: 0.6;
+}
+
+.spl-sum-note {
+  font-size: 0.75rem;
+  margin: 2px 0 10px;
 }
 
 /* Reconnecting overlay */

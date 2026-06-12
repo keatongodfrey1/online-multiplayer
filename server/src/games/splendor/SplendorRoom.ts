@@ -36,6 +36,7 @@ import {
 import { BaseGameRoom } from "../../framework/BaseGameRoom.js";
 import { TurnManager } from "../../framework/TurnManager.js";
 import { grantPrivateView, revokePrivateView } from "../../framework/privateState.js";
+import { parseSave, serializeSave, type ParsedSave, type SaveSeat } from "./save.js";
 
 const {
   COLORS,
@@ -74,8 +75,12 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
 
   /** Plays vacated seats (and their pending sub-decisions). Reseeded per game. */
   private ghost = new RandomPolicy(1);
-  /** Brains for seated AI players, by bot sessionId. Rebuilt per game. */
-  private botBrains = new Map<string, Policy>();
+  /** Brains for seated AI players, by bot sessionId. Rebuilt per game. Public for tests. */
+  public botBrains = new Map<string, Policy>();
+  /** Difficulty per bot sessionId, chosen when the host seats it. */
+  private botDifficulty = new Map<string, "easy" | "hard">();
+  /** A validated save staged in the lobby, consumed by the next start. */
+  private pendingLoad?: ParsedSave;
   /**
    * Pace of bot decisions. Instant bot turns would make the board mutate
    * with no visible cause; ~a second reads as "the bot took its turn".
@@ -109,6 +114,87 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     this.onMessage(SplendorMsg.RESOLVE, (client, payload) => this.handleResolve(client, payload));
     this.onMessage(SplendorMsg.CONFIG, (client, payload) => this.handleConfig(client, payload));
     this.onMessage(SplendorMsg.PAUSE, (client, payload) => this.handlePause(client, payload));
+    this.onMessage(SplendorMsg.SAVE, (client) => this.handleSave(client));
+    this.onMessage(SplendorMsg.LOAD, (client, payload) => this.handleLoad(client, payload));
+  }
+
+  /** Hand the host a save blob to keep in their browser's save slots. */
+  private handleSave(client: Client): void {
+    if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.over) return;
+    if (client.sessionId !== this.state.hostSessionId) return;
+    client.send(SplendorMsg.SAVE_DATA, this.buildSave());
+  }
+
+  /** Current game -> save blob. Public for white-box tests. */
+  public buildSave(): object {
+    const seats: SaveSeat[] = this.seatOrder.map((sessionId, i) => {
+      const player = sessionId ? this.state.players.get(sessionId) : undefined;
+      return {
+        nickname: this.state.seats[i]?.nickname ?? `Seat ${i + 1}`,
+        isBot: player?.isBot === true,
+        gone: !player,
+        ...(player?.isBot ? { difficulty: this.botDifficulty.get(sessionId) ?? "hard" } : {}),
+      };
+    });
+    return serializeSave({ engine: this.engine, seats, turnSeconds: this.state.turnSeconds });
+  }
+
+  /**
+   * Host stages a saved game in the lobby (or clears it with a null
+   * payload). Bots from the save are auto-seated; the game can then only
+   * start once the present humans match the save's human lineup.
+   */
+  private handleLoad(client: Client, payload: unknown): void {
+    if (this.state.phase !== Phase.LOBBY) return;
+    if (client.sessionId !== this.state.hostSessionId) return;
+
+    if (payload === null || payload === undefined) {
+      this.pendingLoad = undefined;
+      this.state.loadedSave = "";
+      this.removeBots();
+      return;
+    }
+
+    const parsed = parseSave(payload);
+    if (!parsed) return; // corrupt or tampered: ignore silently
+
+    this.pendingLoad = parsed;
+    this.state.turnSeconds = parsed.turnSeconds;
+    // Recreate the save's bot lineup; humans have to show up themselves.
+    this.removeBots();
+    for (const seat of parsed.seats) {
+      if (!seat.isBot || seat.gone) continue;
+      if (this.state.players.size >= this.maxPlayers) break; // cannot happen for a valid save
+      const bot = this.seatBot(seat.nickname);
+      this.botDifficulty.set(bot.sessionId, seat.difficulty ?? "hard");
+    }
+    const humans = parsed.seats.filter((s) => !s.isBot && !s.gone).map((s) => s.nickname);
+    this.state.loadedSave =
+      `Resuming a saved game (turn ${parsed.engine.turnCount + 1}). ` +
+      `Players needed: ${humans.join(", ")}`;
+  }
+
+  /** While a save is staged, only the exact saved lineup may start. */
+  protected override canStartGame(): boolean {
+    if (!this.pendingLoad) return true;
+    const required = new Set(
+      this.pendingLoad.seats.filter((s) => !s.isBot && !s.gone).map((s) => s.nickname.toLowerCase())
+    );
+    const humans = [...this.state.players.values()].filter((p) => !p.isBot);
+    if (humans.length !== required.size) return false;
+    if (!humans.every((p) => required.has(p.nickname.toLowerCase()))) return false;
+    // No extra bots either (the host could have added some after loading).
+    const requiredBots = this.pendingLoad.seats.filter((s) => s.isBot && !s.gone).length;
+    const presentBots = this.state.players.size - humans.length;
+    return presentBots === requiredBots;
+  }
+
+  private removeBots(): void {
+    for (const player of [...this.state.players.values()]) {
+      if (!player.isBot) continue;
+      this.state.players.delete(player.sessionId);
+      this.botDifficulty.delete(player.sessionId);
+    }
   }
 
   /** Host adjusts the turn timer while in the lobby. */
@@ -118,6 +204,14 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     const turnSeconds = (payload as { turnSeconds?: unknown } | null)?.turnSeconds;
     if (!isValidSplendorTurnSeconds(turnSeconds)) return;
     this.state.turnSeconds = turnSeconds;
+  }
+
+  /** Read the host's difficulty pick for a freshly seated bot. */
+  protected override onBotAdded(bot: BasePlayer, options: unknown): void {
+    const difficulty = (options as { difficulty?: unknown } | null)?.difficulty;
+    const easy = difficulty === "easy";
+    this.botDifficulty.set(bot.sessionId, easy ? "easy" : "hard");
+    bot.nickname = `${bot.nickname} (${easy ? "easy" : "hard"})`;
   }
 
   /**
@@ -140,26 +234,48 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
   protected onGameStart(): void {
     // Full re-init - this also runs on rematch.
     const players = [...this.state.players.values()].sort((a, b) => a.seat - b.seat);
-    this.seatOrder = players.map((p) => p.sessionId);
-    this.frameworkSeatByEngineSeat = players.map((p) => p.seat);
+    const load = this.pendingLoad;
+    this.pendingLoad = undefined; // consumed; a rematch later starts fresh
+    this.state.loadedSave = "";
+
     const seed = this.seedOption ?? Math.floor(Math.random() * 0xffffffff) >>> 0;
-    this.engine = createGame(players.length, seed);
+    if (load) {
+      // canStartGame() guaranteed the lineup matches the save.
+      this.engine = load.engine;
+      this.seatOrder = load.seats.map((s) => {
+        if (s.gone) return ""; // stays ghost-played, like when they left
+        const match = players.find(
+          (p) => p.isBot === s.isBot && p.nickname.toLowerCase() === s.nickname.toLowerCase()
+        );
+        return match?.sessionId ?? "";
+      });
+      this.frameworkSeatByEngineSeat = this.seatOrder.map(
+        (sessionId) => players.find((p) => p.sessionId === sessionId)?.seat ?? -1
+      );
+    } else {
+      this.engine = createGame(players.length, seed);
+      this.seatOrder = players.map((p) => p.sessionId);
+      this.frameworkSeatByEngineSeat = players.map((p) => p.seat);
+    }
     this.ghost = new RandomPolicy(seed ^ 0x9e3779b9);
     this.botBrains.clear();
     players.forEach((p, i) => {
-      if (p.isBot) this.botBrains.set(p.sessionId, new GreedyPolicy((seed ^ (i + 1) * 0x5bd1e995) >>> 0));
+      if (!p.isBot) return;
+      const botSeed = (seed ^ ((i + 1) * 0x5bd1e995)) >>> 0;
+      const easy = this.botDifficulty.get(p.sessionId) === "easy";
+      this.botBrains.set(p.sessionId, easy ? new RandomPolicy(botSeed) : new GreedyPolicy(botSeed));
     });
 
     this.state.seats.clear();
     this.state.market.clear();
     for (let i = 0; i < 12; i++) this.state.market.push(new SplendorCard());
-    for (const p of players) {
+    this.seatOrder.forEach((sessionId, i) => {
       const seat = new SplendorSeat();
-      seat.sessionId = p.sessionId;
-      seat.nickname = p.nickname;
+      seat.sessionId = sessionId;
+      seat.nickname = load ? load.seats[i]!.nickname : (players[i]?.nickname ?? "");
       this.state.seats.push(seat);
-      this.regrantReserved(p.sessionId, seat.reserved);
-    }
+      if (sessionId) this.regrantReserved(sessionId, seat.reserved);
+    });
     this.state.lastRound = false;
     this.state.paused = false;
     this.state.pausedBy = "";
@@ -177,8 +293,11 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
       },
       onTimeout: (sessionId) => this.handleTurnTimeout(sessionId),
     });
-    this.turns.start(this.seatOrder);
-    this.maybeScheduleBot(); // a bot can hold the first seat
+    // Vacated seats (only possible in a resumed save) never join the rotation.
+    this.turns.start(this.seatOrder.filter((sessionId) => sessionId !== ""));
+    // Settle anything no human can act on (a resumed save can be awaiting a
+    // vacated seat), align the rotation with the engine, arm bots/clock.
+    this.afterApply();
   }
 
   /**
@@ -457,6 +576,7 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
   protected override onPlayerLeftForGood(player: BasePlayer): void {
     this.turns?.remove(player.sessionId);
     this.grantedReserved.delete(player.sessionId);
+    this.botDifficulty.delete(player.sessionId);
     if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.over) return;
     // With too few humans left, the framework ends the game as "abandoned"
     // right after this hook - do not ghost-complete it first.

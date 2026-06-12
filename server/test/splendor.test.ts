@@ -12,7 +12,7 @@ import {
 import { SplendorRoom } from "../src/games/splendor/SplendorRoom.js";
 import { sleep, until } from "./StubRoom.js";
 
-const { GreedyPolicy, assertInvariants, ranking } = SplendorEngine;
+const { GreedyPolicy, RandomPolicy, assertInvariants, ranking } = SplendorEngine;
 
 function makeConfig() {
   return defineServer({
@@ -524,7 +524,7 @@ describe("splendor", () => {
     await until(() => room.state.players.size === 3);
     const bot = [...room.state.players.values()].find((p) => p.isBot)!;
     assert.ok(bot.sessionId.startsWith("bot:"));
-    assert.strictEqual(bot.nickname, "Botty");
+    assert.strictEqual(bot.nickname, "Botty (hard)", "default difficulty is hard");
     assert.strictEqual(bot.connected, true);
     assert.strictEqual(bot.seat, 2, "bot takes the lowest free seat");
 
@@ -640,5 +640,223 @@ describe("splendor", () => {
       [...room.state.players.values()].some((p) => p.isBot),
       "bot still at the table"
     );
+  });
+
+  it("saves mid-game and resumes exactly where it left off", async function () {
+    this.timeout(20000);
+    // Play a few deterministic turns, snapshot, then restore in a NEW room.
+    const first = await startedGame(79, 2, (r) => {
+      r.state.turnSeconds = 90;
+    });
+    const policy = new GreedyPolicy(3);
+    for (let i = 0; i < 6; i++) {
+      const prev = first.room.engine;
+      const actor = first.clients[prev.awaiting.seat === 0 ? 0 : 1]!;
+      if (prev.awaiting.inputType === "MOVE") {
+        actor.send(SplendorMsg.MOVE, policy.move(prev)!);
+      } else if (prev.awaiting.inputType === "PICK_NOBLE") {
+        actor.send(SplendorMsg.RESOLVE, policy.pickNoble(prev));
+      } else {
+        actor.send(SplendorMsg.RESOLVE, policy.discard(prev));
+      }
+      await until(() => first.room.engine !== prev, 5000);
+    }
+    const sourceEngine = first.room.engine;
+    const blob = first.room.buildSave() as Record<string, any>;
+    assert.strictEqual(blob.v, 1);
+    assert.strictEqual(blob.turnSeconds, 90);
+
+    // Fresh room, same nicknames (the order they join must not matter).
+    const room2 = (await colyseus.createRoom(SPLENDOR, {})) as unknown as SplendorRoom;
+    const host2 = await colyseus.connectTo(room2, { nickname: "Player1" }); // was seat 1!
+    const guest2 = await colyseus.connectTo(room2, { nickname: "Player0" });
+    host2.send(SplendorMsg.LOAD, blob);
+    await until(() => room2.state.loadedSave !== "");
+    assert.strictEqual(room2.state.turnSeconds, 90, "timer setting restored");
+
+    host2.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+    assert.strictEqual(room2.state.loadedSave, "", "staged save consumed");
+
+    // The restored engine must match the snapshot - same turn, same awaiting
+    // seat, same holdings, same hidden deck order.
+    const restored = room2.engine;
+    assert.strictEqual(restored.turnCount, sourceEngine.turnCount);
+    assert.deepEqual(restored.awaiting, sourceEngine.awaiting);
+    assert.deepEqual(restored.supplyGems, sourceEngine.supplyGems);
+    assert.deepEqual(
+      restored.players.map((p) => ({ gems: p.gems, gold: p.gold, built: p.built.map((c) => c.id) })),
+      sourceEngine.players.map((p) => ({ gems: p.gems, gold: p.gold, built: p.built.map((c) => c.id) }))
+    );
+    for (const t of [1, 2, 3] as const) {
+      assert.deepEqual(
+        restored.decks[t].map((c) => c.id),
+        sourceEngine.decks[t].map((c) => c.id),
+        `tier ${t} deck order survives`
+      );
+    }
+    SplendorEngine.assertInvariants(restored);
+
+    // Seats follow the SAVE's order, not join order: engine seat 0 is
+    // Player0, who is guest2 in this room.
+    assert.strictEqual(room2.seatOrder[0], guest2.sessionId);
+    assert.strictEqual(room2.seatOrder[1], host2.sessionId);
+    assert.strictEqual(room2.state.currentTurn, room2.seatOrder[restored.awaiting.seat]!);
+
+    // And the game is live: the awaiting player can move.
+    const prev = room2.engine;
+    const actor = prev.awaiting.seat === 0 ? guest2 : host2;
+    actor.send(SplendorMsg.MOVE, policy.move(prev)!);
+    await until(() => room2.engine !== prev);
+    SplendorEngine.assertInvariants(room2.engine);
+  });
+
+  it("blocks starting a loaded save until the right players are present", async () => {
+    const source = await startedGame(83, 2);
+    const blob = source.room.buildSave();
+
+    const room2 = (await colyseus.createRoom(SPLENDOR, {})) as unknown as SplendorRoom;
+    const host2 = await colyseus.connectTo(room2, { nickname: "Player0" });
+    const imposter = await colyseus.connectTo(room2, { nickname: "Imposter" });
+    host2.send(SplendorMsg.LOAD, blob);
+    await until(() => room2.state.loadedSave !== "");
+    assert.ok(room2.state.loadedSave.includes("Player0"), "lobby names the needed players");
+    assert.ok(room2.state.loadedSave.includes("Player1"));
+
+    host2.send(LobbyMsg.START, {});
+    await sleep(150);
+    assert.strictEqual(room2.state.phase, Phase.LOBBY, "wrong lineup cannot start the save");
+
+    await imposter.leave(true);
+    await colyseus.connectTo(room2, { nickname: "Player1" });
+    host2.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+  });
+
+  it("rejects corrupt or tampered save blobs", async () => {
+    const source = await startedGame(89, 2);
+    const good = source.room.buildSave() as Record<string, any>;
+
+    const room2 = (await colyseus.createRoom(SPLENDOR, {})) as unknown as SplendorRoom;
+    const host2 = await colyseus.connectTo(room2, { nickname: "Player0" });
+
+    const tampered1 = JSON.parse(JSON.stringify(good));
+    tampered1.engine.supplyGems.white = 99; // breaks token conservation
+    const tampered2 = JSON.parse(JSON.stringify(good));
+    tampered2.engine.decks[1].push(tampered2.engine.decks[2][0]); // duplicate card id
+    const tampered3 = JSON.parse(JSON.stringify(good));
+    tampered3.engine.players[0].gold = -1;
+    const tampered4 = JSON.parse(JSON.stringify(good));
+    tampered4.v = 2;
+
+    for (const bad of [tampered1, tampered2, tampered3, tampered4, {}, "junk", 42]) {
+      host2.send(SplendorMsg.LOAD, bad);
+    }
+    await sleep(150);
+    assert.strictEqual(room2.state.loadedSave, "", "no tampered blob was staged");
+
+    // The lobby is unharmed: a fresh game can still start normally.
+    await colyseus.connectTo(room2, { nickname: "Player1" });
+    host2.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+    assert.strictEqual(room2.engine.turnCount, 0, "fresh game, not a resumed one");
+  });
+
+  it("restores bot opponents (with difficulty) from a save", async function () {
+    this.timeout(15000);
+    const room = (await colyseus.createRoom(SPLENDOR, { seed: 97 })) as unknown as SplendorRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Solo" });
+    host.send(LobbyMsg.ADD_BOT, { difficulty: "easy" });
+    await until(() => room.state.players.size === 2);
+    room.botDelayMs = 1;
+    room.state.turnSeconds = 0;
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    // One human move so the save is mid-game; the bot then moves on its own.
+    host.send(SplendorMsg.MOVE, { kind: "TAKE_THREE", colors: ["white", "blue", "green"] });
+    await until(() => room.engine.turnCount >= 2, 5000);
+    const blob = room.buildSave();
+
+    const room2 = (await colyseus.createRoom(SPLENDOR, {})) as unknown as SplendorRoom;
+    const host2 = await colyseus.connectTo(room2, { nickname: "Solo" });
+    host2.send(SplendorMsg.LOAD, blob);
+    await until(() => room2.state.players.size === 2, 3000); // bot auto-seated
+    const bot = [...room2.state.players.values()].find((p) => p.isBot)!;
+    assert.ok(bot.nickname.endsWith("(easy)"), "bot name (and difficulty tag) restored");
+
+    room2.botDelayMs = 1;
+    host2.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+    assert.ok(room2.botBrains.get(bot.sessionId) instanceof RandomPolicy, "easy brain restored");
+    assert.ok(room2.engine.turnCount >= 2, "resumed mid-game");
+  });
+
+  it("resumes a save with a departed seat: the ghost keeps playing it", async function () {
+    this.timeout(20000);
+    const { room, clients } = await startedGame(101, 3);
+    const quitterSessionId = clients[1]!.sessionId;
+    await clients[1]!.leave(true); // 3p game continues; seat 1 is ghost-played
+    await until(() => !room.state.players.has(quitterSessionId));
+    await until(() => room.state.seats[1]!.gone === true);
+    const blob = room.buildSave() as Record<string, any>;
+    assert.strictEqual(blob.seats[1].gone, true, "departed seat recorded");
+
+    const room2 = (await colyseus.createRoom(SPLENDOR, {})) as unknown as SplendorRoom;
+    const host2 = await colyseus.connectTo(room2, { nickname: "Player0" });
+    host2.send(SplendorMsg.LOAD, blob);
+    await until(() => room2.state.loadedSave !== "");
+    assert.ok(!room2.state.loadedSave.includes("Player1"), "departed player not required");
+    const third = await colyseus.connectTo(room2, { nickname: "Player2" });
+    host2.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+    assert.strictEqual(room2.state.seats[1]!.gone, true);
+    assert.strictEqual(room2.seatOrder[1], "");
+
+    // Drive a full rotation: the vacated seat must be ghost-played inline
+    // and never stall the game.
+    const policy = new GreedyPolicy(5);
+    const startTurnCount = room2.engine.turnCount;
+    let guard = 0;
+    while (room2.engine.turnCount < startTurnCount + 3 && ++guard < 12) {
+      const prev = room2.engine;
+      const seat = prev.awaiting.seat;
+      assert.notStrictEqual(seat, 1, "engine never waits on the vacated seat");
+      const actor = seat === 0 ? host2 : third;
+      if (prev.awaiting.inputType === "MOVE") actor.send(SplendorMsg.MOVE, policy.move(prev)!);
+      else if (prev.awaiting.inputType === "PICK_NOBLE")
+        actor.send(SplendorMsg.RESOLVE, policy.pickNoble(prev));
+      else actor.send(SplendorMsg.RESOLVE, policy.discard(prev));
+      await until(() => room2.engine !== prev, 5000);
+    }
+    assert.ok(room2.engine.turnCount >= startTurnCount + 3, "rotation flowed past the ghost seat");
+    SplendorEngine.assertInvariants(room2.engine);
+  });
+
+  it("gives easy and hard bots the matching policies", async () => {
+    const room = (await colyseus.createRoom(SPLENDOR, { seed: 73 })) as unknown as SplendorRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Solo" });
+    host.send(LobbyMsg.ADD_BOT, { difficulty: "easy" });
+    await until(() => room.state.players.size === 2);
+    host.send(LobbyMsg.ADD_BOT, { difficulty: "hard" });
+    await until(() => room.state.players.size === 3);
+    host.send(LobbyMsg.ADD_BOT, { difficulty: "nonsense" }); // unknown -> hard
+    await until(() => room.state.players.size === 4);
+
+    const bots = [...room.state.players.values()].filter((p) => p.isBot);
+    const easy = bots.find((p) => p.nickname.endsWith("(easy)"))!;
+    assert.strictEqual(bots.filter((p) => p.nickname.endsWith("(hard)")).length, 2);
+
+    room.botDelayMs = 1;
+    room.state.turnSeconds = 0;
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    // RandomPolicy extends GreedyPolicy, so check the easy one positively
+    // and the hard ones negatively.
+    assert.ok(room.botBrains.get(easy.sessionId) instanceof RandomPolicy, "easy bot plays randomly");
+    for (const bot of bots) {
+      if (bot === easy) continue;
+      const brain = room.botBrains.get(bot.sessionId)!;
+      assert.ok(brain instanceof GreedyPolicy && !(brain instanceof RandomPolicy), "hard bot plays greedy");
+    }
   });
 });

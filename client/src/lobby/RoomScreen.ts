@@ -203,12 +203,18 @@ export class RoomScreen {
     phaseRoot.innerHTML = `
       <div class="card center">
         <h2>${escapeHtml(this.endReasonText())}</h2>
+        <div id="game-summary"></div>
         <button id="rematch-btn" class="primary" ${iVoted ? "disabled" : ""}>
           ${iVoted ? "Waiting for the others…" : "Play again"}
         </button>
         <p class="muted">${votes}/${players.length} want a rematch</p>
       </div>
     `;
+    this.game.renderGameSummary?.(
+      phaseRoot.querySelector<HTMLElement>("#game-summary")!,
+      this.room,
+      { mySessionId: this.room.sessionId }
+    );
     phaseRoot.querySelector<HTMLButtonElement>("#rematch-btn")?.addEventListener("click", () => {
       this.room.send(LobbyMsg.REMATCH, {});
     });
