@@ -317,6 +317,7 @@ export const ScEvent = {
   MOVE: "move",
   TELEPORT: "teleport",
   ENTER_PORTAL: "enterPortal",
+  PORTAL_MOVE: "portalMove",
   EXIT_PORTAL: "exitPortal",
   COLLISION: "collision",
   SHIELD_BLOCK: "shieldBlock",
