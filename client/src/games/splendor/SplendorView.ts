@@ -7,6 +7,7 @@
 import type { Room } from "@colyseus/sdk";
 import {
   type BaseState,
+  EndReason,
   LobbyMsg,
   Phase,
   SPLENDOR_TURN_MAX_SECONDS,
@@ -227,6 +228,17 @@ export function renderSplendorGameSummary(
   const seats = [...(state.seats ?? [])];
   if (seats.length === 0) return;
 
+  // Crowns follow the actual result: the "win:<seat>" framework seat, or
+  // the tied top of the ranking on a draw. An abandoned game crowns nobody.
+  let winnerSessionIds: Set<string> | "draw" | undefined;
+  if (state.endReason.startsWith(EndReason.WIN_PREFIX)) {
+    const frameworkSeat = Number(state.endReason.slice(EndReason.WIN_PREFIX.length));
+    const winner = [...state.players.values()].find((p) => p.seat === frameworkSeat);
+    winnerSessionIds = new Set(winner ? [winner.sessionId] : []);
+  } else if (state.endReason === EndReason.DRAW) {
+    winnerSessionIds = "draw";
+  }
+
   const rows = seats.map((seat) => {
     const tierPoints = [0, 0, 0];
     for (const card of seat.built) {
@@ -240,19 +252,26 @@ export function renderSplendorGameSummary(
       total: seat.points,
       cards: seat.built.length,
       mine: seat.sessionId !== "" && seat.sessionId === ctx.mySessionId,
+      // A seat is departed if it was ghost-played OR its player is no
+      // longer in the room (e.g. the leaver of an abandoned game).
+      gone: seat.gone || (seat.sessionId !== "" && !state.players.has(seat.sessionId)),
     };
   });
   rows.sort((a, b) => b.total - a.total || a.cards - b.cards);
   const best = rows[0]!;
-  const isWinner = (r: (typeof rows)[number]) => r.total === best.total && r.cards === best.cards;
+  const isWinner = (r: (typeof rows)[number]) => {
+    if (winnerSessionIds === undefined) return false;
+    if (winnerSessionIds === "draw") return r.total === best.total && r.cards === best.cards;
+    return r.seat.sessionId !== "" && winnerSessionIds.has(r.seat.sessionId);
+  };
 
   const body = rows
     .map((r) => {
       const name = `${isWinner(r) ? "👑 " : ""}${escapeHtml(r.seat.nickname)}${r.mine ? " (you)" : ""}${
-        r.seat.gone ? " · left" : ""
+        r.gone ? " · left" : ""
       }`;
       return `
-        <tr class="${isWinner(r) ? "winner" : ""} ${r.seat.gone ? "gone" : ""}">
+        <tr class="${isWinner(r) ? "winner" : ""} ${r.gone ? "gone" : ""}">
           <td class="spl-sum-name">${name}</td>
           <td>${r.tierPoints[0]}</td>
           <td>${r.tierPoints[1]}</td>

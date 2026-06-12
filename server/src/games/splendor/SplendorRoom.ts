@@ -174,15 +174,19 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
       `Players needed: ${humans.join(", ")}`;
   }
 
-  /** While a save is staged, only the exact saved human lineup may start. */
+  /** While a save is staged, only the exact saved lineup may start. */
   protected override canStartGame(): boolean {
     if (!this.pendingLoad) return true;
     const required = new Set(
       this.pendingLoad.seats.filter((s) => !s.isBot && !s.gone).map((s) => s.nickname.toLowerCase())
     );
-    const present = [...this.state.players.values()].filter((p) => !p.isBot);
-    if (present.length !== required.size) return false;
-    return present.every((p) => required.has(p.nickname.toLowerCase()));
+    const humans = [...this.state.players.values()].filter((p) => !p.isBot);
+    if (humans.length !== required.size) return false;
+    if (!humans.every((p) => required.has(p.nickname.toLowerCase()))) return false;
+    // No extra bots either (the host could have added some after loading).
+    const requiredBots = this.pendingLoad.seats.filter((s) => s.isBot && !s.gone).length;
+    const presentBots = this.state.players.size - humans.length;
+    return presentBots === requiredBots;
   }
 
   private removeBots(): void {
