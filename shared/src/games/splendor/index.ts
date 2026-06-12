@@ -21,7 +21,24 @@ export const SPLENDOR = "splendor";
 export const SplendorMsg = {
   MOVE: "splendor/move",
   RESOLVE: "splendor/resolve",
+  /** Host-only, lobby-only. Payload: { turnSeconds: 0 | 15 | 30 | ... | 300 }. */
+  CONFIG: "splendor/config",
 } as const;
+
+/** Turn-timer options: 0 = off, otherwise 15s steps up to 5 minutes. */
+export const SPLENDOR_TURN_STEP_SECONDS = 15;
+export const SPLENDOR_TURN_MAX_SECONDS = 300;
+export const SPLENDOR_TURN_DEFAULT_SECONDS = 120;
+
+export function isValidSplendorTurnSeconds(v: unknown): v is number {
+  return (
+    typeof v === "number" &&
+    Number.isInteger(v) &&
+    v >= 0 &&
+    v <= SPLENDOR_TURN_MAX_SECONDS &&
+    v % SPLENDOR_TURN_STEP_SECONDS === 0
+  );
+}
 
 /** Reused for bank gems / player gems / bonuses / card costs / noble requirements. */
 export class ColorCounts extends Schema {
@@ -93,4 +110,11 @@ export class SplendorState extends BaseState {
   /** Engine endFlag: someone reached 15, the round is being finished. */
   @type("boolean") lastRound = false;
   @type("uint16") turnCount = 0;
+  /** Turn time limit in seconds; 0 = untimed. Host-set in the lobby. */
+  @type("uint16") turnSeconds = SPLENDOR_TURN_DEFAULT_SECONDS;
+  /**
+   * Epoch ms when the current turn expires (clients render the countdown
+   * from this); 0 when untimed, paused for a disconnect, or game over.
+   */
+  @type("float64") turnDeadline = 0;
 }

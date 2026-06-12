@@ -29,12 +29,17 @@ describe("splendor", () => {
   after(async () => colyseus.shutdown());
   beforeEach(async () => await colyseus.cleanup());
 
-  async function startedGame(seed = 42, playerCount = 2) {
+  async function startedGame(
+    seed = 42,
+    playerCount = 2,
+    beforeStart?: (room: SplendorRoom) => void
+  ) {
     const room = (await colyseus.createRoom(SPLENDOR, { seed })) as unknown as SplendorRoom;
     const clients = [];
     for (let i = 0; i < playerCount; i++) {
       clients.push(await colyseus.connectTo(room, { nickname: `Player${i}` }));
     }
+    beforeStart?.(room);
     clients[0]!.send(LobbyMsg.START, {});
     await until(() => room.state.phase === Phase.PLAYING);
     return { room, clients };
@@ -326,5 +331,92 @@ describe("splendor", () => {
     await until(() => room.state.phase === Phase.ENDED);
     assert.strictEqual(room.state.endReason, EndReason.ABANDONED);
     assert.strictEqual(room.state.currentTurn, "", "turn cleared after game end");
+  });
+
+  it("lets only the host configure the turn timer, in the lobby only", async () => {
+    const room = (await colyseus.createRoom(SPLENDOR, {})) as unknown as SplendorRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Host" });
+    const guest = await colyseus.connectTo(room, { nickname: "Guest" });
+    assert.strictEqual(room.state.turnSeconds, 120, "defaults to 2 minutes");
+
+    host.send(SplendorMsg.CONFIG, { turnSeconds: 90 });
+    await until(() => room.state.turnSeconds === 90);
+
+    guest.send(SplendorMsg.CONFIG, { turnSeconds: 60 }); // not the host
+    host.send(SplendorMsg.CONFIG, { turnSeconds: 22 }); // not a 15s step
+    host.send(SplendorMsg.CONFIG, { turnSeconds: -15 });
+    host.send(SplendorMsg.CONFIG, { turnSeconds: 9000 }); // over the 5min max
+    host.send(SplendorMsg.CONFIG, { turnSeconds: "45" }); // wrong type
+    host.send(SplendorMsg.CONFIG, {});
+    await sleep(100);
+    assert.strictEqual(room.state.turnSeconds, 90, "invalid configs ignored");
+
+    host.send(SplendorMsg.CONFIG, { turnSeconds: 0 }); // off is a valid choice
+    await until(() => room.state.turnSeconds === 0);
+
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    assert.strictEqual(room.state.turnDeadline, 0, "untimed game has no deadline");
+
+    host.send(SplendorMsg.CONFIG, { turnSeconds: 120 }); // mid-game: ignored
+    await sleep(100);
+    assert.strictEqual(room.state.turnSeconds, 0);
+  });
+
+  it("auto-plays a turn when the clock runs out (including a chained discard)", async function () {
+    this.timeout(10000);
+    // 1s is below the UI's 15s floor - set white-box to keep the test fast.
+    const { room, clients } = await startedGame(41, 2, (r) => {
+      r.state.turnSeconds = 1;
+    });
+    assert.ok(room.state.turnDeadline > Date.now(), "deadline synced at turn start");
+
+    // Seat 0 stalls inside its own turn: the take below forces a discard
+    // decision (8 injected tokens + 3 taken = 11) that never gets answered.
+    const me = room.engine.players[0]!;
+    me.gems.white = 4;
+    me.gems.blue = 3;
+    me.gold = 1;
+    clients[0]!.send(SplendorMsg.MOVE, { kind: "TAKE_THREE", colors: ["green", "red", "black"] });
+    await until(() => room.engine.awaiting.inputType === "DISCARD");
+
+    // The clock (which spans the whole turn) fires; the ghost finishes it.
+    await until(() => room.engine.awaiting.seat === 1, 3000);
+    assert.strictEqual(room.state.phase, Phase.PLAYING);
+    assert.strictEqual(room.engine.awaiting.inputType, "MOVE");
+    assert.ok(
+      SplendorEngine.totalTokens(room.engine.players[0]!) <= 10,
+      "ghost resolved the pending discard"
+    );
+    await until(() => room.state.currentTurn === clients[1]!.sessionId);
+    assert.ok(room.state.turnDeadline > Date.now(), "next turn re-armed the clock");
+  });
+
+  it("freezes the turn clock while the current player is disconnected", async function () {
+    this.timeout(10000);
+    const { room, clients } = await startedGame(43, 2, (r) => {
+      r.state.turnSeconds = 1;
+    });
+    const a = clients[0]!;
+    const token = a.reconnectionToken;
+    const aSessionId = a.sessionId;
+
+    await a.leave(false); // the player whose turn it is drops
+    await until(() => room.state.players.get(aSessionId)?.connected === false);
+    assert.strictEqual(room.state.turnDeadline, 0, "countdown shows paused");
+
+    const before = room.engine;
+    await sleep(1500); // well past the 1s limit
+    assert.strictEqual(room.engine, before, "no timeout fires while paused");
+    assert.strictEqual(room.state.phase, Phase.PLAYING);
+
+    const a2 = await colyseus.sdk.reconnect(token);
+    assert.strictEqual(a2.sessionId, aSessionId);
+    await until(() => room.state.players.get(aSessionId)?.connected === true);
+    assert.ok(room.state.turnDeadline > 0, "countdown resumed");
+
+    // The resumed remainder runs out and the ghost takes the turn.
+    await until(() => room.engine !== before, 3000);
+    assert.strictEqual(room.engine.awaiting.seat, 1);
   });
 });

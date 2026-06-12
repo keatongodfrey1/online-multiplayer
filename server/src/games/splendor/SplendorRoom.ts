@@ -21,6 +21,7 @@ import {
   type BasePlayer,
   ColorCounts,
   EndReason,
+  isValidSplendorTurnSeconds,
   Phase,
   SPLENDOR,
   SplendorCard,
@@ -73,13 +74,14 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
   /** The reserved-cards ArraySchema each session was granted (re-granted per game). */
   private grantedReserved = new Map<string, ArraySchema<SplendorCard>>();
 
-  // Untimed in v1: with no turnSeconds, pause()/resume() are no-ops, kept for
-  // symmetry so adding a turn clock later is just turnSeconds + onTimeout.
-  private turns = new TurnManager(this, {
-    onTurnChange: (sessionId) => {
-      this.state.currentTurn = sessionId;
-    },
-  });
+  /**
+   * Built fresh each onGameStart so the lobby-chosen turn limit applies
+   * (TurnManager options are fixed at construction). Absent until the first
+   * game starts.
+   */
+  private turns?: TurnManager;
+  /** Frozen countdown remainder while the current player is disconnected. */
+  private pausedTurnRemainingMs?: number;
 
   protected createPlayer(): SplendorPlayer {
     return new SplendorPlayer();
@@ -92,6 +94,16 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     if (typeof seed === "number" && Number.isFinite(seed)) this.seedOption = seed >>> 0;
     this.onMessage(SplendorMsg.MOVE, (client, payload) => this.handleMove(client, payload));
     this.onMessage(SplendorMsg.RESOLVE, (client, payload) => this.handleResolve(client, payload));
+    this.onMessage(SplendorMsg.CONFIG, (client, payload) => this.handleConfig(client, payload));
+  }
+
+  /** Host adjusts the turn timer while in the lobby. */
+  private handleConfig(client: Client, payload: unknown): void {
+    if (this.state.phase !== Phase.LOBBY) return;
+    if (client.sessionId !== this.state.hostSessionId) return;
+    const turnSeconds = (payload as { turnSeconds?: unknown } | null)?.turnSeconds;
+    if (!isValidSplendorTurnSeconds(turnSeconds)) return;
+    this.state.turnSeconds = turnSeconds;
   }
 
   protected onGameStart(): void {
@@ -115,7 +127,35 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     }
     this.state.lastRound = false;
     this.syncFromEngine();
+
+    this.turns?.stop();
+    this.pausedTurnRemainingMs = undefined;
+    this.turns = new TurnManager(this, {
+      ...(this.state.turnSeconds > 0 ? { turnSeconds: this.state.turnSeconds } : {}),
+      onTurnChange: (sessionId) => {
+        this.state.currentTurn = sessionId;
+        this.pausedTurnRemainingMs = undefined; // any pause belonged to the previous turn
+        this.state.turnDeadline =
+          this.state.turnSeconds > 0 ? Date.now() + this.state.turnSeconds * 1000 : 0;
+      },
+      onTimeout: (sessionId) => this.handleTurnTimeout(sessionId),
+    });
     this.turns.start(this.seatOrder);
+  }
+
+  /**
+   * The turn clock ran out: the ghost finishes the seat's whole turn (the
+   * move plus any chained discard / noble decision), then play moves on.
+   */
+  private handleTurnTimeout(sessionId: string): void {
+    if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.over) return;
+    const seat = this.engine.awaiting.seat;
+    if (this.seatOrder[seat] !== sessionId) return;
+    let guard = 0;
+    while (!this.engine.over && this.engine.awaiting.seat === seat && ++guard <= 10) {
+      this.engine = this.playOneDecisionFor(seat).state;
+    }
+    this.afterApply();
   }
 
   /**
@@ -217,7 +257,7 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     // present player, so its sessionId is in the rotation; bounded anyway.
     const target = this.seatOrder[this.engine.awaiting.seat];
     let steps = 0;
-    while (target && this.turns.current() !== target && ++steps <= this.maxPlayers) {
+    while (target && this.turns && this.turns.current() !== target && ++steps <= this.maxPlayers) {
       this.turns.next();
     }
   }
@@ -297,11 +337,24 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
   // ---- framework hooks -------------------------------------------------------
 
   protected override onPlayerDropped(player: BasePlayer): void {
-    if (this.turns.current() === player.sessionId) this.turns.pause();
+    if (this.turns?.current() === player.sessionId) {
+      this.turns.pause();
+      if (this.state.turnDeadline > 0) {
+        // Freeze the visible countdown alongside the TurnManager's clock.
+        this.pausedTurnRemainingMs = Math.max(0, this.state.turnDeadline - Date.now());
+        this.state.turnDeadline = 0;
+      }
+    }
   }
 
   protected override onPlayerReconnected(player: BasePlayer): void {
-    if (this.turns.current() === player.sessionId) this.turns.resume();
+    if (this.turns?.current() === player.sessionId) {
+      this.turns.resume();
+      if (this.pausedTurnRemainingMs !== undefined) {
+        this.state.turnDeadline = Date.now() + this.pausedTurnRemainingMs;
+        this.pausedTurnRemainingMs = undefined;
+      }
+    }
     if (this.state.phase !== Phase.PLAYING) return;
     const idx = this.seatOrder.indexOf(player.sessionId);
     const seat = idx >= 0 ? this.state.seats[idx] : undefined;
@@ -314,7 +367,7 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
   }
 
   protected override onPlayerLeftForGood(player: BasePlayer): void {
-    this.turns.remove(player.sessionId);
+    this.turns?.remove(player.sessionId);
     this.grantedReserved.delete(player.sessionId);
     if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.over) return;
     // With too few humans left, the framework ends the game as "abandoned"
@@ -324,7 +377,9 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
   }
 
   protected override onGameEnded(): void {
-    this.turns.stop();
+    this.turns?.stop();
+    this.pausedTurnRemainingMs = undefined;
+    this.state.turnDeadline = 0;
     this.state.currentTurn = "";
     this.state.awaitingType = "";
   }
