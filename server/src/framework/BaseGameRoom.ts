@@ -34,6 +34,18 @@ import {
 } from "@backbone/shared";
 import { generateUniqueRoomCode, releaseRoomCode } from "./roomCodes.js";
 
+/**
+ * The seat lineup a save carries, used by the framework to gate the resume
+ * start and re-seat bots. A game's own SaveSeat is structurally compatible
+ * (it may add fields like a bot difficulty, which the game reads itself).
+ */
+export interface FrameworkSaveSeat {
+  nickname: string;
+  isBot: boolean;
+  /** Had left for good when saved; stays ghost-played on resume. */
+  gone: boolean;
+}
+
 export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends Room<{
   state: TState;
 }> {
@@ -48,10 +60,31 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
    * is entirely the game room's job (key its logic off player.isBot).
    */
   supportsBots = false;
+  /**
+   * Opt in to save/resume: the host can snapshot a game mid-play and resume
+   * it from the lobby. The framework owns the orchestration (SAVE/LOAD
+   * messages, the lineup-gated start, bot re-seating); the game implements
+   * serializeSave/parseSave/isGameOver/loadedSaveTurnLabel (+ optional
+   * onSaveStaged/onLoadedBotSeated/onBotRemoved). See ADDING_A_GAME.md.
+   */
+  protected supportsSaves = false;
+  /**
+   * Opt in to mid-game seat reclaim: with allowLateJoin, a newcomer with the
+   * room code takes over an autopilot seat. The game implements
+   * findReclaimableSeat + reclaimSeat; the framework owns the join policy and
+   * the clean rejection when no seat is open.
+   */
+  protected supportsReclaim = false;
+  /** A validated save staged in the lobby, consumed by the next startGame(). */
+  protected pendingLoad?: { seats: FrameworkSaveSeat[]; payload: unknown };
   /** Names handed to bots in order; override for themed names. */
   protected botNicknames = ["Botty", "Chip", "Gizmo", "Pixel", "Widget", "Sprocket"];
-  /** Seconds a disconnected player's seat is held during a game. */
-  reconnectionGraceSeconds = 60;
+  /**
+   * Seconds a disconnected player's seat is held during a game. 3 minutes is
+   * forgiving for real tablets that lock their screen mid-game; it only
+   * affects abnormal drops (a consented Leave removes the seat immediately).
+   */
+  reconnectionGraceSeconds = 180;
   /** Seconds a disconnected player's seat is held in the lobby. */
   lobbyGraceSeconds = 30;
 
@@ -65,8 +98,23 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
   protected abstract onGameStart(): void;
   /** Game-specific room setup (register game message handlers here). */
   protected onRoomCreate(options: unknown): void {}
-  /** A player joined while the game is in progress (allowLateJoin only). */
-  protected onPlayerJoinedMidGame(player: BasePlayer): void {}
+  /**
+   * A player joined while the game is in progress (allowLateJoin only). The
+   * default implements seat reclaim for games with supportsReclaim: bind the
+   * newcomer to a vacated seat, or reject cleanly when none is open. A game
+   * can override this for other late-join behavior (e.g. drop-in arenas).
+   */
+  protected onPlayerJoinedMidGame(player: BasePlayer): void {
+    if (!this.supportsReclaim) return;
+    const seatIndex = this.findReclaimableSeat();
+    if (seatIndex < 0) {
+      // onJoin already inserted the player; undo it and reject so the SDK
+      // surfaces a friendly home-screen message instead of a half-join.
+      this.state.players.delete(player.sessionId);
+      throw new ServerError(JoinError.GAME_IN_PROGRESS, "This game is already underway with no open seat.");
+    }
+    this.reclaimSeat(seatIndex, player);
+  }
   /** A player disconnected (may still reconnect within the grace period). */
   protected onPlayerDropped(player: BasePlayer): void {}
   /** A dropped player came back. */
@@ -80,12 +128,53 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
   protected onBotAdded(bot: BasePlayer, options: unknown): void {}
   /**
    * Game veto for starting (host pressed Start, player count already
-   * satisfied). Return false to keep the lobby open - e.g. while a loaded
-   * save is waiting for the right players to arrive.
+   * satisfied). The default holds the lobby while a saved game is staged
+   * until the exact saved lineup is present (matching humans by nickname,
+   * the right number of bots). A game rarely needs to override this.
    */
   protected canStartGame(): boolean {
-    return true;
+    if (!this.pendingLoad) return true;
+    const required = new Set(
+      this.pendingLoad.seats.filter((s) => !s.isBot && !s.gone).map((s) => s.nickname.toLowerCase())
+    );
+    const humans = [...this.state.players.values()].filter((p) => !p.isBot);
+    if (humans.length !== required.size) return false;
+    if (!humans.every((p) => required.has(p.nickname.toLowerCase()))) return false;
+    const requiredBots = this.pendingLoad.seats.filter((s) => s.isBot && !s.gone).length;
+    return this.state.players.size - humans.length === requiredBots;
   }
+
+  // ---- save/resume hooks (reached only when supportsSaves) ---------------
+  /** Build the save blob for the host to store (null = not saveable now). */
+  protected serializeSave(): object | null {
+    return null;
+  }
+  /** Validate an untrusted save blob; return null to reject it silently. */
+  protected parseSave(raw: unknown): { seats: FrameworkSaveSeat[] } | null {
+    return null;
+  }
+  /** Is the game finished? (engine.over vs winner !== null, per game.) */
+  protected isGameOver(): boolean {
+    return false;
+  }
+  /** The 1-based turn number shown in the "resuming…" banner. */
+  protected loadedSaveTurnLabel(parsed: unknown): number {
+    return 1;
+  }
+  /** A save was just staged: restore any lobby-config it carried. */
+  protected onSaveStaged(parsed: unknown): void {}
+  /** A bot from the save was just re-seated (e.g. restore its difficulty). */
+  protected onLoadedBotSeated(bot: BasePlayer, savedSeat: FrameworkSaveSeat): void {}
+  /** A bot is being removed in the lobby (e.g. clear per-bot game state). */
+  protected onBotRemoved(sessionId: string): void {}
+
+  // ---- seat-reclaim hooks (reached only when supportsReclaim) ------------
+  /** Engine-seat index of a seat a newcomer may take over, or -1 if none. */
+  protected findReclaimableSeat(): number {
+    return -1;
+  }
+  /** Bind the newcomer to the seat (rebind mappings, re-grant private view). */
+  protected reclaimSeat(seatIndex: number, player: BasePlayer): void {}
   /**
    * Re-send private data (anything delivered via client.send rather than
    * synced state) to a client that just reconnected. State synced via
@@ -118,6 +207,10 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
     );
     this.onMessage(LobbyMsg.REMATCH, (client) => this.handleRematch(client));
     this.onMessage(LobbyMsg.ADD_BOT, (client, payload) => this.handleAddBot(client, payload));
+    if (this.supportsSaves) {
+      this.onMessage(LobbyMsg.SAVE, (client) => this.handleSave(client));
+      this.onMessage(LobbyMsg.LOAD, (client, payload) => this.handleLoad(client, payload));
+    }
 
     // Connection keepalive (see ConnectionMsg). A quiet WebSocket can be
     // idle-closed by hosting proxies seconds after connecting, so we keep both
@@ -247,6 +340,7 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
 
   private startGame(): void {
     this.state.endReason = "";
+    this.state.loadedSave = ""; // a staged save is consumed by onGameStart
     for (const player of this.state.players.values()) {
       player.wantsRematch = false;
     }
@@ -300,6 +394,54 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
       if (!p.wantsRematch && !p.isBot) return; // bots are always up for another
     }
     this.startGame();
+  }
+
+  // ---- save/resume orchestration (supportsSaves) -------------------------
+
+  /** Host requests a mid-game snapshot; the blob goes to the host's browser. */
+  private handleSave(client: Client): void {
+    if (this.state.phase !== Phase.PLAYING || this.isGameOver()) return;
+    if (client.sessionId !== this.state.hostSessionId) return;
+    const blob = this.serializeSave();
+    if (blob) client.send(ServerMsg.SAVE_DATA, blob);
+  }
+
+  /**
+   * Host stages a saved game in the lobby (null clears it). The blob is
+   * validated by the game's parseSave; saved bots are re-seated, and the
+   * start is then gated (canStartGame) until the saved humans return.
+   */
+  private handleLoad(client: Client, payload: unknown): void {
+    if (this.state.phase !== Phase.LOBBY) return;
+    if (client.sessionId !== this.state.hostSessionId) return;
+    if (payload === null || payload === undefined) {
+      this.pendingLoad = undefined;
+      this.state.loadedSave = "";
+      this.removeBots();
+      return;
+    }
+    const parsed = this.parseSave(payload);
+    if (!parsed) return; // corrupt or tampered: ignore silently
+    this.pendingLoad = { seats: parsed.seats, payload: parsed };
+    this.onSaveStaged(parsed); // game restores its lobby config (timer, variant, ...)
+    this.removeBots();
+    for (const seat of parsed.seats) {
+      if (!seat.isBot || seat.gone) continue;
+      if (this.state.players.size >= this.maxPlayers) break;
+      const bot = this.seatBot(seat.nickname);
+      this.onLoadedBotSeated(bot, seat);
+    }
+    const humans = parsed.seats.filter((s) => !s.isBot && !s.gone).map((s) => s.nickname);
+    this.state.loadedSave = `Resuming a saved game (turn ${this.loadedSaveTurnLabel(parsed)}). Players needed: ${humans.join(", ")}`;
+  }
+
+  /** Remove every bot from the roster (lobby load path). */
+  protected removeBots(): void {
+    for (const player of [...this.state.players.values()]) {
+      if (!player.isBot) continue;
+      this.onBotRemoved(player.sessionId);
+      this.state.players.delete(player.sessionId);
+    }
   }
 
   /** Host seats an AI player (lobby only, games with supportsBots). */

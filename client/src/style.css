@@ -704,12 +704,13 @@ button.spl-gem.selected {
 }
 
 /*
- * "Your turn" toast: a brief center-screen flash paired with the turn
- * chime. pointer-events: none keeps the board clickable straight through
- * it - nobody ever waits for it to clear. The animation runs once and
- * ends invisible (no JS timer, no dismiss button).
+ * "Your turn" toast (shared by every game via framework/turnAlert.ts): a
+ * brief center-screen flash paired with the turn chime. pointer-events:
+ * none keeps the board clickable straight through it - nobody ever waits
+ * for it to clear. The animation runs once and ends invisible (no JS
+ * timer, no dismiss button).
  */
-#spl-toast {
+.turn-toast {
   position: fixed;
   top: 45%;
   left: 50%;
@@ -726,11 +727,11 @@ button.spl-gem.selected {
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
 }
 
-#spl-toast.show {
-  animation: spl-toast-pop 1.4s ease-out forwards;
+.turn-toast.show {
+  animation: turn-toast-pop 1.4s ease-out forwards;
 }
 
-@keyframes spl-toast-pop {
+@keyframes turn-toast-pop {
   0% {
     opacity: 0;
     transform: translate(-50%, -50%) scale(0.85);
@@ -1189,4 +1190,118 @@ button.spl-gem.selected {
   height: 20px;
   margin-top: 2px;
   flex: none;
+}
+
+/* Catan lobby color picker */
+.catan-color-row {
+  display: flex;
+  gap: 8px;
+}
+
+.catan-color-swatch {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 2px solid #353a4f;
+  padding: 0;
+  cursor: pointer;
+}
+
+.catan-color-swatch.catan-color-selected {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.catan-color-swatch:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Catan save UI */
+.catan-topbar {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 0;
+}
+
+.catan-topbar button {
+  padding: 4px 10px;
+  font-size: 0.85rem;
+}
+
+.catan-saves {
+  margin: 10px 0;
+}
+
+.catan-saves summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.catan-save-slot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #2a2e40;
+}
+
+.catan-save-slot button {
+  padding: 4px 8px;
+  font-size: 0.8rem;
+}
+
+.catan-loaded-save {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+/* Catan hand-total chip + discard warning */
+.catan-chip-total {
+  font-weight: 600;
+}
+
+.catan-chip-warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.catan-topbar {
+  gap: 6px;
+}
+
+/* Framework save slots (shared by every game with supportsSaves) */
+.fw-saves {
+  margin: 10px 0;
+}
+
+.fw-saves summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.fw-save-slot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #2a2e40;
+}
+
+.fw-save-slot button {
+  padding: 4px 8px;
+  font-size: 0.8rem;
+}
+
+.fw-loaded-save {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
 }

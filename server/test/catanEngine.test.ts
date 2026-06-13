@@ -359,6 +359,104 @@ describe("catan engine: setup", () => {
 });
 
 // =============================================================================
+describe("catan engine: rollForOrder (visible opening roll)", () => {
+  it("is opt-in: off by default, skipped when startingPlayer is provided", () => {
+    const off = createInitialGameState(geo, { numPlayers: 3, seed: 70 });
+    assert.equal(off.phase, "setupSettlement");
+    assert.deepEqual(off.orderRolls, []);
+    assert.deepEqual(off.orderContenders, []);
+
+    const skipped = createInitialGameState(geo, { numPlayers: 3, seed: 70, rollForOrder: true, startingPlayer: 1 });
+    assert.equal(skipped.phase, "setupSettlement", "explicit startingPlayer wins");
+    assert.equal(skipped.currentPlayer, 1);
+
+    const on = createInitialGameState(geo, { numPlayers: 3, seed: 70, rollForOrder: true });
+    assert.equal(on.phase, "rollForOrder");
+    assert.deepEqual(on.orderContenders, [0, 1, 2]);
+    assert.deepEqual(on.orderRolls, [null, null, null]);
+    assert.deepEqual(on.setupSequence, [], "snake not built until the rolls decide");
+  });
+
+  it("collects one roll per contender in any order and rejects everything else", () => {
+    let s = createInitialGameState(geo, { numPlayers: 3, seed: 71, rollForOrder: true });
+    assert.equal(tryReduce(geo, s, { type: "placeSetupSettlement", vertex: 0 }).ok, false, "setup blocked");
+    assert.equal(tryReduce(geo, s, { type: "rollDice" }).ok, false, "normal roll blocked");
+    s = reduce(geo, s, { type: "rollForOrder", player: 2, dice: [3, 3] }, TRUST); // out of seat order: fine
+    assert.deepEqual(s.orderRolls[2], [3, 3]);
+    assert.equal(s.phase, "rollForOrder", "still waiting on the others");
+    assert.equal(tryReduce(geo, s, { type: "rollForOrder", player: 2, dice: [6, 6] }, TRUST).ok, false, "no second roll");
+    assert.equal(tryReduce(geo, s, { type: "rollForOrder", player: 9, dice: [1, 1] }, TRUST).ok, false, "no such contender");
+    s = reduce(geo, s, { type: "rollForOrder", player: 0, dice: [2, 1] }, TRUST);
+    s = reduce(geo, s, { type: "rollForOrder", player: 1, dice: [5, 4] }, TRUST);
+    assert.equal(s.phase, "setupSettlement", "round complete -> setup begins");
+    assert.equal(s.currentPlayer, 1, "highest sum (9) leads");
+    assert.deepEqual(s.setupSequence, [1, 2, 0, 0, 2, 1], "snake built from the winner");
+  });
+
+  it("ties re-roll among the tied only; losers' rolls stay visible", () => {
+    let s = createInitialGameState(geo, { numPlayers: 4, seed: 72, rollForOrder: true });
+    s = reduce(geo, s, { type: "rollForOrder", player: 0, dice: [4, 4] }, TRUST); // 8
+    s = reduce(geo, s, { type: "rollForOrder", player: 1, dice: [2, 1] }, TRUST); // 3
+    s = reduce(geo, s, { type: "rollForOrder", player: 2, dice: [5, 3] }, TRUST); // 8
+    s = reduce(geo, s, { type: "rollForOrder", player: 3, dice: [1, 1] }, TRUST); // 2
+    assert.equal(s.phase, "rollForOrder", "tie at 8 keeps the phase open");
+    assert.deepEqual(s.orderContenders, [0, 2], "only the tied seats re-roll");
+    assert.equal(s.orderRolls[0], null, "tied rolls reset");
+    assert.equal(s.orderRolls[2], null);
+    assert.deepEqual(s.orderRolls[1], [2, 1], "loser's roll kept for display");
+    assert.equal(tryReduce(geo, s, { type: "rollForOrder", player: 1, dice: [6, 6] }, TRUST).ok, false, "losers sit out");
+    s = reduce(geo, s, { type: "rollForOrder", player: 2, dice: [1, 2] }, TRUST);
+    s = reduce(geo, s, { type: "rollForOrder", player: 0, dice: [6, 5] }, TRUST);
+    assert.equal(s.phase, "setupSettlement");
+    assert.equal(s.currentPlayer, 0, "re-roll winner leads");
+    assert.deepEqual(s.setupSequence, [0, 1, 2, 3, 3, 2, 1, 0]);
+  });
+
+  it("2p variant: only the humans roll; neutrals are never contenders", () => {
+    let s = createInitialGameState(geo, { numPlayers: 2, seed: 73, twoPlayerVariant: true, rollForOrder: true });
+    assert.deepEqual(s.orderContenders, [0, 1]);
+    assert.equal(s.orderRolls.length, 4, "sized to all seats; neutral entries stay null");
+    assert.equal(tryReduce(geo, s, { type: "rollForOrder", player: 2, dice: [3, 3] }, TRUST).ok, false);
+    s = reduce(geo, s, { type: "rollForOrder", player: 1, dice: [6, 4] }, TRUST);
+    s = reduce(geo, s, { type: "rollForOrder", player: 0, dice: [1, 2] }, TRUST);
+    assert.equal(s.phase, "setupSettlement");
+    assert.equal(s.currentPlayer, 1);
+    assert.deepEqual(s.setupSequence, [1, 0, 0, 1], "snake over the two humans only");
+  });
+
+  it("unscripted opening rolls are seed-deterministic and clone/serialize round-trips the fields", () => {
+    const play = (seed: number) => {
+      let s = createInitialGameState(geo, { numPlayers: 3, seed, rollForOrder: true });
+      let guard = 0;
+      while (s.phase === "rollForOrder" && guard++ < 30) {
+        const next = s.orderContenders.find((p) => s.orderRolls[p] === null)!;
+        s = reduce(geo, s, { type: "rollForOrder", player: next });
+      }
+      return s;
+    };
+    const a = play(74);
+    const b = play(74);
+    assert.deepEqual(a, b, "same seed, same opening rolls and winner");
+    assert.equal(a.phase, "setupSettlement");
+
+    // clone + serialize keep the mid-phase fields intact
+    let mid = createInitialGameState(geo, { numPlayers: 3, seed: 75, rollForOrder: true });
+    mid = reduce(geo, mid, { type: "rollForOrder", player: 1, dice: [4, 2] }, TRUST);
+    const round = deserialize(serialize(mid));
+    assert.deepEqual(round.orderRolls, mid.orderRolls);
+    assert.deepEqual(round.orderContenders, mid.orderContenders);
+    const cloned = reduce(geo, mid, { type: "rollForOrder", player: 0, dice: [1, 1] }, TRUST);
+    assert.deepEqual(cloned.orderRolls[1], [4, 2], "cloneGameState carries earlier rolls");
+  });
+
+  it("both policies roll when asked (ghosts and bots cannot stall the phase)", () => {
+    const s = createInitialGameState(geo, { numPlayers: 3, seed: 76, rollForOrder: true });
+    assert.deepEqual(new RandomPolicy(1).act(geo, s, 1), { type: "rollForOrder", player: 1 });
+    assert.deepEqual(new GreedyPolicy(1).act(geo, s, 2), { type: "rollForOrder", player: 2 });
+  });
+});
+
+// =============================================================================
 describe("catan engine: turn flow", () => {
   it("plays through rolls, a 7, and a clean rotation", () => {
     let state = setupGame(4, 42);
@@ -745,6 +843,40 @@ describe("catan engine: domestic trade", () => {
     assert.ok(s.players[0]!.hand.ore === 0 && s.players[0]!.hand.wool === 2);
     assert.ok(s.players[2]!.hand.wool === 1 && s.players[2]!.hand.ore === 2);
     assert.equal(s.pendingTrade, null);
+  });
+
+  it("tracks declines symmetrically and lets candidates change their answer", () => {
+    let s = toMain(setupGame(4, 26));
+    s.players[0]!.hand = { ...emptyBag(), ore: 1 };
+    s.players[1]!.hand = { ...emptyBag(), wool: 1 };
+    s = reduce(geo, s, { type: "proposeDomesticTrade", give: { ore: 1 }, receive: { wool: 1 } });
+    assert.deepEqual(s.pendingTrade!.declines, [], "a fresh offer has no declines");
+
+    // decline without ever accepting (the playtest bug path)
+    s = reduce(geo, s, { type: "respondDomesticTrade", player: 1, accept: false });
+    assert.deepEqual(s.pendingTrade!.declines, [1]);
+    assert.deepEqual(s.pendingTrade!.acceptances, []);
+
+    // idempotent re-decline
+    s = reduce(geo, s, { type: "respondDomesticTrade", player: 1, accept: false });
+    assert.deepEqual(s.pendingTrade!.declines, [1], "no duplicates");
+
+    // change of mind: decline -> accept moves between the lists
+    s = reduce(geo, s, { type: "respondDomesticTrade", player: 1, accept: true });
+    assert.deepEqual(s.pendingTrade!.declines, []);
+    assert.deepEqual(s.pendingTrade!.acceptances, [1]);
+
+    // ...and back again
+    s = reduce(geo, s, { type: "respondDomesticTrade", player: 1, accept: false });
+    assert.deepEqual(s.pendingTrade!.declines, [1]);
+    assert.deepEqual(s.pendingTrade!.acceptances, []);
+
+    // a declined candidate has NOT accepted: confirm is still rejected
+    assert.equal(tryReduce(geo, s, { type: "confirmDomesticTrade", partner: 1 }).ok, false);
+
+    // declines survive the per-action clone (a second candidate responds)
+    s = reduce(geo, s, { type: "respondDomesticTrade", player: 2, accept: true });
+    assert.deepEqual(s.pendingTrade!.declines, [1], "clone preserved the declines list");
   });
 
   it("guards: no unaccepted confirm, no gifts, partner must cover", () => {

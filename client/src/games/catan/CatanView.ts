@@ -12,6 +12,7 @@ import type { Room } from "@colyseus/sdk";
 import {
   type BaseState,
   CATAN_NO_HOLDER,
+  CATAN_PLAYABLE_COLORS,
   CatanEngine,
   CatanMsg,
   type CatanSeat,
@@ -19,6 +20,8 @@ import {
   LobbyMsg,
 } from "@backbone/shared";
 import type { GameView, GameViewContext, LobbySettingsContext } from "../../framework/GameView.js";
+import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
+import { flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
 import { escapeHtml } from "../../lobby/HomeScreen.js";
 import { PLAYER_COLOR, renderBoardSvg, resourceIcon, type BoardUi } from "./board.js";
 
@@ -41,6 +44,10 @@ const geo = buildBoardGeometry();
 
 const zeroBag = (): Bag => ({ lumber: 0, brick: 0, wool: 0, grain: 0, ore: 0 });
 const bagTotal = (b: Bag) => RESOURCES.reduce((t, r) => t + b[r], 0);
+
+/** Save-slot storage key + the blob's turn field (framework save/resume). */
+const CATAN_SAVES_KEY = "catan-saves";
+const catanTurnLabel = (blob: any) => (blob?.turnCount ?? 0) + 1;
 
 /** Bridge the flat synced arrays back into an engine BoardState for the
  *  pure validators (board contents are public). */
@@ -107,12 +114,44 @@ export function renderCatanLobbySettings(
       <span>House rule: whoever moves the robber may <strong>take 1 of the tile's resource</strong>
       from the bank instead of stealing</span>
     </label>`;
+  // Everyone picks their own piece color; taken colors are locked out.
+  const takenBy: Record<string, string> = {};
+  let myColor = "";
+  for (const p of state.players.values()) {
+    const choice = (p as any).colorChoice as string | undefined;
+    if (choice) takenBy[choice] = p.nickname;
+    if (p.sessionId === ctx.mySessionId && choice) myColor = choice;
+  }
+  const swatches = CATAN_PLAYABLE_COLORS.map((c) => {
+    const owner = takenBy[c];
+    const mine = c === myColor;
+    const lockedByOther = owner !== undefined && !mine;
+    const title = lockedByOther ? `Taken by ${owner}` : mine ? "Your color (tap to clear)" : c;
+    return `<button class="catan-color-swatch ${mine ? "catan-color-selected" : ""}" data-color="${c}" style="background:${PLAYER_COLOR[c]}" ${
+      lockedByOther ? "disabled" : ""
+    } title="${escapeHtml(title)}"></button>`;
+  }).join("");
+  const colorRow = `<div class="catan-lobby-setting"><span>Your color</span><div class="catan-color-row">${swatches}</div></div>`;
+
   const addBot = ctx.isHost
     ? `<button id="catan-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>
         ${seatsLeft > 0 ? "+ Add AI opponent" : "Table is full"}
       </button>`
     : "";
-  container.innerHTML = twoRules + note + robber + addBot;
+
+  container.innerHTML = colorRow + twoRules + note + robber + addBot + `<div class="catan-saves-block"></div>`;
+  // Saved games (shared framework helper): banner while staged, else the slot list.
+  renderSaveSlots(container.querySelector<HTMLElement>(".catan-saves-block")!, room, {
+    key: CATAN_SAVES_KEY,
+    isHost: ctx.isHost,
+    loadedSave: state.loadedSave,
+  });
+  container.querySelectorAll<HTMLButtonElement>(".catan-color-swatch").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const c = btn.dataset.color!;
+      room.send(CatanMsg.PICK_COLOR, { color: c === myColor ? "" : c });
+    });
+  });
   container.querySelector<HTMLSelectElement>("#catan-two-rules")?.addEventListener("change", (ev) => {
     room.send(CatanMsg.CONFIG, { useTwoPlayerVariant: (ev.target as HTMLSelectElement).value === "official" });
   });
@@ -170,11 +209,11 @@ export function renderCatanGameSummary(
           (seat.hasLargestArmy ? 2 : 0),
       );
       const bits: string[] = [];
-      if (settlements[i]) bits.push(`🏠×${settlements[i]}`);
-      if (cities[i]) bits.push(`🏛×${cities[i]}`);
-      if (seat.hasLongestRoad) bits.push("🛤 Longest Road +2");
-      if (seat.hasLargestArmy) bits.push("♞ Largest Army +2");
-      if (devVP > 0) bits.push(`⭐ VP cards ×${devVP}`);
+      if (settlements[i]) bits.push(`${settlements[i]} settlements`);
+      if (cities[i]) bits.push(`${cities[i]} cities`);
+      if (seat.hasLongestRoad) bits.push("Longest Road +2");
+      if (seat.hasLargestArmy) bits.push("Largest Army +2");
+      if (devVP > 0) bits.push(`${devVP} VP cards`);
       const you = seat.sessionId && seat.sessionId === ctx.mySessionId ? " (you)" : "";
       return `
         <div class="catan-summary-row ${i === winnerSeat ? "catan-summary-winner" : ""}">
@@ -211,6 +250,10 @@ export class CatanView implements GameView {
   private tradeGivePick: Bag = zeroBag();
   private tradeReceivePick: Bag = zeroBag();
   private bankGive: Res | null = null;
+  /** Shows "Saved ✓" on the Save button for a beat after a snapshot stores. */
+  private saveFlashUntil = 0;
+  /** Rising-edge tracker for the "it's my decision" chime + toast. */
+  private wasMyDecision = false;
 
   mount(root: HTMLElement, room: Room<any, BaseState>, ctx: GameViewContext): void {
     this.root = root;
@@ -218,6 +261,7 @@ export class CatanView implements GameView {
     this.ctx = ctx;
     root.innerHTML = `
       <div class="catan">
+        <div id="catan-topbar" class="catan-topbar"></div>
         <div id="catan-status" class="catan-status"></div>
         <div class="catan-board-wrap"><div id="catan-board"></div></div>
         <div id="catan-actions" class="catan-actions"></div>
@@ -228,6 +272,13 @@ export class CatanView implements GameView {
       </div>`;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
+    // SAVE_DATA returns from the host's Save button; the framework helper
+    // stores the snapshot and flashes "Saved ✓".
+    hookSaveData(this.room, CATAN_SAVES_KEY, catanTurnLabel, () => {
+      this.saveFlashUntil = Date.now() + 2000;
+      this.render();
+      setTimeout(() => this.render(), 2100); // drop the "Saved ✓" label again
+    });
     this.render();
   }
 
@@ -317,6 +368,16 @@ export class CatanView implements GameView {
     }
     if (s.tradeOpen) this.tradeComposing = false;
 
+    // Chime + toast on the rising edge of "I must act now" (turn, discard,
+    // steal, neutral build, the opening roll - anything in awaitingSeats).
+    const myDecisionNow = mine && s.phaseDetail !== "gameOver";
+    if (myDecisionNow && !this.wasMyDecision) {
+      turnChime();
+      flashToast(this.root, "Your turn!");
+    }
+    this.wasMyDecision = myDecisionNow;
+
+    this.renderTopbar(s);
     this.renderStatus(s, me);
     this.renderBoard(s, me, mine);
     this.renderActions(s, me, mine);
@@ -326,11 +387,26 @@ export class CatanView implements GameView {
     this.renderLog(s);
   }
 
+  /** Mute toggle (everyone) + host-only Save snapshot button. */
+  private renderTopbar(s: CatanState): void {
+    const el = this.root!.querySelector<HTMLElement>("#catan-topbar")!;
+    const amHost = this.st().players.get(this.ctx!.mySessionId)?.isHost === true;
+    const saved = Date.now() < this.saveFlashUntil;
+    const mute = `<button class="subtle" data-action="toggle-mute" title="${
+      isMuted() ? "Sounds off" : "Sounds on"
+    }">${isMuted() ? "🔕" : "🔔"}</button>`;
+    const save = amHost ? `<button class="subtle" data-action="save-game">${saved ? "Saved ✓" : "💾 Save"}</button>` : "";
+    el.innerHTML = mute + save;
+  }
+
   private renderStatus(s: CatanState, me: number): void {
     const el = this.root!.querySelector<HTMLElement>("#catan-status")!;
     const who = (i: number) => (i === me ? "<strong>You</strong>" : `<strong>${this.nickname(i)}</strong>`);
     let line = "";
     switch (s.phaseDetail) {
+      case "rollForOrder":
+        line = "Roll for turn order — highest goes first";
+        break;
       case "setupSettlement":
         line = `${who(s.currentSeat)} place${s.currentSeat === me ? "" : "s"} a starting settlement`;
         break;
@@ -465,6 +541,27 @@ export class CatanView implements GameView {
   private renderModal(s: CatanState, me: number, mine: boolean): void {
     const el = this.root!.querySelector<HTMLElement>("#catan-modal")!;
     const meOwes = s.phaseDetail === "discard" && [...s.awaitingSeats].includes(me);
+
+    if (s.phaseDetail === "rollForOrder") {
+      const rolls = [...s.seats]
+        .map((seat, i) => ({ seat, i }))
+        .filter(({ seat }) => !seat.neutral)
+        .map(({ seat, i }) => {
+          const v = s.orderRolls[i] ?? -1;
+          const you = i === me ? " (you)" : "";
+          return `<div class="catan-picker-row"><span>${escapeHtml(seat.nickname)}${you}</span><span>${
+            v >= 0 ? `🎲 ${v}` : "…"
+          }</span></div>`;
+        })
+        .join("");
+      const myRolled = me >= 0 && (s.orderRolls[me] ?? -1) >= 0;
+      const button =
+        mine && !myRolled
+          ? `<button class="primary" data-action="roll-order">🎲 Roll the dice</button>`
+          : `<p class="muted">${myRolled ? "Waiting for the others…" : "Waiting…"}</p>`;
+      el.innerHTML = `<div class="catan-panel"><h3>Roll for turn order</h3>${rolls}${button}</div>`;
+      return;
+    }
 
     if (meOwes) {
       const idx = [...s.awaitingSeats].indexOf(me);
@@ -661,34 +758,45 @@ export class CatanView implements GameView {
     const receive = bagStr(s.tradeReceive as unknown as Bag);
     const iAmProposer = s.tradeProposer === me;
     const accepted = new Set([...s.tradeAcceptances]);
+    const declined = new Set([...s.tradeDeclines]);
+    const candidates = [...s.tradeCandidates];
     if (iAmProposer) {
-      const rows = [...s.tradeCandidates]
+      const rows = candidates
         .map((c) => {
-          const ok = accepted.has(c);
-          return `<div class="catan-picker-row"><span>${this.nickname(c)}</span><span>${
-            ok ? "✅ accepted" : "…waiting"
-          }</span>${ok ? `<button class="primary" data-action="trade-confirm" data-id="${c}">Trade</button>` : ""}</div>`;
+          const status = accepted.has(c) ? "✅ accepted" : declined.has(c) ? "✖ declined" : "…waiting";
+          return `<div class="catan-picker-row"><span>${this.nickname(c)}</span><span>${status}</span>${
+            accepted.has(c) ? `<button class="primary" data-action="trade-confirm" data-id="${c}">Trade</button>` : ""
+          }</div>`;
         })
         .join("");
+      const allDeclined = candidates.length > 0 && candidates.every((c) => declined.has(c));
       return `
         <div class="catan-panel">
           <h3>Your offer: ${give} ⇄ ${receive}</h3>
           ${rows}
+          ${allDeclined ? '<p class="muted">Everyone declined — withdraw the offer?</p>' : ""}
           <button class="subtle" data-action="trade-cancel">Withdraw offer</button>
         </div>`;
     }
-    const amCandidate = [...s.tradeCandidates].includes(me);
-    const myAnswer = accepted.has(me);
+    const amCandidate = candidates.includes(me);
+    const iAccepted = accepted.has(me);
+    const iDeclined = declined.has(me);
     return `
       <div class="catan-panel">
         <h3>${this.nickname(s.tradeProposer)} offers ${give} for ${receive}</h3>
         ${
           amCandidate
             ? `<div class="catan-row">
-                 <button class="primary" data-action="trade-respond" data-accept="1" ${myAnswer ? "disabled" : ""}>Accept</button>
-                 <button data-action="trade-respond" data-accept="0" ${myAnswer ? "" : "disabled"}>Decline</button>
+                 <button class="primary ${iAccepted ? "catan-mode-on" : ""}" data-action="trade-respond" data-accept="1">Accept</button>
+                 <button class="${iDeclined ? "catan-mode-on" : ""}" data-action="trade-respond" data-accept="0">Decline</button>
                </div>
-               ${myAnswer ? '<p class="muted">Accepted — waiting for the proposer to confirm.</p>' : ""}`
+               ${
+                 iAccepted
+                   ? '<p class="muted">You accepted — waiting for the proposer to confirm. You can still change your mind.</p>'
+                   : iDeclined
+                     ? '<p class="muted">You declined. You can still change your mind.</p>'
+                     : ""
+               }`
             : '<p class="muted">Waiting…</p>'
         }
       </div>`;
@@ -702,7 +810,12 @@ export class CatanView implements GameView {
       return;
     }
     const hand = this.myHand();
+    const total = bagTotal(hand);
     const chips = RESOURCES.map((r) => `<span class="catan-chip">${resourceIcon(r)} ${hand[r]}</span>`).join("");
+    // Total cards matters because a rolled 7 makes you discard half when > 7.
+    const totalChip = `<span class="catan-chip catan-chip-total ${total > 7 ? "catan-chip-warn" : ""}" title="${
+      total > 7 ? "Rolling a 7 would cost you half" : "Your total resource cards"
+    }">${total} cards${total > 7 ? " ⚠" : ""}</span>`;
     const playableNow = (kind: string, c: { boughtThisTurn: boolean; played: boolean }) =>
       !c.played &&
       !c.boughtThisTurn &&
@@ -722,15 +835,15 @@ export class CatanView implements GameView {
         }</span>`;
       })
       .join("");
-    const tokens = s.twoPlayerVariant ? `<span class="catan-chip">⬡ ${seat.tradeTokens}</span>` : "";
+    const tokens = s.twoPlayerVariant ? `<span class="catan-chip">⬡ ${seat.tradeTokens} tokens</span>` : "";
     el.innerHTML = `
       <div class="catan-mine">
         <span class="catan-color" style="background:${PLAYER_COLOR[seat.color] ?? "#999"}"></span>
         <strong>You</strong> · ${seat.publicVP} VP
-        ${seat.hasLongestRoad ? "🛤🏆" : ""}${seat.hasLargestArmy ? "♞🏆" : ""}
-        <span class="muted">pieces: ${seat.roadsLeft}🛤 ${seat.settlementsLeft}🏠 ${seat.citiesLeft}🏛</span>
+        ${seat.hasLongestRoad ? '<span title="Longest Road (+2)">🛤🏆</span>' : ""}${seat.hasLargestArmy ? '<span title="Largest Army (+2)">♞🏆</span>' : ""}
+        <span class="muted">${seat.roadsLeft} roads · ${seat.settlementsLeft} settlements · ${seat.citiesLeft} cities left</span>
       </div>
-      <div class="catan-hand">${chips}${tokens}</div>
+      <div class="catan-hand">${chips}${totalChip}${tokens}</div>
       ${cards ? `<div class="catan-devs">${cards}</div>` : ""}`;
   }
 
@@ -747,16 +860,16 @@ export class CatanView implements GameView {
         else if (player && !player.connected) badges.push('<span class="catan-badge catan-badge-warn">reconnecting…</span>');
         if (s.currentSeat === i && s.phaseDetail !== "gameOver") badges.push('<span class="catan-badge catan-badge-turn">turn</span>');
         const stats = seat.neutral
-          ? `<span class="muted">roads ${15 - seat.roadsLeft} · settlements ${5 - seat.settlementsLeft}</span>`
-          : `<span class="muted">✋${seat.handCount} 🃏${seat.devCardCount} ♞${seat.knightsPlayed}${
-              s.twoPlayerVariant ? ` ⬡${seat.tradeTokens}` : ""
+          ? `<span class="muted">${15 - seat.roadsLeft} roads · ${5 - seat.settlementsLeft} settlements</span>`
+          : `<span class="muted">${seat.handCount} cards · ${seat.devCardCount} dev · ${seat.knightsPlayed} knights${
+              s.twoPlayerVariant ? ` · ${seat.tradeTokens} tokens` : ""
             }</span>`;
         return `
           <div class="catan-opp">
             <span class="catan-color" style="background:${PLAYER_COLOR[seat.color] ?? "#999"}"></span>
             <strong>${escapeHtml(seat.nickname)}</strong>
             ${seat.neutral ? "" : `<span class="catan-vp">${seat.publicVP} VP</span>`}
-            ${seat.hasLongestRoad ? "🛤🏆" : ""}${seat.hasLargestArmy ? "♞🏆" : ""}
+            ${seat.hasLongestRoad ? '<span title="Longest Road (+2)">🛤🏆</span>' : ""}${seat.hasLargestArmy ? '<span title="Largest Army (+2)">♞🏆</span>' : ""}
             ${stats}
             ${badges.join("")}
           </div>`;
@@ -814,8 +927,18 @@ export class CatanView implements GameView {
         if (s.phaseDetail === "moveRobber") this.send({ type: "moveRobber", hex: id });
         return;
       // action bar
+      case "save-game":
+        this.room.send(LobbyMsg.SAVE, {});
+        return;
+      case "toggle-mute":
+        setMuted(!isMuted());
+        this.render();
+        return;
       case "roll":
         this.send({ type: "rollDice" });
+        return;
+      case "roll-order":
+        this.send({ type: "rollForOrder" });
         return;
       case "end-turn":
         this.send({ type: "endTurn" });

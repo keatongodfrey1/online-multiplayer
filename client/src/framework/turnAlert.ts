@@ -1,16 +1,21 @@
 /**
- * Tiny WebAudio chimes - no audio assets, just oscillator beeps.
+ * Turn alerts shared by every game: tiny WebAudio chimes (no audio assets,
+ * just oscillator beeps) and a brief center-screen toast. New games should
+ * fire both on the rising edge of "this player must act now" — see
+ * ADDING_A_GAME.md and the Splendor/Catan views for the pattern.
  *
  * Browsers only allow audio after a user gesture; the AudioContext is
  * created lazily and resumed on demand, so the first chime after a fresh
  * page load may be silent if no click happened yet (fine - there is
  * nothing to nudge a player about before they have interacted).
  */
-const MUTE_KEY = "spl-muted";
+const MUTE_KEY = "fw-muted";
+/** Pre-framework Splendor preference; read as a fallback, never written. */
+const LEGACY_MUTE_KEY = "spl-muted";
 
 export function isMuted(): boolean {
   try {
-    return localStorage.getItem(MUTE_KEY) === "1";
+    return (localStorage.getItem(MUTE_KEY) ?? localStorage.getItem(LEGACY_MUTE_KEY)) === "1";
   } catch {
     return false;
   }
@@ -69,4 +74,24 @@ export function clockChime(): void {
   note(a, 520, 0, 0.09, 0.06);
   note(a, 520, 0.14, 0.09, 0.06);
   note(a, 392, 0.28, 0.2, 0.06);
+}
+
+/**
+ * Flash the shared center-screen toast (created inside `root` on demand).
+ * pointer-events: none keeps the board clickable straight through it; the
+ * CSS animation runs once and ends invisible. Re-flashing restarts it via
+ * the remove-class / reflow / add-class trick.
+ */
+export function flashToast(root: HTMLElement, text: string): void {
+  let toast = root.querySelector<HTMLElement>(":scope .turn-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.className = "turn-toast";
+    toast.setAttribute("aria-live", "polite");
+    root.appendChild(toast);
+  }
+  toast.textContent = text;
+  toast.classList.remove("show");
+  void toast.offsetWidth; // force a reflow so the animation restarts
+  toast.classList.add("show");
 }

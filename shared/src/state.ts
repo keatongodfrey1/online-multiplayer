@@ -35,4 +35,9 @@ export class BaseState extends Schema {
   /** Player count limits, mirrored from the room config for lobby UI. */
   @type("uint8") minPlayers = 0;
   @type("uint8") maxPlayers = 0;
+  /**
+   * Lobby banner while a saved game is staged for resume (games with
+   * supportsSaves); "" when none. Set by the framework's load handler.
+   */
+  @type("string") loadedSave = "";
 }
