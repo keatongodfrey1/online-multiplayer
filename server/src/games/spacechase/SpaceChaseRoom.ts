@@ -1,516 +1,440 @@
 /**
- * Space Chase - the authoritative game room. All dice rolls, card draws,
- * shuffles and rule decisions happen here; clients only send intent
- * messages and render synced state.
+ * Space Chase room - drives the pure rules engine (shared/games/spacechase/
+ * engine) and mirrors it into the synced schema.
  *
- * Turn flow (no TurnManager: Space Chase has extra turns - the same
- * player goes again - and multi-step card prompts, so the room owns the
- * rotation, like SplendorRoom):
+ * Authority model: `engine` is the server-only source of truth. Clients send
+ * tiny intent messages (ROLL/DRAW + prompt answers); each is whitelist-built
+ * into a clean engine action, checked to be that seat's turn, then applied.
+ * The schema mirror (`syncFromEngine`) is rebuilt in place after every accepted
+ * input; nothing reads back out of it.
  *
- *   startTurn -> (skip if lostTurns) -> awaiting ACTION
- *     ROLL -> moveBy -> afterResolution
- *     DRAW -> resolveCard -> (Stage 3: may open a prompt) -> afterResolution
- *   afterResolution -> collisions -> win check / tiebreaker -> advanceTurn
- *   advanceTurn -> extraTurns (same seat) | next live seat
- *                  (roundNumber++ when the rotation wraps - shields are
- *                   round-based, so extra turns never age a shield)
+ * Seats: engine seats are 0..N-1 in `seatOrder` order (players sorted by
+ * framework seat at game start). `frameworkSeatByEngineSeat` is snapshotted for
+ * the final "win:<seat>" mapping because the winner may have left the players
+ * map by game-over.
  *
- * STAGED BUILD - implemented so far: rotation/rounds, dice, the cards
- * that resolve without a prompt (movement, move-all, rover, teleports,
- * extra turns, lose turns), collisions, win + tiebreaker, rematch.
- * Cards that need a prompt (attacks, Kraken, Shooting Star, 6-7, Black
- * Hole, Worm Hole), Shield/Suit/Time Loop/Rocket/Satellite, the turn
- * timer, and bot play land in later stages (see PR #14); until then
- * those draws are a no-op that still spends the turn.
+ * No bots: a player who leaves for good mid-game is removed from the race (the
+ * engine skips their seat); a present-but-idle player who runs out the turn
+ * clock is auto-played by the engine's deterministic `autoResolve`. A 2-player
+ * quit ends the game "abandoned" via the framework.
+ *
+ * The turn clock is room-managed (not TurnManager): Space Chase has extra turns
+ * (same seat again) and multi-step card prompts, so the deadline is keyed off
+ * the engine's `turnCount` - a fresh ACTION resets it, the prompts of that turn
+ * share it - and frozen while the current player is disconnected.
  */
 import type { Client } from "colyseus";
+import type { Delayed } from "@colyseus/timer";
 import {
   type BasePlayer,
-  type CardDef,
-  getCard,
+  EndReason,
   isValidSpaceChaseTurnSeconds,
   Phase,
-  ScAwait,
-  ScEvent,
-  type ScConfigPayload,
   SC_EVENT_LOG_MAX,
-  SC_FINISH,
-  SC_START,
+  ScAwait,
+  SPACE_CHASE,
+  SpaceChaseEngine,
   SpaceChaseEvent,
   SpaceChaseMsg,
   SpaceChasePlayer,
   SpaceChaseSeat,
   SpaceChaseState,
 } from "@backbone/shared";
-import { BaseGameRoom } from "../../framework/BaseGameRoom.js";
-import {
-  buildDeck,
-  moveBy,
-  mulberry32,
-  scanCollisions,
-  shuffle,
-  teleportTo,
-  type MoveStep,
-} from "./engine.js";
+import { BaseGameRoom, type FrameworkSaveSeat } from "../../framework/BaseGameRoom.js";
+import { grantPrivateView, revokePrivateView } from "../../framework/privateState.js";
+import { parseSave, serializeSave, type ParsedSave, type SaveSeat } from "./save.js";
 
-/** Rover (#8): everyone else forward 5, the drawer forward 7. */
-const ROVER_OTHERS = 5;
-const ROVER_SELF = 7;
+type GameState = SpaceChaseEngine.GameState;
+type GameEvent = SpaceChaseEngine.GameEvent;
+type Move = SpaceChaseEngine.Move;
+type Resolution = SpaceChaseEngine.Resolution;
+
+const { applyLeave, applyMove, applyResolution, autoResolve, createGame, isLegalMove } = SpaceChaseEngine;
 
 export class SpaceChaseRoom extends BaseGameRoom<SpaceChaseState> {
   state = new SpaceChaseState();
   readonly minPlayers = 2;
   readonly maxPlayers = 5;
-  // supportsBots is flipped on in the bots stage - seating a bot before
-  // the room can play its turns would stall the game on its ACTION.
+  protected override supportsSaves = true;
 
-  // ---- server-only truth (never synced). Public members are the
-  // white-box test seams (Splendor precedent). ----
-  /** Card ids; the TOP of the pile is the LAST element (draw = pop). */
-  public deck: number[] = [];
-  public discard: number[] = [];
-  /** Tests push die values here; rollDie() consumes them before the RNG. */
-  public forcedRolls: number[] = [];
+  // ---- server-only truth (never synced). Public = white-box test seam. ----
+  public engine!: GameState;
+  /** sessionIds in engine-seat order ("" for a vacated seat). */
+  public seatOrder: string[] = [];
+  /** Framework seat per engine seat, snapshotted at start (for win:<seat>). */
+  public frameworkSeatByEngineSeat: number[] = [];
 
-  private rng: () => number = mulberry32(0);
-  /** Optional deterministic seed from room options (reused on rematch). */
   private seedOption?: number;
-  /** seats[] index of the acting player (mirrors state.currentSeat). */
-  private turnIndex = 0;
-  /**
-   * Framework seat per seats[] index, snapshotted at game start: the
-   * winner's players-map entry may be gone by the time the game ends.
-   */
-  private frameworkSeatBySeatIndex: number[] = [];
-  /** Monotonic for the room's lifetime so a client can never see it rewind. */
+  private turnTimer?: Delayed;
+  /** Frozen countdown remainder while the current player is disconnected. */
+  private pausedTurnRemainingMs?: number;
+  /** turnCount the live deadline was armed for, so prompts of a turn share it. */
+  private armedTurn = -1;
+  /** Monotonic event seq for the whole room lifetime (clients never see it rewind). */
   private eventSeq = 0;
+  /** The peek ArraySchema each session was granted, re-granted per game/reconnect. */
+  private grantedPeek = new Map<string, object>();
 
   protected createPlayer(): SpaceChasePlayer {
     return new SpaceChasePlayer();
   }
 
   protected override onRoomCreate(options: unknown): void {
-    // Optional deterministic shuffle/dice seed (tests/dev). A set seed is
-    // reused on rematch, so only pass one when reproducibility is the point.
     const seed = (options as { seed?: unknown } | null)?.seed;
     if (typeof seed === "number" && Number.isFinite(seed)) this.seedOption = seed >>> 0;
 
-    this.onMessage(SpaceChaseMsg.ROLL, (client) => this.handleRoll(client));
-    this.onMessage(SpaceChaseMsg.DRAW, (client) => this.handleDraw(client));
-    this.onMessage(SpaceChaseMsg.CONFIG, (client, payload) => this.handleConfig(client, payload));
+    this.onMessage(SpaceChaseMsg.ROLL, (client) => this.handleAction(client, { kind: "ROLL" }));
+    this.onMessage(SpaceChaseMsg.DRAW, (client) => this.handleAction(client, { kind: "DRAW" }));
+    this.onMessage(SpaceChaseMsg.TARGET, (client, p) => this.handleResolution(client, this.parseTarget(p)));
+    this.onMessage(SpaceChaseMsg.TARGETS, (client, p) => this.handleResolution(client, this.parseTargets(p)));
+    this.onMessage(SpaceChaseMsg.CHOICE, (client, p) => this.handleResolution(client, this.parseChoice(p)));
+    this.onMessage(SpaceChaseMsg.SPACE, (client, p) => this.handleResolution(client, this.parseSpace(p)));
+    this.onMessage(SpaceChaseMsg.SATELLITE, (client, p) => this.handleResolution(client, this.parseSatellite(p)));
+    this.onMessage(SpaceChaseMsg.CONFIG, (client, p) => this.handleConfig(client, p));
   }
+
+  // ---- save/resume hooks (framework owns the messages + lineup gating) ----
+
+  protected override isGameOver(): boolean {
+    return !this.engine || this.engine.over;
+  }
+  protected override loadedSaveTurnLabel(parsed: unknown): number {
+    return (parsed as ParsedSave).engine.turnCount;
+  }
+  protected override onSaveStaged(parsed: unknown): void {
+    this.state.turnSeconds = (parsed as ParsedSave).turnSeconds;
+  }
+  protected override parseSave(raw: unknown): ParsedSave | null {
+    return parseSave(raw);
+  }
+  protected override serializeSave(): object | null {
+    if (!this.engine || this.engine.over) return null;
+    const seats: SaveSeat[] = this.seatOrder.map((sessionId, i) => ({
+      nickname: this.engine.players[i]!.name,
+      isBot: false,
+      gone: this.engine.players[i]!.gone,
+    }));
+    return serializeSave({ engine: this.engine, seats, turnSeconds: this.state.turnSeconds });
+  }
+
+  // ---- lifecycle ----
 
   protected onGameStart(): void {
-    const seed = this.seedOption ?? Math.floor(Math.random() * 0xffffffff) >>> 0;
-    this.rng = mulberry32(seed);
-    this.deck = buildDeck(this.rng);
-    this.discard = [];
-    this.state.deckCount = this.deck.length;
-    this.state.discardCount = 0;
-    this.state.lastCardId = 0;
-    this.state.roundNumber = 0;
-    this.state.events.clear();
-    this.state.turnDeadline = 0;
-    this.clearPrompt();
-
-    // Seat order = framework seat order; seat 0 (the host) goes first.
     const players = [...this.state.players.values()].sort((a, b) => a.seat - b.seat);
-    this.frameworkSeatBySeatIndex = players.map((p) => p.seat);
+    const load = this.pendingLoad?.payload as ParsedSave | undefined;
+    this.pendingLoad = undefined; // consumed; a later rematch starts fresh
+    this.state.loadedSave = "";
+
+    if (load) {
+      // canStartGame() guaranteed the saved humans are all present.
+      this.engine = JSON.parse(JSON.stringify(load.engine)) as GameState;
+      this.seatOrder = this.engine.players.map((seat) => {
+        if (seat.gone) return "";
+        const match = players.find((p) => p.nickname.toLowerCase() === seat.name.toLowerCase());
+        return match?.sessionId ?? "";
+      });
+      this.frameworkSeatByEngineSeat = this.seatOrder.map(
+        (sessionId) => players.find((p) => p.sessionId === sessionId)?.seat ?? -1
+      );
+    } else {
+      const seed = this.seedOption ?? (Math.floor(Math.random() * 0xffffffff) >>> 0);
+      this.engine = createGame(players.length, seed, players.map((p) => p.nickname));
+      this.seatOrder = players.map((p) => p.sessionId);
+      this.frameworkSeatByEngineSeat = players.map((p) => p.seat);
+    }
+
+    // Build the schema seats once; syncFromEngine updates them in place after.
     this.state.seats.clear();
-    for (const p of players) {
+    for (let i = 0; i < this.engine.players.length; i++) {
       const seat = new SpaceChaseSeat();
-      seat.sessionId = p.sessionId;
-      seat.nickname = p.nickname;
+      seat.nickname = this.engine.players[i]!.name;
       this.state.seats.push(seat);
     }
+    this.eventSeq = 0;
+    this.state.events.clear();
+    this.armedTurn = -1;
+    this.pausedTurnRemainingMs = undefined;
+    this.grantedPeek.clear();
 
-    this.turnIndex = 0;
-    this.startTurn();
+    this.syncFromEngine();
+    this.armClock();
   }
 
-  // ---- turn machine -------------------------------------------------------
+  // ---- input handling ----
 
-  private startTurn(): void {
-    const seat = this.state.seats[this.turnIndex]!;
-    // The portal re-entry guard protects only the move that exited; it
-    // lifts when the owner's next turn begins.
-    seat.justExitedPortal = 0;
+  private handleAction(client: Client, move: Move): void {
+    if (!this.canAct(client, ScAwait.ACTION)) return;
+    if (!isLegalMove(this.engine, move)) return;
+    const r = applyMove(this.engine, move);
+    this.engine = r.state;
+    this.commit(r.events);
+  }
 
-    if (seat.lostTurns > 0) {
-      seat.lostTurns--;
-      this.pushEvent(ScEvent.SKIP_TURN, this.turnIndex, seat.lostTurns, 0,
-        `${seat.nickname} loses a turn (${seat.lostTurns} more to go)`);
-      this.advanceTurn();
-      return;
+  private handleResolution(client: Client, res: Resolution | null): void {
+    if (!res) return;
+    const expected = RESOLUTION_INPUT[res.kind];
+    if (!this.canAct(client, expected)) return;
+    let r: { state: GameState; events: GameEvent[] };
+    try {
+      r = applyResolution(this.engine, res);
+    } catch {
+      return; // illegal answer (wrong target, bad permutation, ...): ignore
     }
-
-    this.state.currentSeat = this.turnIndex;
-    this.state.currentTurn = seat.sessionId;
-    this.clearPrompt();
-    this.state.awaitingType = ScAwait.ACTION;
-    this.state.promptSeat = this.turnIndex;
+    this.engine = r.state;
+    this.commit(r.events);
   }
 
-  private advanceTurn(): void {
-    if (this.state.phase !== Phase.PLAYING) return;
-    const cur = this.state.seats[this.turnIndex]!;
-    if (!cur.gone && cur.extraTurns > 0) {
-      cur.extraTurns--;
-      this.pushEvent(ScEvent.EXTRA_TURNS, this.turnIndex, cur.extraTurns, 0,
-        `${cur.nickname} goes again!`);
-      this.startTurn();
-      return;
-    }
-    const prev = this.turnIndex;
-    this.turnIndex = this.nextLiveIndex(this.turnIndex);
-    // Wrapping back to (or past) the front of the order = one full
-    // go-around of the table. Round-based shields expire off this count.
-    if (this.turnIndex <= prev) this.state.roundNumber++;
-    this.startTurn();
-  }
-
-  private nextLiveIndex(from: number): number {
-    const n = this.state.seats.length;
-    for (let k = 1; k <= n; k++) {
-      const idx = (from + k) % n;
-      if (!this.state.seats[idx]!.gone) return idx;
-    }
-    return from;
-  }
-
-  private clearPrompt(): void {
-    this.state.awaitingType = "";
-    this.state.promptSeat = 0;
-    this.state.promptCardId = 0;
-    this.state.promptContext = "";
-    this.state.promptMult = 1;
-    this.state.promptCount = 0;
-    this.state.promptTargetSeat = -1;
-  }
-
-  /** Guards shared by every in-game action from the current player. */
-  private actingSeat(client: Client, awaiting: string): SpaceChaseSeat | undefined {
-    if (this.state.phase !== Phase.PLAYING) return undefined;
-    if (this.state.awaitingType !== awaiting) return undefined;
-    if (client.sessionId !== this.state.currentTurn) return undefined;
-    return this.state.seats[this.turnIndex];
-  }
-
-  // ---- actions ------------------------------------------------------------
-
-  private handleRoll(client: Client): void {
-    const seat = this.actingSeat(client, ScAwait.ACTION);
-    if (!seat) return;
-    this.state.awaitingType = "";
-
-    const mult = this.consumeSuit(seat, this.turnIndex);
-    const die = this.rollDie();
-    const amount = die * mult;
-    // Time Loop replays the amount actually moved - doubled if it was.
-    seat.lastActionType = "dice";
-    seat.lastActionValue = amount;
-    this.pushEvent(ScEvent.ROLL, this.turnIndex, die, amount,
-      `${seat.nickname} rolls a ${die}${mult > 1 ? ` - doubled to ${amount} by the Space Suit!` : ""}`);
-    this.applySteps(this.turnIndex, moveBy(seat, amount));
-    this.afterResolution();
-  }
-
-  private handleDraw(client: Client): void {
-    const seat = this.actingSeat(client, ScAwait.ACTION);
-    if (!seat) return;
-    this.state.awaitingType = "";
-
-    const card = this.drawCard();
-    const mult = this.consumeSuit(seat, this.turnIndex);
-    // Time Loop must read the action BEFORE it, so it never overwrites.
-    if (card.type !== "timeLoop") {
-      seat.lastActionType = "card";
-      seat.lastActionValue = card.id;
-    }
-    this.pushEvent(ScEvent.DRAW, this.turnIndex, 0, card.id,
-      `${seat.nickname} draws ${card.name}`);
-    this.resolveCard(card, this.turnIndex, mult);
+  /** Common guard: game running, this client owns the awaiting seat, right phase. */
+  private canAct(client: Client, expectedInput: string): boolean {
+    if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.over) return false;
+    if (this.engine.awaiting.inputType !== expectedInput) return false;
+    return this.seatOrder[this.engine.awaiting.seat] === client.sessionId;
   }
 
   private handleConfig(client: Client, payload: unknown): void {
     if (this.state.phase !== Phase.LOBBY) return;
     if (client.sessionId !== this.state.hostSessionId) return;
-    const turnSeconds = (payload as Partial<ScConfigPayload> | null)?.turnSeconds;
+    const turnSeconds = (payload as { turnSeconds?: unknown } | null)?.turnSeconds;
     if (!isValidSpaceChaseTurnSeconds(turnSeconds)) return;
     this.state.turnSeconds = turnSeconds;
   }
 
-  // ---- card resolution ----------------------------------------------------
+  // ---- the single funnel after any accepted input / leaver / timeout ----
 
-  private drawCard(): CardDef {
-    if (this.deck.length === 0) {
-      this.deck = shuffle(this.discard, this.rng);
-      this.discard = [];
-      this.pushEvent(ScEvent.RESHUFFLE, -1, 0, 0, "The deck is reshuffled!");
-    }
-    const id = this.deck.pop()!;
-    this.discard.push(id);
-    this.state.deckCount = this.deck.length;
-    this.state.discardCount = this.discard.length;
-    this.state.lastCardId = id;
-    return getCard(id)!;
-  }
-
-  /**
-   * Apply a drawn card. Every branch ends in afterResolution() - a card
-   * with no useful effect still spends the turn (no redraw, no refund).
-   */
-  private resolveCard(card: CardDef, i: number, mult: number): void {
-    const seat = this.state.seats[i]!;
-    switch (card.type) {
-      case "moveForward":
-        this.applySteps(i, moveBy(seat, card.amount! * mult));
-        break;
-
-      case "moveBack":
-        if (this.isShielded(seat)) {
-          this.shieldBlock(i, card);
-        } else {
-          this.applySteps(i, moveBy(seat, -card.amount! * mult));
-        }
-        break;
-
-      case "moveAll":
-        // Suit doubles ONLY the wearer's movement; everyone else base.
-        this.forEachLiveSeat((j, other) => {
-          this.applySteps(j, moveBy(other, card.amount! * (j === i ? mult : 1)));
-        });
-        break;
-
-      case "moveAllBack":
-        this.forEachLiveSeat((j, other) => {
-          if (this.isShielded(other)) {
-            this.shieldBlock(j, card);
-          } else {
-            this.applySteps(j, moveBy(other, -card.amount! * (j === i ? mult : 1)));
-          }
-        });
-        break;
-
-      case "rover":
-        this.forEachLiveSeat((j, other) => {
-          if (j === i) return;
-          this.applySteps(j, moveBy(other, ROVER_OTHERS));
-        });
-        this.applySteps(i, moveBy(seat, ROVER_SELF * mult));
-        break;
-
-      case "teleport":
-        // Time Bomb (-> START) is a negative effect, so a shield blocks
-        // it even self-drawn (GAME_RULES §6 lists send-to-START).
-        // Landmark teleports are "go to" cards, never shield-blocked.
-        if (card.destination === SC_START && this.isShielded(seat)) {
-          this.shieldBlock(i, card);
-        } else {
-          this.applySteps(i, teleportTo(seat, card.destination!));
-        }
-        break;
-
-      case "extraTurns":
-        seat.extraTurns += card.amount! * mult;
-        this.pushEvent(ScEvent.EXTRA_TURNS, i, seat.extraTurns, 0,
-          `${seat.nickname} will take ${card.amount! * mult} extra turn(s)!`);
-        break;
-
-      case "loseTurns":
-        if (this.isShielded(seat)) {
-          this.shieldBlock(i, card);
-        } else {
-          seat.lostTurns += card.amount! * mult;
-          this.pushEvent(ScEvent.LOSE_TURNS, i, seat.lostTurns, 0,
-            `${seat.nickname} loses ${card.amount! * mult} turn(s)!`);
-        }
-        break;
-
-      default:
-        // STAGE 3 PLACEHOLDER: attack / spaceKraken / shootingStar /
-        // sixSeven / timeLoop / rocketJump / shield / spaceSuit /
-        // satellite. Until those land, the draw fizzles (turn spent).
-        this.pushEvent(ScEvent.NOOP, i, 0, card.id, `${card.name} fizzles... nothing happens`);
-        break;
-    }
-    this.afterResolution();
-  }
-
-  private forEachLiveSeat(fn: (index: number, seat: SpaceChaseSeat) => void): void {
-    this.state.seats.forEach((seat, index) => {
-      if (!seat.gone) fn(index, seat);
-    });
-  }
-
-  private isShielded(seat: SpaceChaseSeat): boolean {
-    // Round-based: blocks UNLIMITED hits until the table has gone around
-    // SC_SHIELD_ROUNDS times. Never decremented, never doubled.
-    return seat.shieldExpiresRound > 0 && this.state.roundNumber < seat.shieldExpiresRound;
-  }
-
-  private shieldBlock(i: number, card: CardDef): void {
-    const seat = this.state.seats[i]!;
-    this.pushEvent(ScEvent.SHIELD_BLOCK, i, 0, card.id,
-      `${seat.nickname}'s Shield blocks ${card.name}!`);
-  }
-
-  /** The Space Suit is consumed by the very next card or roll, no matter what. */
-  private consumeSuit(seat: SpaceChaseSeat, i: number): number {
-    if (!seat.spaceSuit) return 1;
-    seat.spaceSuit = false;
-    return 2;
-  }
-
-  private rollDie(): number {
-    return this.forcedRolls.shift() ?? 1 + Math.floor(this.rng() * 6);
-  }
-
-  // ---- resolution epilogue ------------------------------------------------
-
-  private afterResolution(): void {
-    if (this.state.phase !== Phase.PLAYING) return;
-
-    // Collisions: 2+ rockets sharing a board space ALL go back to START,
-    // no matter how they got there. One scan after movement fully
-    // resolves (so move-all cards collide once, not mid-resolution).
-    for (const group of scanCollisions([...this.state.seats])) {
-      const names = group.map((j) => this.state.seats[j]!.nickname).join(" and ");
-      const space = this.state.seats[group[0]!]!.position;
-      for (const j of group) {
-        const seat = this.state.seats[j]!;
-        seat.position = SC_START;
-        seat.justExitedPortal = 0;
-      }
-      this.pushEvent(ScEvent.COLLISION, -1, space, 0,
-        `${names} collide on space ${space} - everyone back to START!`);
-    }
-
-    // Finishers: land on or pass the Finish. A rocket inside a portal
-    // can never finish - its position is frozen at the entry mouth.
-    const finishers: number[] = [];
-    this.forEachLiveSeat((j, seat) => {
-      if (seat.portalId === 0 && seat.position >= SC_FINISH) finishers.push(j);
-    });
-    if (finishers.length === 1) {
-      this.win(finishers[0]!);
+  private commit(events: GameEvent[]): void {
+    this.appendEvents(events);
+    this.syncFromEngine();
+    if (this.engine.over) {
+      this.endGame(this.mapEndReason());
       return;
     }
-    if (finishers.length > 1) {
-      this.runTiebreaker(finishers);
-      return;
+    this.armClock();
+  }
+
+  private appendEvents(events: GameEvent[]): void {
+    for (const e of events) {
+      const row = new SpaceChaseEvent();
+      row.seq = ++this.eventSeq;
+      row.kind = e.kind;
+      row.seat = e.seat;
+      row.a = e.a;
+      row.b = e.b;
+      row.text = e.text;
+      this.state.events.push(row);
     }
-
-    this.advanceTurn();
-  }
-
-  private win(i: number): void {
-    const seat = this.state.seats[i]!;
-    this.pushEvent(ScEvent.WIN, i, seat.position, 0, `${seat.nickname} reaches the Finish and WINS!`);
-    this.endGame(this.winBySeat(this.frameworkSeatBySeatIndex[i]!));
-  }
-
-  /**
-   * Several rockets crossed the Finish on the same turn: dice roll-off,
-   * highest wins, re-roll among those still tied. The server rolls -
-   * there is no decision to make, so no prompts.
-   */
-  private runTiebreaker(finishers: number[]): void {
-    this.pushEvent(ScEvent.TIEBREAK_START, -1, 0, 0,
-      "Photo finish! The tied players roll off - highest roll wins!");
-    let contenders = finishers;
-    for (let round = 0; round < 50; round++) {
-      const rolls = contenders.map(() => this.rollDie());
-      contenders.forEach((j, k) => {
-        this.pushEvent(ScEvent.TIEBREAK_ROLL, j, rolls[k]!, 0,
-          `${this.state.seats[j]!.nickname} rolls a ${rolls[k]}`);
-      });
-      const top = Math.max(...rolls);
-      const winners = contenders.filter((_, k) => rolls[k] === top);
-      if (winners.length === 1) {
-        this.win(winners[0]!);
-        return;
-      }
-      contenders = winners;
-      this.pushEvent(ScEvent.TIEBREAK_START, -1, 0, 0, "Still tied - roll again!");
-    }
-    this.win(contenders[0]!); // unreachable safety stop
-  }
-
-  // ---- events -------------------------------------------------------------
-
-  /** Translate engine movement steps into synced events. */
-  private applySteps(i: number, steps: MoveStep[]): void {
-    const name = this.state.seats[i]!.nickname;
-    for (const step of steps) {
-      switch (step.kind) {
-        case "move":
-          this.pushEvent(ScEvent.MOVE, i, step.from, step.to,
-            `${name} ${step.to > step.from ? "moves forward" : "goes back"} to ${spaceName(step.to)}`);
-          break;
-        case "teleport":
-          this.pushEvent(ScEvent.TELEPORT, i, step.from, step.to,
-            step.to === SC_START
-              ? `${name} is sent back to START!`
-              : `${name} teleports to ${spaceName(step.to)}!`);
-          break;
-        case "enterPortal":
-          this.pushEvent(ScEvent.ENTER_PORTAL, i, step.portalId, step.mouth,
-            `${name} is pulled into the portal at space ${step.mouth}!`);
-          break;
-        case "portalMove":
-          this.pushEvent(ScEvent.PORTAL_MOVE, i, step.from, step.to,
-            `${name} travels through the portal`);
-          break;
-        case "exitPortal":
-          this.pushEvent(ScEvent.EXIT_PORTAL, i, step.portalId, step.mouth,
-            `${name} exits the portal at space ${step.mouth}`);
-          break;
-      }
-    }
-  }
-
-  private pushEvent(kind: string, seat: number, a: number, b: number, text: string): void {
-    const event = new SpaceChaseEvent();
-    event.seq = ++this.eventSeq;
-    event.kind = kind;
-    event.seat = seat;
-    event.a = a;
-    event.b = b;
-    event.text = text;
-    this.state.events.push(event);
     while (this.state.events.length > SC_EVENT_LOG_MAX) this.state.events.shift();
   }
 
-  // ---- lifecycle hooks ----------------------------------------------------
+  private mapEndReason(): string {
+    const w = this.engine.winner;
+    if (w !== null && w >= 0) {
+      const frameworkSeat = this.frameworkSeatByEngineSeat[w];
+      if (frameworkSeat !== undefined && frameworkSeat >= 0) return this.winBySeat(frameworkSeat);
+    }
+    return EndReason.DRAW; // defensive: a single winner is always chosen
+  }
 
-  protected override onPlayerLeftForGood(player: BasePlayer): void {
-    const i = this.state.seats.findIndex((s) => s.sessionId === player.sessionId);
-    if (i < 0) return; // left before the first game started
-    const seat = this.state.seats[i]!;
-    seat.gone = true;
-    if (this.state.phase !== Phase.PLAYING) return;
-    // Rocket leaves the board entirely.
-    seat.position = SC_START;
-    seat.portalId = 0;
-    seat.portalProgress = 0;
-    if (this.state.currentTurn === player.sessionId) {
-      // Their (only possible) pending decision was the roll/draw choice;
-      // nothing to auto-answer yet, just move on.
-      this.advanceTurn();
+  // ---- schema mirror ----
+
+  private syncFromEngine(): void {
+    const e = this.engine;
+    const aw = e.awaiting;
+    this.engine.players.forEach((p, i) => {
+      const seat = this.state.seats[i];
+      if (!seat) return;
+      seat.nickname = p.name;
+      seat.gone = p.gone;
+      seat.sessionId = p.gone ? "" : (this.seatOrder[i] ?? "");
+      seat.position = p.position;
+      seat.portalId = p.portalId;
+      seat.portalProgress = p.portalProgress;
+      seat.portalForward = p.portalForward;
+      seat.justExitedPortal = p.justExitedPortal;
+      seat.lostTurns = Math.min(p.lostTurns, 255);
+      seat.extraTurns = Math.min(p.extraTurns, 255);
+      seat.shieldExpiresRound = p.shieldExpiresRound;
+      seat.spaceSuit = p.spaceSuit;
+      seat.sixSevenCount = p.sixSevenCount;
+      seat.lastActionType = p.lastActionType;
+      seat.lastActionValue = Math.min(p.lastActionValue, 255);
+      // Private Satellite peek: only the seat with the open SATELLITE prompt.
+      const wantPeek = !e.over && aw.inputType === ScAwait.SATELLITE && aw.seat === i ? aw.peek : [];
+      this.setPeek(i, seat, wantPeek);
+    });
+
+    this.state.roundNumber = e.roundNumber;
+    this.state.deckCount = e.deck.length;
+    this.state.discardCount = e.discard.length;
+    this.state.lastCardId = e.discard.length > 0 ? e.discard[e.discard.length - 1]! : 0;
+
+    this.state.currentSeat = aw.seat;
+    this.state.currentTurn = e.over ? "" : (this.seatOrder[aw.seat] ?? "");
+    this.state.awaitingType = e.over ? "" : aw.inputType;
+    this.state.promptSeat = aw.seat;
+    this.state.promptCardId = aw.cardId;
+    this.state.promptContext = e.over ? "" : aw.context;
+    this.state.promptMult = aw.mult;
+    this.state.promptCount = aw.count;
+    this.state.promptTargetSeat = aw.targetSeat;
+  }
+
+  /** Rewrite a seat's private peek and (re)grant it to the owner only. */
+  private setPeek(i: number, seat: SpaceChaseSeat, ids: number[]): void {
+    const same = seat.peek.length === ids.length && ids.every((v, k) => seat.peek[k] === v);
+    if (!same) {
+      seat.peek.clear();
+      for (const id of ids) seat.peek.push(id);
+    }
+    const sessionId = this.seatOrder[i] ?? "";
+    const client = sessionId ? this.clients.getById(sessionId) : undefined;
+    if (ids.length > 0 && client) {
+      if (this.grantedPeek.get(sessionId) !== seat.peek) {
+        grantPrivateView(client, seat.peek);
+        this.grantedPeek.set(sessionId, seat.peek);
+      }
+    } else if (ids.length === 0 && sessionId && this.grantedPeek.has(sessionId)) {
+      if (client) revokePrivateView(client, seat.peek);
+      this.grantedPeek.delete(sessionId);
     }
   }
 
+  // ---- turn clock (room-managed) ----
+
+  private armClock(): void {
+    if (this.state.phase !== Phase.PLAYING || this.engine.over) return;
+    if (this.state.turnSeconds === 0) {
+      this.clearTimer();
+      this.state.turnDeadline = 0;
+      this.armedTurn = this.engine.turnCount;
+      return;
+    }
+    if (this.engine.turnCount === this.armedTurn) return; // same turn (mid-prompt): keep running
+    this.armedTurn = this.engine.turnCount;
+    this.pausedTurnRemainingMs = undefined;
+    this.startTimer(this.state.turnSeconds * 1000);
+  }
+
+  /** (Re)start the live deadline for `ms`, or freeze it if the current player is away. */
+  private startTimer(ms: number): void {
+    this.clearTimer();
+    const sessionId = this.seatOrder[this.engine.awaiting.seat] ?? "";
+    const connected = sessionId !== "" && this.state.players.get(sessionId)?.connected !== false;
+    if (!connected) {
+      this.pausedTurnRemainingMs = ms;
+      this.state.turnDeadline = 0;
+      return;
+    }
+    this.state.turnDeadline = Date.now() + ms;
+    this.turnTimer = this.clock.setTimeout(() => this.onTurnTimeout(), ms);
+  }
+
+  private clearTimer(): void {
+    this.turnTimer?.clear();
+    this.turnTimer = undefined;
+  }
+
+  /** Freeze the clock while the current player is disconnected; resume on return. */
+  private syncClock(): void {
+    if (this.state.phase !== Phase.PLAYING || this.engine.over || this.state.turnSeconds === 0) return;
+    const sessionId = this.seatOrder[this.engine.awaiting.seat] ?? "";
+    const connected = sessionId !== "" && this.state.players.get(sessionId)?.connected !== false;
+    if (!connected && this.state.turnDeadline > 0) {
+      this.pausedTurnRemainingMs = Math.max(0, this.state.turnDeadline - Date.now());
+      this.state.turnDeadline = 0;
+      this.clearTimer();
+    } else if (connected && this.state.turnDeadline === 0 && this.pausedTurnRemainingMs !== undefined) {
+      this.startTimer(this.pausedTurnRemainingMs);
+      this.pausedTurnRemainingMs = undefined;
+    }
+  }
+
+  private onTurnTimeout(): void {
+    if (this.state.phase !== Phase.PLAYING || this.engine.over) return;
+    const seat = this.engine.awaiting.seat;
+    const events: GameEvent[] = [];
+    let guard = 0;
+    // Auto-play the whole turn (action + any chained prompt steps) then move on.
+    while (!this.engine.over && this.engine.awaiting.seat === seat && ++guard <= 50) {
+      const r = autoResolve(this.engine, seat);
+      this.engine = r.state;
+      events.push(...r.events);
+      if (r.events.length === 0) break; // nothing happened: avoid a stall
+    }
+    this.commit(events);
+  }
+
+  // ---- disconnection / leaving ----
+
+  protected override onPlayerDropped(): void {
+    this.syncClock();
+  }
+
+  protected override onPlayerReconnected(player: BasePlayer): void {
+    this.syncClock();
+    if (this.state.phase !== Phase.PLAYING) return;
+    // Re-grant the private peek if this player is mid-Satellite and lost its view.
+    const i = this.seatOrder.indexOf(player.sessionId);
+    if (i >= 0) {
+      const seat = this.state.seats[i];
+      if (seat && seat.peek.length > 0) {
+        const client = this.clients.getById(player.sessionId);
+        if (client) {
+          grantPrivateView(client, seat.peek);
+          this.grantedPeek.set(player.sessionId, seat.peek);
+        }
+      }
+    }
+  }
+
+  protected override onPlayerLeftForGood(player: BasePlayer): void {
+    this.grantedPeek.delete(player.sessionId);
+    if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.over) return;
+    const i = this.seatOrder.indexOf(player.sessionId);
+    if (i < 0) return;
+    const r = applyLeave(this.engine, i);
+    this.engine = r.state;
+    this.commit(r.events);
+  }
+
   protected override onGameEnded(): void {
-    this.state.currentTurn = "";
+    this.clearTimer();
+    this.pausedTurnRemainingMs = undefined;
     this.state.turnDeadline = 0;
-    this.clearPrompt();
-    // Seats and events stay in place - the game-over summary reads them.
+    this.state.currentTurn = "";
+    this.state.awaitingType = "";
+    // Seats + events stay in place for the game-over summary.
+  }
+
+  // ---- payload sanitizers (rebuild clean objects; never trust the client) ----
+
+  private parseTarget(p: unknown): Resolution | null {
+    const seat = (p as { seat?: unknown } | null)?.seat;
+    return Number.isInteger(seat) ? { kind: "TARGET", seat: seat as number } : null;
+  }
+  private parseTargets(p: unknown): Resolution | null {
+    const seats = (p as { seats?: unknown } | null)?.seats;
+    if (!Array.isArray(seats) || seats.some((s) => !Number.isInteger(s))) return null;
+    return { kind: "TARGETS", seats: seats as number[] };
+  }
+  private parseChoice(p: unknown): Resolution | null {
+    const choice = (p as { choice?: unknown } | null)?.choice;
+    return typeof choice === "string" ? { kind: "CHOICE", choice } : null;
+  }
+  private parseSpace(p: unknown): Resolution | null {
+    const space = (p as { space?: unknown } | null)?.space;
+    return Number.isInteger(space) ? { kind: "SPACE", space: space as number } : null;
+  }
+  private parseSatellite(p: unknown): Resolution | null {
+    const order = (p as { order?: unknown } | null)?.order;
+    if (!Array.isArray(order) || order.some((x) => !Number.isInteger(x))) return null;
+    return { kind: "SATELLITE", order: order as number[] };
   }
 }
 
-function spaceName(space: number): string {
-  if (space === SC_START) return "START";
-  if (space >= SC_FINISH) return "the Finish";
-  return `space ${space}`;
-}
+const RESOLUTION_INPUT: Record<Resolution["kind"], string> = {
+  TARGET: ScAwait.TARGET,
+  TARGETS: ScAwait.MULTI_TARGET,
+  CHOICE: ScAwait.CHOICE,
+  SPACE: ScAwait.SPACE,
+  SATELLITE: ScAwait.SATELLITE,
+};

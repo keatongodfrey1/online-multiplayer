@@ -1,10 +1,13 @@
 /**
- * Space Chase room integration tests (Stage 2 scope: rotation, dice,
- * promptless cards, collisions, win + tiebreaker, rematch).
+ * Space Chase room integration tests (the thin adapter over the pure engine).
+ * The full ruleset is covered by spacechaseEngine.test.ts; this suite covers
+ * the room's job: turn ownership, schema mirroring, the private Satellite peek,
+ * save/resume, the turn clock (auto-action + freeze on disconnect), reconnection
+ * restoring an open prompt, and a leaver being removed.
  *
- * Determinism: rooms take a { seed } option; `room.deck.push(id)` plants
- * the next draw (top of pile = last element) and `room.forcedRolls`
- * scripts die rolls - both consumed before the seeded RNG.
+ * Scripting: the engine is the truth and is public, so tests plant the next
+ * draw with `room.engine.deck.push(id)` and dice with `room.engine.forcedRolls`,
+ * and set up positions by writing `room.engine.players[i].position` between turns.
  */
 import assert from "node:assert/strict";
 import { boot, type ColyseusTestServer } from "@colyseus/testing";
@@ -14,20 +17,21 @@ import {
   LobbyMsg,
   Phase,
   ScAwait,
-  ScEvent,
+  ServerMsg,
   SPACE_CHASE,
   SpaceChaseMsg,
 } from "@backbone/shared";
 import { SpaceChaseRoom } from "../src/games/spacechase/SpaceChaseRoom.js";
 import { sleep, until } from "./StubRoom.js";
 
+const BLASTER = 17;
+const SATELLITE = 40;
+
 function makeConfig() {
-  return defineServer({
-    rooms: { [SPACE_CHASE]: defineRoom(SpaceChaseRoom) },
-  });
+  return defineServer({ rooms: { [SPACE_CHASE]: defineRoom(SpaceChaseRoom) } });
 }
 
-describe("space chase", () => {
+describe("space chase room", () => {
   let colyseus: ColyseusTestServer<ReturnType<typeof makeConfig>>;
 
   before(async () => {
@@ -36,231 +40,239 @@ describe("space chase", () => {
   after(async () => colyseus.shutdown());
   beforeEach(async () => await colyseus.cleanup());
 
+  const NAMES = ["Ada", "Ben", "Cleo", "Dan", "Eve"];
+
   async function startedGame(seed = 42, playerCount = 2) {
     const room = (await colyseus.createRoom(SPACE_CHASE, { seed })) as unknown as SpaceChaseRoom;
-    const names = ["Ada", "Ben", "Cleo", "Dan", "Eve"];
     const clients = [];
     for (let i = 0; i < playerCount; i++) {
-      clients.push(await colyseus.connectTo(room, { nickname: names[i] }));
+      clients.push(await colyseus.connectTo(room, { nickname: NAMES[i] }));
     }
     clients[0]!.send(LobbyMsg.START, {});
     await until(() => room.state.phase === Phase.PLAYING);
     return { room, clients, a: clients[0]!, b: clients[1]! };
   }
 
-  const seatPos = (room: SpaceChaseRoom, i: number) => room.state.seats[i]!.position;
+  /** Whoever the engine says is up. */
+  const actor = (room: SpaceChaseRoom, clients: any[]) =>
+    clients.find((c) => c.sessionId === room.state.currentTurn)!;
 
-  it("plays a full 2p game to a win on dice alone", async function () {
-    this.timeout(15000);
+  it("plays to a win and mirrors the engine into the schema", async () => {
     const { room, a, b } = await startedGame();
-    assert.strictEqual(room.state.currentTurn, a.sessionId, "seat 0 goes first");
-    assert.strictEqual(room.state.awaitingType, ScAwait.ACTION);
+    assert.equal(room.state.currentTurn, a.sessionId, "seat 0 goes first");
+    assert.equal(room.state.awaitingType, ScAwait.ACTION);
 
-    // Ada rolls 5s (5,10,...,65 - never a portal mouth), Ben rolls 3s.
-    // Ada caps onto the Finish on her 14th roll, before their paths can
-    // ever share a space on the same tick.
-    for (let i = 0; i < 27; i++) room.forcedRolls.push(i % 2 === 0 ? 5 : 3);
-    let guard = 0;
-    while (room.state.phase === Phase.PLAYING) {
-      assert.ok(++guard < 40, "game did not terminate");
-      const actor = room.state.currentTurn === a.sessionId ? a : b;
-      const before = room.state.events.length;
-      actor.send(SpaceChaseMsg.ROLL, {});
-      await until(() => room.state.events.length > before || room.state.phase !== Phase.PLAYING);
-    }
+    // A normal roll moves Ada and passes the turn; the schema mirrors it.
+    // (Space 5 is not a portal mouth, so she just lands there.)
+    room.engine.forcedRolls.push(5);
+    a.send(SpaceChaseMsg.ROLL, {});
+    await until(() => room.state.seats[0]!.position === 5);
+    assert.equal(room.engine.players[0]!.position, 5, "engine moved");
+    await until(() => room.state.currentTurn === b.sessionId);
 
-    assert.strictEqual(room.state.phase, Phase.ENDED);
-    assert.strictEqual(room.state.endReason, `${EndReason.WIN_PREFIX}0`);
-    assert.strictEqual(seatPos(room, 0), 68);
-    assert.strictEqual(room.state.currentTurn, "", "turn cleared after game end");
-    assert.strictEqual(room.state.awaitingType, "");
+    room.engine.forcedRolls.push(3);
+    b.send(SpaceChaseMsg.ROLL, {}); // Ben rolls, back to Ada
+    await until(() => room.state.currentTurn === a.sessionId);
+
+    // Set Ada near the Finish; her next roll wins.
+    room.engine.players[0]!.position = 64;
+    room.engine.forcedRolls.push(4);
+    a.send(SpaceChaseMsg.ROLL, {});
+    await until(() => room.state.phase === Phase.ENDED);
+
+    assert.equal(room.state.endReason, `${EndReason.WIN_PREFIX}0`);
+    assert.equal(room.state.currentTurn, "");
+    assert.equal(room.state.awaitingType, "");
   });
 
-  it("ignores out-of-turn actions and invalid config", async () => {
+  it("ignores out-of-turn / wrong-phase / malformed input", async () => {
     const room = (await colyseus.createRoom(SPACE_CHASE, { seed: 1 })) as unknown as SpaceChaseRoom;
     const a = await colyseus.connectTo(room, { nickname: "Ada" });
     const b = await colyseus.connectTo(room, { nickname: "Ben" });
 
-    // Lobby config: host-only, 15s steps only.
-    b.send(SpaceChaseMsg.CONFIG, { turnSeconds: 60 }); // not the host
+    // CONFIG: host-only, 15s steps, lobby-only.
+    b.send(SpaceChaseMsg.CONFIG, { turnSeconds: 60 }); // not host
     a.send(SpaceChaseMsg.CONFIG, { turnSeconds: 7 }); // not a step
-    a.send(SpaceChaseMsg.CONFIG, { turnSeconds: -15 });
-    a.send(SpaceChaseMsg.CONFIG, { turnSeconds: "60" });
-    await sleep(80);
-    assert.strictEqual(room.state.turnSeconds, 0, "bad config ignored");
-    a.send(SpaceChaseMsg.CONFIG, { turnSeconds: 60 });
-    await until(() => room.state.turnSeconds === 60);
+    await sleep(60);
+    assert.equal(room.state.turnSeconds, 0);
+    a.send(SpaceChaseMsg.CONFIG, { turnSeconds: 30 });
+    await until(() => room.state.turnSeconds === 30);
 
     a.send(LobbyMsg.START, {});
     await until(() => room.state.phase === Phase.PLAYING);
-    a.send(SpaceChaseMsg.CONFIG, { turnSeconds: 0 }); // config is lobby-only
+    a.send(SpaceChaseMsg.CONFIG, { turnSeconds: 0 }); // lobby-only now
     b.send(SpaceChaseMsg.ROLL, {}); // not Ben's turn
     b.send(SpaceChaseMsg.DRAW, {});
+    a.send(SpaceChaseMsg.TARGET, { seat: 1 }); // no prompt open
     await sleep(80);
-    assert.strictEqual(room.state.turnSeconds, 60);
-    assert.strictEqual(seatPos(room, 0), 0);
-    assert.strictEqual(seatPos(room, 1), 0);
-    assert.strictEqual(room.state.currentTurn, a.sessionId, "still Ada's turn");
+    assert.equal(room.state.turnSeconds, 30);
+    assert.equal(room.state.seats[0]!.position, 0);
+    assert.equal(room.state.seats[1]!.position, 0);
+    assert.equal(room.state.currentTurn, a.sessionId);
 
-    // Junk payloads on valid actions don't matter (payloads are empty).
-    room.forcedRolls.push(5);
-    a.send(SpaceChaseMsg.ROLL, { evil: true });
-    await until(() => seatPos(room, 0) === 5);
-    // A second roll out of the ACTION phase window is ignored... it is
-    // now Ben's turn, so Ada rolling again must do nothing.
-    a.send(SpaceChaseMsg.ROLL, {});
+    // A prompt that's open: a malformed / illegal answer is ignored.
+    room.engine.players[1]!.position = 10;
+    room.engine.deck.push(BLASTER);
+    a.send(SpaceChaseMsg.DRAW, {});
+    await until(() => room.state.awaitingType === ScAwait.TARGET);
+    b.send(SpaceChaseMsg.TARGET, { seat: 0 }); // not the prompt owner
+    a.send(SpaceChaseMsg.TARGET, { seat: 99 }); // out of range
+    a.send(SpaceChaseMsg.SPACE, { space: 5 }); // wrong resolution kind
     await sleep(80);
-    assert.strictEqual(seatPos(room, 0), 5);
+    assert.equal(room.state.awaitingType, ScAwait.TARGET, "still waiting for a valid target");
+    a.send(SpaceChaseMsg.TARGET, { seat: 1 }); // valid -> Ben back 3
+    await until(() => room.state.seats[1]!.position === 7);
   });
 
-  it("rematch fully resets the game (fresh deck, positions, rounds)", async () => {
+  it("rematch fully resets the game", async () => {
     const { room, a, b } = await startedGame(9);
-    room.state.seats[0]!.position = 67;
-    room.forcedRolls.push(1);
+    room.engine.players[0]!.position = 67;
+    room.engine.forcedRolls.push(1);
     a.send(SpaceChaseMsg.ROLL, {});
     await until(() => room.state.phase === Phase.ENDED);
-    assert.strictEqual(room.state.endReason, `${EndReason.WIN_PREFIX}0`);
 
     a.send(LobbyMsg.REMATCH, {});
     b.send(LobbyMsg.REMATCH, {});
     await until(() => room.state.phase === Phase.PLAYING);
-    assert.strictEqual(seatPos(room, 0), 0);
-    assert.strictEqual(seatPos(room, 1), 0);
-    assert.strictEqual(room.state.roundNumber, 0);
-    assert.strictEqual(room.state.deckCount, 42);
-    assert.strictEqual(room.state.discardCount, 0);
-    assert.strictEqual(room.state.lastCardId, 0);
-    assert.strictEqual(room.state.events.length, 0);
-    assert.strictEqual(room.state.currentTurn, a.sessionId, "seat 0 starts the rematch");
-    assert.strictEqual(room.state.awaitingType, ScAwait.ACTION);
-    assert.strictEqual(room.deck.length, 42, "server pile rebuilt");
+    assert.equal(room.state.seats[0]!.position, 0);
+    assert.equal(room.state.seats[1]!.position, 0);
+    assert.equal(room.state.roundNumber, 0);
+    assert.equal(room.state.deckCount, 42);
+    assert.equal(room.state.discardCount, 0);
+    assert.equal(room.state.currentTurn, a.sessionId);
+    assert.equal(room.state.awaitingType, ScAwait.ACTION);
   });
 
-  it("resolves movement, penalty and extra-turn cards with the right turn economy", async () => {
-    const { room, a, b } = await startedGame(7);
-
-    // Ada draws Space Credit (#4): forward 20.
-    room.deck.push(4);
-    a.send(SpaceChaseMsg.DRAW, {});
-    await until(() => seatPos(room, 0) === 20);
-    assert.strictEqual(room.state.lastCardId, 4);
-    assert.strictEqual(room.state.deckCount, 42, "planted card replaced the count"); // 42 planted +1 -1
-    assert.strictEqual(room.state.discardCount, 1);
-
-    // Ben draws Space Gun (#36): loses 2 turns. His next two turns skip.
-    room.deck.push(36);
-    b.send(SpaceChaseMsg.DRAW, {});
-    await until(() => room.state.seats[1]!.lostTurns === 2);
-    await until(() => room.state.currentTurn === a.sessionId);
-
-    // Ada rolls; Ben's turn is skipped; Ada again - twice over.
-    room.forcedRolls.push(1);
-    a.send(SpaceChaseMsg.ROLL, {});
-    await until(() => seatPos(room, 0) === 21);
-    assert.strictEqual(room.state.currentTurn, a.sessionId, "Ben skipped (1st lost turn)");
-    room.forcedRolls.push(1);
-    a.send(SpaceChaseMsg.ROLL, {});
-    await until(() => seatPos(room, 0) === 22);
-    assert.strictEqual(room.state.currentTurn, a.sessionId, "Ben skipped (2nd lost turn)");
-    assert.strictEqual(room.state.seats[1]!.lostTurns, 0);
-
-    // Lost turns burned: now Ada's roll passes to Ben normally.
-    room.forcedRolls.push(1);
-    a.send(SpaceChaseMsg.ROLL, {});
-    await until(() => seatPos(room, 0) === 23);
-    await until(() => room.state.currentTurn === b.sessionId);
-    room.forcedRolls.push(2);
-    b.send(SpaceChaseMsg.ROLL, {});
-    await until(() => seatPos(room, 1) === 2);
-    await until(() => room.state.currentTurn === a.sessionId);
-    // 4 full go-arounds happened (Ben's two skips still wrap the table).
-    assert.strictEqual(room.state.roundNumber, 4);
-
-    // Ada draws Nebula (#32): 2 extra turns - she acts 3 times in a row.
-    room.deck.push(32);
-    a.send(SpaceChaseMsg.DRAW, {});
-    await until(() => room.state.seats[0]!.extraTurns === 1, 2000); // first extra consumed immediately
-    assert.strictEqual(room.state.currentTurn, a.sessionId);
-    room.forcedRolls.push(1);
-    a.send(SpaceChaseMsg.ROLL, {});
-    await until(() => seatPos(room, 0) === 24);
-    assert.strictEqual(room.state.currentTurn, a.sessionId, "still Ada (2nd extra turn)");
-    room.forcedRolls.push(1);
-    a.send(SpaceChaseMsg.ROLL, {});
-    await until(() => seatPos(room, 0) === 25);
-    await until(() => room.state.currentTurn === b.sessionId);
-    assert.strictEqual(room.state.roundNumber, 4, "extra turns are not go-arounds");
-  });
-
-  it("collides rockets sharing a space - all back to START (move-all collides once at the end)", async () => {
+  it("keeps the Satellite peek private to the drawer, across a refresh", async () => {
     const { room, a, b } = await startedGame(11);
+    const aState = () => a.state as any;
+    const bState = () => b.state as any;
+    await until(() => aState()?.phase === Phase.PLAYING && bState()?.phase === Phase.PLAYING);
 
-    // Ada rolls onto Ben's space: both to START.
-    room.state.seats[0]!.position = 7;
-    room.state.seats[1]!.position = 10;
-    room.forcedRolls.push(3);
-    a.send(SpaceChaseMsg.ROLL, {});
-    await until(() => seatPos(room, 0) === 0 && seatPos(room, 1) === 0);
-    assert.ok(
-      [...room.state.events].some((e) => e.kind === ScEvent.COLLISION),
-      "collision event logged"
-    );
-
-    // Meteor Shower (#14): everyone back 5; landing on START is exempt.
-    await until(() => room.state.currentTurn === b.sessionId);
-    room.state.seats[0]!.position = 10;
-    room.state.seats[1]!.position = 5;
-    room.deck.push(14);
-    b.send(SpaceChaseMsg.DRAW, {});
-    await until(() => seatPos(room, 0) === 5);
-    assert.strictEqual(seatPos(room, 1), 0, "Ben pushed back to START");
-    assert.strictEqual(seatPos(room, 0), 5, "Ada alone on 5 - no collision with START");
-  });
-
-  it("dice movement traverses portals (enter, ride, exit with overflow)", async () => {
-    const { room, a, b } = await startedGame(13);
-
-    room.forcedRolls.push(4); // Ada lands on 4 - portal 1's mouth
-    a.send(SpaceChaseMsg.ROLL, {});
-    await until(() => room.state.seats[0]!.portalId === 1);
-    assert.strictEqual(seatPos(room, 0), 4, "position holds the entry mouth");
-    assert.strictEqual(room.state.seats[0]!.portalProgress, 0);
-
-    room.forcedRolls.push(1);
-    b.send(SpaceChaseMsg.ROLL, {});
-    await until(() => room.state.currentTurn === a.sessionId);
-
-    room.forcedRolls.push(6); // 6 of 7 internal spaces - still inside
-    a.send(SpaceChaseMsg.ROLL, {});
-    await until(() => room.state.seats[0]!.portalProgress === 6);
-    assert.strictEqual(room.state.seats[0]!.portalId, 1);
-
-    room.forcedRolls.push(1);
-    b.send(SpaceChaseMsg.ROLL, {});
-    await until(() => room.state.currentTurn === a.sessionId);
-
-    // 1 to the lip, 1 to exit at 36, 4 left over -> space 40.
-    room.forcedRolls.push(6);
-    a.send(SpaceChaseMsg.ROLL, {});
-    await until(() => seatPos(room, 0) === 40);
-    assert.strictEqual(room.state.seats[0]!.portalId, 0);
-  });
-
-  it("simultaneous finishers trigger a dice roll-off, re-rolling ties", async () => {
-    const { room, a } = await startedGame(17);
-    room.state.seats[0]!.position = 65;
-    room.state.seats[1]!.position = 64;
-    // Cosmic Chaos (#6) pushes both past the Finish; roll-off 4-4 then 6-2.
-    room.deck.push(6);
-    room.forcedRolls.push(4, 4, 6, 2);
+    room.engine.deck.push(1, 2, 3, 4); // ensure a full 5-card peek
+    room.engine.deck.push(SATELLITE);
     a.send(SpaceChaseMsg.DRAW, {});
-    await until(() => room.state.phase === Phase.ENDED);
-    assert.strictEqual(room.state.endReason, `${EndReason.WIN_PREFIX}0`);
-    const rolls = [...room.state.events].filter((e) => e.kind === ScEvent.TIEBREAK_ROLL);
-    assert.strictEqual(rolls.length, 4, "two tied rounds of rolls");
-    assert.deepEqual(
-      rolls.map((e) => e.a),
-      [4, 4, 6, 2]
-    );
+    await until(() => room.state.awaitingType === ScAwait.SATELLITE);
+
+    // The owner sees the 5 peeked cards; the opponent sees none.
+    await until(() => (aState().seats?.at(0)?.peek?.length ?? 0) === 5);
+    assert.ok(aState().seats.at(0).peek.at(0) >= 1, "owner sees the peeked ids");
+    await sleep(80);
+    assert.equal(bState().seats?.at(0)?.peek?.length ?? 0, 0, "opponent is blind to the peek");
+
+    // A refresh (drop + resume) keeps the private peek for the owner only.
+    const token = a.reconnectionToken;
+    const aId = a.sessionId;
+    await a.leave(false);
+    await until(() => room.state.players.get(aId)?.connected === false);
+    const a2 = await colyseus.sdk.reconnect(token);
+    const a2State = () => a2.state as any;
+    await until(() => (a2State()?.seats?.at(0)?.peek?.length ?? 0) === 5, 5000);
+    assert.ok(a2State().seats.at(0).peek.at(0) >= 1, "owner still sees it after refresh");
+    assert.equal(bState().seats?.at(0)?.peek?.length ?? 0, 0, "opponent still blind");
+  });
+
+  it("saves a game and resumes it in a fresh room", async function () {
+    this.timeout(10000);
+    const { room, a, b } = await startedGame(23);
+    // Make some progress so the resume is observable.
+    room.engine.players[0]!.position = 30;
+    room.engine.players[1]!.position = 12;
+    room.engine.forcedRolls.push(3);
+    a.send(SpaceChaseMsg.ROLL, {});
+    await until(() => room.state.seats[0]!.position === 33);
+
+    let blob: any;
+    a.onMessage(ServerMsg.SAVE_DATA, (b2: any) => (blob = b2));
+    a.send(LobbyMsg.SAVE, {});
+    await until(() => blob !== undefined);
+    assert.equal(blob.game, "spacechase");
+
+    // Resume in a brand-new room with the same humans.
+    const room2 = (await colyseus.createRoom(SPACE_CHASE, {})) as unknown as SpaceChaseRoom;
+    const a2 = await colyseus.connectTo(room2, { nickname: "Ada" });
+    await colyseus.connectTo(room2, { nickname: "Ben" });
+    a2.send(LobbyMsg.LOAD, blob);
+    await until(() => room2.state.loadedSave !== "");
+    a2.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+
+    assert.equal(room2.engine.players[0]!.position, 33, "Ada's position resumed");
+    assert.equal(room2.engine.players[1]!.position, 12, "Ben's position resumed");
+    assert.equal(room2.engine.turnCount, room.engine.turnCount);
+    assert.equal(room2.state.deckCount, room.state.deckCount);
+  });
+
+  it("rejects a tampered save blob", async () => {
+    const { room, a } = await startedGame(5);
+    let blob: any;
+    a.onMessage(ServerMsg.SAVE_DATA, (b: any) => (blob = b));
+    a.send(LobbyMsg.SAVE, {});
+    await until(() => blob !== undefined);
+
+    const room2 = (await colyseus.createRoom(SPACE_CHASE, {})) as unknown as SpaceChaseRoom;
+    const a2 = await colyseus.connectTo(room2, { nickname: "Ada" });
+    await colyseus.connectTo(room2, { nickname: "Ben" });
+    const tampered = { ...blob, engine: { ...blob.engine, deck: [999] } }; // bogus card id
+    a2.send(LobbyMsg.LOAD, tampered);
+    await sleep(100);
+    assert.equal(room2.state.loadedSave, "", "tampered blob ignored");
+  });
+
+  it("auto-acts when the turn timer expires and freezes it on disconnect", async function () {
+    this.timeout(10000);
+    const room = (await colyseus.createRoom(SPACE_CHASE, { seed: 7 })) as unknown as SpaceChaseRoom;
+    const a = await colyseus.connectTo(room, { nickname: "Ada" });
+    const b = await colyseus.connectTo(room, { nickname: "Ben" });
+    room.state.turnSeconds = 1; // white-box: 1s clock for the test
+    a.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    assert.ok(room.state.turnDeadline > 0, "clock armed for Ada");
+
+    // Ada does nothing; the timer auto-rolls for her and the turn advances.
+    await until(() => room.state.currentTurn === b.sessionId, 4000);
+
+    // Ben disconnects on his turn -> the clock freezes.
+    await b.leave(false);
+    await until(() => room.state.turnDeadline === 0, 4000);
+    assert.ok(room.engine.awaiting.seat >= 0);
+  });
+
+  it("restores an open prompt after a mid-prompt refresh", async () => {
+    const { room, a } = await startedGame(31);
+    room.engine.players[1]!.position = 20;
+    room.engine.deck.push(BLASTER);
+    a.send(SpaceChaseMsg.DRAW, {});
+    await until(() => room.state.awaitingType === ScAwait.TARGET);
+
+    const token = a.reconnectionToken;
+    const aId = a.sessionId;
+    await a.leave(false);
+    await until(() => room.state.players.get(aId)?.connected === false);
+    // The open prompt survives in state (the engine never changed).
+    assert.equal(room.state.awaitingType, ScAwait.TARGET);
+    assert.equal(room.state.promptCardId, BLASTER);
+
+    const a2 = await colyseus.sdk.reconnect(token);
+    await until(() => (a2.state as any)?.awaitingType === ScAwait.TARGET, 5000);
+    // ...and the reconnected client can still answer it.
+    a2.send(SpaceChaseMsg.TARGET, { seat: 1 });
+    await until(() => room.state.seats[1]!.position === 17);
+  });
+
+  it("removes a leaver from the race and plays on (3 players)", async () => {
+    const { room, clients } = await startedGame(13, 3);
+    const cleo = clients[2]!;
+    // Ben leaves for good.
+    await clients[1]!.leave(true);
+    await until(() => room.engine.players[1]!.gone === true);
+    assert.equal(room.state.seats[1]!.gone, true);
+    assert.equal(room.state.seats[1]!.position, 0);
+
+    // Turn order now skips Ben: Ada -> Cleo -> Ada ...
+    const first = room.state.currentTurn;
+    actor(room, clients).send(SpaceChaseMsg.ROLL, {});
+    await until(() => room.state.currentTurn !== first);
+    assert.notEqual(room.state.currentTurn, clients[1]!.sessionId, "Ben is skipped");
   });
 });

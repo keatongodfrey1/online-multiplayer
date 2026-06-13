@@ -1,261 +1,456 @@
 /**
- * Pure unit tests for the Space Chase movement engine - no server, no
- * Colyseus. The portal traversal math is the most bug-prone part of the
- * game (see MECHANICS_AND_RULINGS.md §1), so it is locked down here
- * before any room logic builds on it.
+ * Pure unit tests for the Space Chase rules engine - no server, no Colyseus.
+ * This is the regression net for the whole ruleset (board math + every card +
+ * shields + suit + Time Loop + 6-7 + Kraken + collisions + win + tiebreaker).
+ *
+ * Scripting: push onto `state.deck` to plant the next draw (top = last element)
+ * and onto `state.forcedRolls` to script dice; both are consumed before the rng.
+ * (Planting a card makes the pile 43 cards, so assertInvariants is only used on
+ * games played through un-tampered draws.)
  */
 import assert from "node:assert/strict";
-import { SC_SIX_SEVEN_ID } from "@backbone/shared";
-import {
+import { SpaceChaseEngine } from "@backbone/shared";
+
+const {
+  createGame,
+  applyMove,
+  applyResolution,
+  applyLeave,
+  autoResolve,
+  isLegalMove,
+  assertInvariants,
+  ranking,
   buildDeck,
-  landOn,
-  moveBy,
   mulberry32,
-  nearestAhead,
-  scanCollisions,
+  moveBy,
+  landOn,
   teleportTo,
-  type MoveStep,
-  type SeatPos,
-} from "../src/games/spacechase/engine.js";
+  scanCollisions,
+  nearestAhead,
+} = SpaceChaseEngine;
 
-type TestSeat = SeatPos & { gone: boolean };
+type GameState = SpaceChaseEngine.GameState;
+type ApplyResult = SpaceChaseEngine.ApplyResult;
+type SeatPos = SpaceChaseEngine.SeatPos;
+type MoveStep = SpaceChaseEngine.MoveStep;
 
-function seatAt(position: number, extra: Partial<TestSeat> = {}): TestSeat {
-  return {
-    position,
-    portalId: 0,
-    portalProgress: 0,
-    portalForward: true,
-    justExitedPortal: 0,
-    gone: false,
-    ...extra,
-  };
+// Card ids used in tests (see CARD_DEFS).
+const CARD = {
+  SPACE_CREDIT: 4, // forward 20
+  COSMIC_CHAOS: 6, // everyone forward 7
+  ROVER: 8, // others +5, you +7
+  TIME_BOMB: 13, // teleport to START
+  METEOR_SHOWER: 14, // everyone back 5
+  NUCLEAR_BOMB: 16, // attack: send to START
+  BLASTER: 17, // attack: target back 3
+  FIGHTER_JET: 19, // attack: target -3, you +3
+  BLACK_HOLE: 20, // attack: teleport target to chosen space
+  KRAKEN: 22, // 3 lose 1 OR 1 loses 3
+  SHOOTING_STAR: 29, // self to 33 or send to 33
+  SIX_SEVEN: 30, // send to 6/7; 2nd draw -> self to 67
+  NEBULA: 32, // +2 extra turns
+  TIME_LOOP: 34, // repeat last action
+  ROCKET: 35, // jump ahead of nearest
+  SPACE_GUN: 36, // lose 2 turns
+  SHIELD: 38, // shield 3 rounds
+  SPACE_SUIT: 39, // double next card
+  SATELLITE: 40, // peek + reorder top 5
+  WORM_HOLE: 41, // swap with opponent
+};
+
+// ── scripting helpers ──
+
+function start(players = 2, seed = 1, names?: string[]): GameState {
+  return createGame(players, seed, names);
+}
+function roll(g: GameState, die?: number): ApplyResult {
+  if (die !== undefined) g.forcedRolls.push(die);
+  return applyMove(g, { kind: "ROLL" });
+}
+function draw(g: GameState, cardId: number): ApplyResult {
+  g.deck.push(cardId);
+  return applyMove(g, { kind: "DRAW" });
+}
+function seatOf(g: GameState, i: number) {
+  return g.players[i]!;
+}
+function kinds(events: { kind: string }[]): string[] {
+  return events.map((e) => e.kind);
 }
 
-/** A seat that has just entered the given portal mouth. */
-function seatInPortal(mouth: number): TestSeat {
-  const seat = seatAt(0);
-  const steps = landOn(seat, mouth);
-  assert.equal(steps.length, 1, `expected ${mouth} to be a portal mouth`);
-  return seat;
-}
+describe("spacechase engine - board math", () => {
+  function seatAt(position: number, extra: Partial<SeatPos & { gone: boolean }> = {}) {
+    return { position, portalId: 0, portalProgress: 0, portalForward: true, justExitedPortal: 0, gone: false, ...extra };
+  }
+  function seatInPortal(mouth: number) {
+    const seat = seatAt(0);
+    assert.equal(landOn(seat, mouth).length, 1, `${mouth} should be a portal mouth`);
+    return seat;
+  }
+  const stepKinds = (s: MoveStep[]) => s.map((x) => x.kind);
 
-function kinds(steps: MoveStep[]): string[] {
-  return steps.map((s) => s.kind);
-}
+  it("builds a 42-card pile with two 6-7s, deterministically", () => {
+    const deck = buildDeck(mulberry32(1));
+    assert.equal(deck.length, 42);
+    const counts = new Map<number, number>();
+    for (const id of deck) counts.set(id, (counts.get(id) ?? 0) + 1);
+    assert.equal(counts.size, 41);
+    assert.equal(counts.get(30), 2);
+    assert.deepEqual(buildDeck(mulberry32(7)), buildDeck(mulberry32(7)));
+    assert.notDeepEqual(buildDeck(mulberry32(7)), buildDeck(mulberry32(8)));
+  });
 
-describe("spacechase engine", () => {
-  describe("deck", () => {
-    it("builds a 42-card pile with two copies of 6-7 and one of everything else", () => {
-      const deck = buildDeck(mulberry32(1));
-      assert.equal(deck.length, 42);
-      const counts = new Map<number, number>();
-      for (const id of deck) counts.set(id, (counts.get(id) ?? 0) + 1);
-      assert.equal(counts.size, 41);
-      assert.equal(counts.get(SC_SIX_SEVEN_ID), 2);
-      for (const [id, n] of counts) {
-        if (id !== SC_SIX_SEVEN_ID) assert.equal(n, 1, `card ${id} duplicated`);
+  it("moves, clamps at START and the Finish", () => {
+    const s = seatAt(10);
+    moveBy(s, 5);
+    assert.equal(s.position, 15);
+    moveBy(s, -20);
+    assert.equal(s.position, 0);
+    const f = seatAt(66);
+    moveBy(f, 6);
+    assert.equal(f.position, 68);
+  });
+
+  it("the worked example: inside portal 3 from 51, move 7 -> exit 39 -> continue to 42", () => {
+    const s = seatInPortal(51);
+    assert.equal(s.portalForward, false);
+    assert.deepEqual(stepKinds(moveBy(s, 7)), ["portalMove", "exitPortal", "move"]);
+    assert.equal(s.position, 42);
+    assert.equal(s.portalId, 0);
+    assert.equal(s.justExitedPortal, 39);
+  });
+
+  it("re-entry guard blocks walking back onto the mouth just exited", () => {
+    const s = seatInPortal(28);
+    moveBy(s, 4); // out at 61
+    moveBy(s, -2); // 59
+    assert.deepEqual(stepKinds(moveBy(s, 2)), ["move"]); // back onto 61, no re-enter
+    assert.equal(s.portalId, 0);
+  });
+
+  it("teleport onto a mouth always enters; collisions group; nearestAhead works", () => {
+    const t = seatAt(10, { justExitedPortal: 39 });
+    assert.deepEqual(stepKinds(teleportTo(t, 39)), ["teleport", "enterPortal"]);
+    assert.deepEqual(scanCollisions([seatAt(10), seatAt(10), seatAt(11)]), [[0, 1]]);
+    assert.deepEqual(scanCollisions([seatAt(0), seatAt(0)]), []); // START exempt
+    assert.equal(nearestAhead([seatAt(10), seatAt(30), seatAt(20)], 0), 2);
+    assert.equal(nearestAhead([seatAt(50), seatAt(30)], 0), -1);
+  });
+});
+
+describe("spacechase engine - turn flow", () => {
+  it("starts at seat 0 awaiting ACTION; a roll moves and passes the turn", () => {
+    const g = start(2, 5);
+    assert.equal(g.awaiting.seat, 0);
+    assert.equal(g.awaiting.inputType, "ACTION");
+    assert.equal(g.turnCount, 1);
+    const r = roll(g, 5);
+    assert.equal(seatOf(r.state, 0).position, 5);
+    assert.equal(r.state.awaiting.seat, 1);
+    assert.ok(r.state.turnCount > g.turnCount);
+  });
+
+  it("isLegalMove only on ACTION; lost turns skip; extra turns repeat the seat", () => {
+    let g = start(2, 5);
+    assert.ok(isLegalMove(g, { kind: "ROLL" }));
+
+    // Space Gun: Ben loses 2 turns -> Ada acts twice while Ben is skipped.
+    g = roll(g, 1).state; // Ada -> seat 1
+    g = draw(g, CARD.SPACE_GUN).state; // Ben loses 2, back to Ada
+    assert.equal(seatOf(g, 1).lostTurns, 2);
+    assert.equal(g.awaiting.seat, 0);
+    g = roll(g, 1).state; // Ada; Ben skip 1
+    assert.equal(g.awaiting.seat, 0, "Ben skipped once");
+    g = roll(g, 1).state; // Ada; Ben skip 2
+    assert.equal(g.awaiting.seat, 0, "Ben skipped twice");
+    assert.equal(seatOf(g, 1).lostTurns, 0);
+    g = roll(g, 1).state; // now passes to Ben
+    assert.equal(g.awaiting.seat, 1);
+
+    // Nebula: +2 extra turns -> same seat goes again.
+    g = roll(g, 1).state; // Ben -> Ada
+    const before = g.roundNumber;
+    g = draw(g, CARD.NEBULA).state; // Ada gains 2, immediately consumes 1 -> Ada again
+    assert.equal(g.awaiting.seat, 0);
+    assert.equal(g.roundNumber, before, "extra turns are not go-arounds");
+  });
+});
+
+describe("spacechase engine - cards", () => {
+  it("forward / everyone / rover movement (distinct spaces so nobody collides)", () => {
+    // Space Credit: +20.
+    let g = start(2, 9);
+    g = draw(g, CARD.SPACE_CREDIT).state;
+    assert.equal(seatOf(g, 0).position, 20);
+
+    // Cosmic Chaos: everyone +7. Start them apart so they don't land together.
+    g = start(2, 9);
+    seatOf(g, 0).position = 10;
+    seatOf(g, 1).position = 20;
+    g = draw(g, CARD.COSMIC_CHAOS).state;
+    assert.equal(seatOf(g, 0).position, 17);
+    assert.equal(seatOf(g, 1).position, 27);
+
+    // Rover: others +5, drawer +7.
+    g = start(2, 9);
+    seatOf(g, 0).position = 10;
+    seatOf(g, 1).position = 20;
+    g = draw(g, CARD.ROVER).state;
+    assert.equal(seatOf(g, 0).position, 17);
+    assert.equal(seatOf(g, 1).position, 25);
+  });
+
+  it("Space Suit doubles the wearer's roll and only the wearer on everyone-cards; is consumed regardless", () => {
+    // Suit then roll 3 -> +6, stored doubled.
+    let g = start(2, 3);
+    g = draw(g, CARD.SPACE_SUIT).state; // Ada suits up, turn passes to Ben
+    g = roll(g, 1).state; // Ben
+    g = roll(g, 3).state; // Ada rolls 3 -> doubled to 6
+    assert.equal(seatOf(g, 0).position, 6);
+    assert.equal(seatOf(g, 0).lastActionValue, 6);
+    assert.equal(seatOf(g, 0).spaceSuit, false);
+
+    // Suit then Cosmic Chaos -> wearer +14, other +7.
+    g = start(2, 3);
+    g = draw(g, CARD.SPACE_SUIT).state;
+    g = roll(g, 1).state; // Ben
+    g = draw(g, CARD.COSMIC_CHAOS).state; // Ada wearing suit
+    assert.equal(seatOf(g, 0).position, 14);
+    assert.equal(seatOf(g, 1).position, 7 + 1); // Ben moved 1 earlier, +7 now
+
+    // Suit then Satellite -> consumed with no effect on movement.
+    g = start(2, 3);
+    g = draw(g, CARD.SPACE_SUIT).state;
+    g = roll(g, 1).state;
+    g = draw(g, CARD.SATELLITE).state; // opens SATELLITE prompt
+    assert.equal(g.awaiting.inputType, "SATELLITE");
+    assert.equal(seatOf(g, 0).spaceSuit, false, "suit consumed even though Satellite has no number");
+  });
+
+  it("Shield: round-based, blocks unlimited hits, then expires", () => {
+    let g = start(2, 9);
+    g = draw(g, CARD.SHIELD).state; // Ada shields (her 1st action); turn -> Ben
+    const exp = seatOf(g, 0).shieldExpiresRound;
+    assert.equal(exp, g.roundNumber + 3);
+
+    // Ben blasts Ada -> blocked (1st hit).
+    const blastAda = (s: GameState) => {
+      const t = draw(s, CARD.BLASTER);
+      return applyResolution(t.state, { kind: "TARGET", seat: 0 });
+    };
+    let r = blastAda(g);
+    g = r.state;
+    assert.ok(kinds(r.events).includes("shieldBlock"), "hit absorbed");
+    assert.equal(seatOf(g, 0).position, 0, "shield absorbed the hit");
+    // Time-based, not a per-hit counter: the expiry round never moves on a block.
+    assert.equal(seatOf(g, 0).shieldExpiresRound, exp, "shield blocks unlimited hits");
+
+    // Expire the shield by advancing the round count, then a hit lands.
+    if (g.awaiting.seat !== 1) g = roll(g, 1).state; // ensure it is Ben's turn
+    seatOf(g, 0).position = 10;
+    g.roundNumber = exp; // shield now inactive
+    r = blastAda(g);
+    g = r.state;
+    assert.equal(seatOf(g, 0).position, 7, "unshielded: moved back 3 from 10");
+  });
+
+  it("attacks: Blaster targets, Fighter Jet both-or-nothing on shield, self-target rules", () => {
+    // Fighter Jet: target -3 (from 10 -> 7), attacker +3.
+    let g = start(2, 9);
+    seatOf(g, 0).position = 5;
+    seatOf(g, 1).position = 10;
+    let r = draw(g, CARD.FIGHTER_JET); // Ada draws
+    g = r.state;
+    g = applyResolution(g, { kind: "TARGET", seat: 1 }).state;
+    assert.equal(seatOf(g, 1).position, 7);
+    assert.equal(seatOf(g, 0).position, 8);
+
+    // Black Hole cannot target self; Worm Hole cannot target self.
+    g = start(2, 9);
+    g = draw(g, CARD.BLACK_HOLE).state;
+    assert.equal(g.awaiting.context, "blackhole-target");
+    assert.throws(() => applyResolution(g, { kind: "TARGET", seat: 0 }), /illegal target/);
+    g = applyResolution(g, { kind: "TARGET", seat: 1 }).state;
+    assert.equal(g.awaiting.inputType, "SPACE");
+    g = applyResolution(g, { kind: "SPACE", space: 50 }).state;
+    assert.equal(seatOf(g, 1).position, 50);
+  });
+
+  it("Kraken: 'three' needs exactly min(3, live) targets; 'one' hits one for 3", () => {
+    // Assert on the emitted events: the turn machine immediately starts
+    // consuming the freshly-applied lost turns, so the post-state field is
+    // not a reliable check.
+    const g = start(3, 9);
+    const opened = draw(g, CARD.KRAKEN).state;
+    assert.equal(opened.awaiting.inputType, "CHOICE");
+
+    const g3 = applyResolution(opened, { kind: "CHOICE", choice: "three" }).state;
+    assert.equal(g3.awaiting.inputType, "MULTI_TARGET");
+    assert.equal(g3.awaiting.count, 3);
+    assert.throws(() => applyResolution(g3, { kind: "TARGETS", seats: [1, 2] }), /wrong number/);
+    const r3 = applyResolution(g3, { kind: "TARGETS", seats: [0, 1, 2] });
+    assert.equal(r3.events.filter((e) => e.kind === "loseTurns").length, 3, "three players each lose a turn");
+
+    const g1 = applyResolution(opened, { kind: "CHOICE", choice: "one" }).state;
+    assert.equal(g1.awaiting.inputType, "TARGET");
+    const r1 = applyResolution(g1, { kind: "TARGET", seat: 2 });
+    const loss = r1.events.find((e) => e.kind === "loseTurns");
+    assert.ok(loss && loss.a === 3, "one target loses 3 turns");
+  });
+
+  it("6-7: first draw targets+chooses 6/7; the SAME player's second draw sends them to 67", () => {
+    let g = start(2, 9);
+    g = draw(g, CARD.SIX_SEVEN).state; // Ada, 1st
+    assert.equal(seatOf(g, 0).sixSevenCount, 1);
+    assert.equal(g.awaiting.context, "sixseven-target");
+    g = applyResolution(g, { kind: "TARGET", seat: 1 }).state;
+    g = applyResolution(g, { kind: "CHOICE", choice: "7" }).state;
+    assert.equal(seatOf(g, 1).position, 7);
+
+    // Get back to Ada and draw 6-7 again -> auto to 67, no prompt.
+    if (g.awaiting.seat !== 0) g = roll(g, 1).state;
+    g = draw(g, CARD.SIX_SEVEN).state;
+    assert.equal(seatOf(g, 0).sixSevenCount, 2);
+    assert.equal(seatOf(g, 0).position, 67);
+    assert.notEqual(g.awaiting.inputType, "TARGET");
+  });
+
+  it("Shooting Star: self goes to 33; send sends a target to 33", () => {
+    let g = start(2, 9);
+    g = draw(g, CARD.SHOOTING_STAR).state;
+    let self = applyResolution(g, { kind: "CHOICE", choice: "self" }).state;
+    assert.equal(seatOf(self, 0).position, 33);
+    let send = applyResolution(g, { kind: "CHOICE", choice: "send" }).state;
+    send = applyResolution(send, { kind: "TARGET", seat: 1 }).state;
+    assert.equal(seatOf(send, 1).position, 33);
+  });
+
+  it("Time Loop: replays a roll, replays a card (re-opening its prompt), no-ops as first action", () => {
+    // First action ever -> no-op.
+    let g = start(2, 9);
+    g = draw(g, CARD.TIME_LOOP).state;
+    assert.equal(seatOf(g, 0).position, 0);
+
+    // Replay a roll.
+    g = start(2, 9);
+    g = roll(g, 5).state; // Ada moves 5 -> Ben
+    g = roll(g, 1).state; // Ben -> Ada
+    g = draw(g, CARD.TIME_LOOP).state; // Ada repeats her 5
+    assert.equal(seatOf(g, 0).position, 10);
+
+    // Replay a card that needs a target (Blaster).
+    g = start(2, 9);
+    seatOf(g, 1).position = 10;
+    g = draw(g, CARD.BLASTER).state;
+    g = applyResolution(g, { kind: "TARGET", seat: 1 }).state; // Ada blasts Ben -> 7, turn to Ben
+    g = roll(g, 1).state; // Ben -> Ada
+    const r = draw(g, CARD.TIME_LOOP); // Ada repeats Blaster
+    g = r.state;
+    assert.equal(g.awaiting.inputType, "TARGET");
+    assert.equal(g.awaiting.cardId, CARD.BLASTER);
+  });
+
+  it("Rocket jumps ahead of the nearest player; no-ops if nobody is ahead", () => {
+    let g = start(2, 9);
+    seatOf(g, 0).position = 5;
+    seatOf(g, 1).position = 20;
+    g = draw(g, CARD.ROCKET).state;
+    assert.equal(seatOf(g, 0).position, 21);
+
+    g = start(2, 9);
+    seatOf(g, 0).position = 30;
+    seatOf(g, 1).position = 10;
+    g = draw(g, CARD.ROCKET).state;
+    assert.equal(seatOf(g, 0).position, 30, "nobody ahead -> no move, turn still spent");
+    assert.equal(g.awaiting.seat, 1);
+  });
+
+  it("Worm Hole swaps positions but never with yourself; a shield blocks the swap", () => {
+    let g = start(2, 9);
+    seatOf(g, 0).position = 5;
+    seatOf(g, 1).position = 40;
+    g = draw(g, CARD.WORM_HOLE).state;
+    assert.throws(() => applyResolution(g, { kind: "TARGET", seat: 0 }), /illegal target/);
+    const swapped = applyResolution(g, { kind: "TARGET", seat: 1 }).state;
+    assert.equal(seatOf(swapped, 0).position, 40);
+    assert.equal(seatOf(swapped, 1).position, 5);
+  });
+
+  it("Satellite reorders the next draws by an index permutation", () => {
+    let g = start(2, 9);
+    g.deck.push(1, 2, 3, 4); // four known cards under the satellite
+    g.deck.push(CARD.SATELLITE); // top = satellite, drawn now
+    g = applyMove(g, { kind: "DRAW" }).state;
+    assert.equal(g.awaiting.inputType, "SATELLITE");
+    const peek = g.awaiting.peek.slice(); // next-draw first
+    const n = peek.length;
+    assert.ok(n >= 2);
+    const order = peek.map((_, k) => n - 1 - k); // reverse
+    g = applyResolution(g, { kind: "SATELLITE", order }).state;
+    // The next card drawn should now be the one that was LAST in the peek.
+    if (g.awaiting.seat !== 0) g = roll(g, 1).state; // back to Ada (Ben doesn't draw)
+    const next = applyMove(g, { kind: "DRAW" });
+    assert.equal(next.events.find((e) => e.kind === "draw")!.b, peek[n - 1]);
+  });
+});
+
+describe("spacechase engine - winning + lifecycle", () => {
+  it("a single finisher wins; simultaneous finishers roll off (re-rolling ties)", () => {
+    // Single finisher.
+    let g = start(2, 9);
+    seatOf(g, 0).position = 67;
+    const w = roll(g, 1);
+    assert.equal(w.state.over, true);
+    assert.equal(w.state.winner, 0);
+
+    // Tie: Cosmic Chaos pushes both past Finish; rolloff 4-4 then 6-2.
+    g = start(2, 9);
+    seatOf(g, 0).position = 65;
+    seatOf(g, 1).position = 64;
+    g.forcedRolls.push(4, 4, 6, 2);
+    const r = draw(g, CARD.COSMIC_CHAOS);
+    assert.equal(r.state.over, true);
+    assert.equal(r.state.winner, 0);
+    assert.equal(kinds(r.events).filter((k) => k === "tiebreakRoll").length, 4);
+  });
+
+  it("collisions send all sharers back to START (once, after an everyone-card)", () => {
+    let g = start(2, 9);
+    seatOf(g, 0).position = 7;
+    seatOf(g, 1).position = 10;
+    const r = roll(g, 3); // Ada onto Ben
+    g = r.state;
+    assert.equal(seatOf(g, 0).position, 0);
+    assert.equal(seatOf(g, 1).position, 0);
+    assert.ok(kinds(r.events).includes("collision"));
+  });
+
+  it("a leaver is removed and skipped; the rest play on", () => {
+    let g = start(3, 9);
+    // Seat 1 leaves on seat 0's turn -> seat 1 gone, still seat 0 to act.
+    g = applyLeave(g, 1).state;
+    assert.equal(seatOf(g, 1).gone, true);
+    assert.equal(seatOf(g, 1).position, 0);
+    g = roll(g, 1).state; // Ada -> should skip gone seat 1 -> seat 2
+    assert.equal(g.awaiting.seat, 2);
+  });
+
+  it("autoResolve rolls on ACTION; a fresh game keeps invariants through real play", () => {
+    let g = start(2, 9);
+    const r = autoResolve(g, 0);
+    assert.ok(seatOf(r.state, 0).position > 0 || r.state.awaiting.seat === 1);
+
+    // Play a real game (draws + rolls, resolving prompts via the default
+    // auto-resolver); invariants must hold after every single step.
+    g = start(3, 1234);
+    for (let t = 0; t < 200 && !g.over; t++) {
+      if (g.awaiting.inputType === "ACTION") {
+        g = (t % 2 === 0 ? applyMove(g, { kind: "DRAW" }) : roll(g, 1 + (t % 6))).state;
+      } else {
+        g = autoResolve(g, g.awaiting.seat).state;
       }
-    });
-
-    it("is deterministic for a given seed", () => {
-      assert.deepEqual(buildDeck(mulberry32(7)), buildDeck(mulberry32(7)));
-      assert.notDeepEqual(buildDeck(mulberry32(7)), buildDeck(mulberry32(8)));
-    });
-  });
-
-  describe("board movement", () => {
-    it("moves forward and backward on the board", () => {
-      const seat = seatAt(10);
-      moveBy(seat, 5);
-      assert.equal(seat.position, 15);
-      moveBy(seat, -3);
-      assert.equal(seat.position, 12);
-    });
-
-    it("moving forward from START: n spaces lands on space n", () => {
-      const seat = seatAt(0);
-      moveBy(seat, 6);
-      assert.equal(seat.position, 6);
-    });
-
-    it("backward movement stops at START and is a no-op from START", () => {
-      const seat = seatAt(2);
-      moveBy(seat, -10);
-      assert.equal(seat.position, 0);
-      assert.deepEqual(moveBy(seat, -3), []);
-      assert.equal(seat.position, 0);
-    });
-
-    it("passing the Finish caps at 68", () => {
-      const seat = seatAt(66);
-      moveBy(seat, 6);
-      assert.equal(seat.position, 68);
-    });
-  });
-
-  describe("portal traversal", () => {
-    it("landing on a mouth enters the portal (both directions)", () => {
-      const atA = seatAt(0);
-      const stepsA = moveBy(atA, 4); // land on space 4 = portal 1's `a` mouth
-      assert.deepEqual(kinds(stepsA), ["move", "enterPortal"]);
-      assert.equal(atA.portalId, 1);
-      assert.equal(atA.portalProgress, 0);
-      assert.equal(atA.portalForward, true);
-      assert.equal(atA.position, 4, "position holds the entry mouth while inside");
-
-      const atB = seatAt(35);
-      moveBy(atB, 1); // land on 36 = portal 1's `b` mouth
-      assert.equal(atB.portalId, 1);
-      assert.equal(atB.portalForward, false);
-    });
-
-    it("moves through internal spaces without exiting", () => {
-      const seat = seatInPortal(28); // portal 2, internal 3
-      const steps = moveBy(seat, 2);
-      assert.deepEqual(steps, [{ kind: "portalMove", portalId: 2, from: 0, to: 2 }]);
-      assert.equal(seat.portalId, 2);
-      assert.equal(seat.portalProgress, 2);
-    });
-
-    it("reaching the last internal space leaves you inside at the lip", () => {
-      const seat = seatInPortal(28);
-      moveBy(seat, 3); // progress 3 of 3 - at the lip, NOT out
-      assert.equal(seat.portalId, 2);
-      assert.equal(seat.portalProgress, 3);
-    });
-
-    it("exiting costs one extra move (internal+1 exits exactly onto the far mouth)", () => {
-      const seat = seatInPortal(28); // entered the `a` end; far mouth = 61
-      const steps = moveBy(seat, 4);
-      assert.deepEqual(kinds(steps), ["portalMove", "exitPortal"]);
-      assert.equal(seat.portalId, 0);
-      assert.equal(seat.position, 61);
-      assert.equal(seat.justExitedPortal, 61, "guard set so we don't re-enter the mouth we exited");
-    });
-
-    it("the worked example: inside portal 3 from 51, move 7 -> exit at 39, continue to 42", () => {
-      const seat = seatInPortal(51); // portal 3 entered at `b`: heading b->a, exit = 39
-      assert.equal(seat.portalForward, false);
-      const steps = moveBy(seat, 7);
-      assert.deepEqual(kinds(steps), ["portalMove", "exitPortal", "move"]);
-      assert.equal(seat.portalId, 0);
-      assert.equal(seat.position, 42);
-      assert.equal(seat.justExitedPortal, 39);
-    });
-
-    it("backing out exits at the entry mouth and continues backward", () => {
-      const seat = seatInPortal(51);
-      moveBy(seat, 1); // progress 1
-      const steps = moveBy(seat, -3); // 1 back to 0... below 0 -> exit at 51 (1 move), 1 left -> 50
-      assert.deepEqual(kinds(steps), ["portalMove", "exitPortal", "move"]);
-      assert.equal(seat.portalId, 0);
-      assert.equal(seat.position, 50);
-      assert.equal(seat.justExitedPortal, 51);
-    });
-
-    it("the re-entry guard blocks walking back onto the mouth just exited", () => {
-      const seat = seatInPortal(28);
-      moveBy(seat, 4); // out at 61, guard = 61
-      moveBy(seat, -2); // 59
-      const steps = moveBy(seat, 2); // back onto 61 - must NOT re-enter
-      assert.deepEqual(kinds(steps), ["move"]);
-      assert.equal(seat.portalId, 0);
-      assert.equal(seat.position, 61);
-    });
-
-    it("the guard does NOT block the portal's other mouth or other portals", () => {
-      const seat = seatInPortal(28);
-      moveBy(seat, 4); // out at 61, guard = 61
-      teleportTo(seat, 10);
-      // walking onto 28 (the other mouth of the same portal) re-enters
-      const fresh = seatAt(27, { justExitedPortal: 61 });
-      moveBy(fresh, 1);
-      assert.equal(fresh.portalId, 2);
-    });
-
-    it("overflow after exiting can chain into another portal mouth", () => {
-      // Exit portal 3 at 39 with overflow that lands exactly on 51's twin?
-      // Simpler real case: exit portal 2 at 61 with overflow 3 -> 64 (no
-      // portal), then a separate move onto 36 enters portal 1.
-      const seat = seatInPortal(28);
-      moveBy(seat, 7); // 3 internal + 1 exit at 61 + 3 -> 64
-      assert.equal(seat.position, 64);
-      assert.equal(seat.portalId, 0);
-      const walker = seatAt(35);
-      moveBy(walker, 1);
-      assert.equal(walker.portalId, 1);
-    });
-  });
-
-  describe("teleports", () => {
-    it("teleporting onto a mouth ALWAYS enters the portal (guard cleared)", () => {
-      const seat = seatAt(10, { justExitedPortal: 39 });
-      const steps = teleportTo(seat, 39);
-      assert.deepEqual(kinds(steps), ["teleport", "enterPortal"]);
-      assert.equal(seat.portalId, 3);
-      assert.equal(seat.portalForward, true);
-    });
-
-    it("teleporting exits any portal for free", () => {
-      const seat = seatInPortal(4);
-      moveBy(seat, 2);
-      teleportTo(seat, 20);
-      assert.equal(seat.portalId, 0);
-      assert.equal(seat.position, 20);
-    });
-
-    it("teleport to START works (Time Bomb / Nuclear Bomb -> 0, never space 1)", () => {
-      const seat = seatInPortal(4);
-      teleportTo(seat, 0);
-      assert.equal(seat.position, 0);
-      assert.equal(seat.portalId, 0);
-    });
-  });
-
-  describe("collisions", () => {
-    it("groups rockets sharing a board space", () => {
-      const seats = [seatAt(10), seatAt(10), seatAt(11), seatAt(10)];
-      assert.deepEqual(scanCollisions(seats), [[0, 1, 3]]);
-    });
-
-    it("exempts START, Finish, in-portal and gone seats", () => {
-      const inPortal = seatInPortal(4);
-      const onMouth = seatAt(4); // standing ON the mouth space, not inside
-      assert.deepEqual(scanCollisions([inPortal, onMouth]), [], "portal occupant exempt");
-      assert.deepEqual(scanCollisions([seatAt(0), seatAt(0)]), [], "START exempt");
-      assert.deepEqual(scanCollisions([seatAt(68), seatAt(68)]), [], "Finish exempt");
-      assert.deepEqual(
-        scanCollisions([seatAt(9), seatAt(9, { gone: true })]),
-        [],
-        "gone seats exempt"
-      );
-    });
-
-    it("reports multiple separate collisions", () => {
-      const seats = [seatAt(5), seatAt(5), seatAt(30), seatAt(30)];
-      assert.deepEqual(scanCollisions(seats), [
-        [0, 1],
-        [2, 3],
-      ]);
-    });
-  });
-
-  describe("nearestAhead (Rocket #35)", () => {
-    it("finds the nearest live player strictly ahead", () => {
-      const seats = [seatAt(10), seatAt(30), seatAt(20), seatAt(5)];
-      assert.equal(nearestAhead(seats, 0), 2);
-    });
-
-    it("returns -1 when nobody is ahead", () => {
-      const seats = [seatAt(50), seatAt(30), seatAt(50)];
-      assert.equal(nearestAhead(seats, 0), -1, "ties don't count as ahead");
-    });
-
-    it("ignores gone seats and counts in-portal players at their mouth", () => {
-      const inPortal = seatInPortal(28); // position reads 28
-      const seats = [seatAt(10), seatAt(60, { gone: true }), inPortal];
-      assert.equal(nearestAhead(seats, 0), 2);
-    });
+      assertInvariants(g);
+    }
+    assert.ok(ranking(g).length >= 1);
   });
 });

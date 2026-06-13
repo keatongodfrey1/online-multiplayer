@@ -1,20 +1,20 @@
 /**
- * Space Chase - pure board/movement math. No Colyseus imports: everything
- * here is deterministic, synchronous, and unit-testable without a server.
+ * Space Chase - pure board/movement math. No @colyseus/schema imports:
+ * everything here is deterministic, synchronous, and unit-testable on its own.
  *
- * The room owns WHAT happens (card rules, shields, turn flow); this module
- * owns WHERE rockets end up (board clamps, portal traversal, landings) and
- * returns a step list the room translates into synced events.
+ * It owns WHERE rockets end up (board clamps, portal traversal, landings) and
+ * returns a step list the room/engine turns into synced events. The card rules
+ * (shields, suit, turn flow, etc.) live in engine.ts and call into this.
  *
  * Implements the INTENDED rules from "Space Chase/MECHANICS_AND_RULINGS.md":
- *  - landing on a portal mouth by ANY means enters the portal (centralized
- *    in landOn(), which every terminal landing funnels through);
- *  - exiting a portal costs one extra move, overflow continues on the
- *    board in the same direction;
- *  - backing out (negative movement inside) exits at the entry mouth,
- *    also costing one move;
- *  - the justExitedPortal guard blocks immediate re-entry into the mouth
- *    just exited (cleared by the room at the owner's next turn start).
+ *  - landing on a portal mouth by ANY means enters the portal (centralized in
+ *    landOn(), which every terminal landing funnels through);
+ *  - exiting a portal costs one extra move, overflow continues on the board in
+ *    the same direction;
+ *  - backing out (negative movement inside) exits at the entry mouth, also
+ *    costing one move;
+ *  - the justExitedPortal guard blocks immediate re-entry into the mouth just
+ *    exited (cleared by the engine at the owner's next turn start).
  */
 import {
   CARD_DEFS,
@@ -24,9 +24,10 @@ import {
   SC_SIX_SEVEN_ID,
   SC_START,
   portalAt,
-} from "@backbone/shared";
+} from "../constants.js";
+import { shuffle } from "./rng.js";
 
-/** The mutable position fields of a seat (SpaceChaseSeat satisfies this). */
+/** The mutable position fields of a seat (an engine seat satisfies this). */
 export interface SeatPos {
   position: number;
   portalId: number;
@@ -191,35 +192,6 @@ export function nearestAhead(
     if (best === -1 || seat.position < seats[best]!.position) best = i;
   });
   return best;
-}
-
-// ── Deterministic RNG + deck ──
-// Deliberately a copy of the pinned PRNG (not imported from another
-// game's engine): games stay independent, and changing this algorithm
-// would change every shuffle for a given seed.
-
-/** mulberry32: tiny, fast, deterministic 32-bit PRNG. Returns floats in [0,1). */
-export function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return function () {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** Fisher-Yates using the supplied RNG. Returns a new array; input untouched. */
-export function shuffle<T>(arr: readonly T[], rng: () => number): T[] {
-  const a = arr.slice();
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(rng() * (i + 1));
-    const tmp = a[i]!;
-    a[i] = a[j]!;
-    a[j] = tmp;
-  }
-  return a;
 }
 
 /**
