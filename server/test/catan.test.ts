@@ -711,6 +711,40 @@ describe("catan", () => {
     );
   });
 
+  it("lets each player pick a piece color; conflicts rejected; colors flow to seats", async () => {
+    const room = (await colyseus.createRoom(CATAN, { seed: 54 })) as unknown as CatanRoom;
+    const a = await colyseus.connectTo(room, { nickname: "Ann" });
+    const b = await colyseus.connectTo(room, { nickname: "Ben" });
+    const colorOf = (sid: string) => (room.state.players.get(sid) as any).colorChoice;
+
+    a.send(CatanMsg.PICK_COLOR, { color: "orange" });
+    await until(() => colorOf(a.sessionId) === "orange");
+    b.send(CatanMsg.PICK_COLOR, { color: "orange" }); // taken by Ann
+    b.send(CatanMsg.PICK_COLOR, { color: "lime" }); // not a playable color
+    await sleep(100);
+    assert.equal(colorOf(b.sessionId), "", "conflicting / invalid picks ignored");
+
+    b.send(CatanMsg.PICK_COLOR, { color: "blue" });
+    await until(() => colorOf(b.sessionId) === "blue");
+    a.send(CatanMsg.PICK_COLOR, { color: "" }); // clear
+    await until(() => colorOf(a.sessionId) === "");
+
+    a.send(CatanMsg.PICK_COLOR, { color: "white" });
+    await until(() => colorOf(a.sessionId) === "white");
+    a.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    // 2 humans -> official variant -> 4 seats; humans wear their picks, neutrals the rest
+    assert.equal(room.state.seats[0]!.color, "white", "Ann's pick honored");
+    assert.equal(room.state.seats[1]!.color, "blue", "Ben's pick honored");
+    const neutralColors = [room.state.seats[2]!.color, room.state.seats[3]!.color];
+    assert.deepEqual(neutralColors.sort(), ["orange", "red"], "neutrals take the leftover palette");
+
+    // mid-game picks are ignored
+    a.send(CatanMsg.PICK_COLOR, { color: "blue" });
+    await sleep(100);
+    assert.equal(room.state.seats[0]!.color, "white");
+  });
+
   it("rule toggles are host-only and lobby-only", async () => {
     const room = (await colyseus.createRoom(CATAN, { seed: 53 })) as unknown as CatanRoom;
     const host = await colyseus.connectTo(room, { nickname: "Host" });

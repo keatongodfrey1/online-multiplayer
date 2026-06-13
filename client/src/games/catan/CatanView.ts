@@ -12,6 +12,7 @@ import type { Room } from "@colyseus/sdk";
 import {
   type BaseState,
   CATAN_NO_HOLDER,
+  CATAN_PLAYABLE_COLORS,
   CatanEngine,
   CatanMsg,
   type CatanSeat,
@@ -107,12 +108,37 @@ export function renderCatanLobbySettings(
       <span>House rule: whoever moves the robber may <strong>take 1 of the tile's resource</strong>
       from the bank instead of stealing</span>
     </label>`;
+  // Everyone picks their own piece color; taken colors are locked out.
+  const takenBy: Record<string, string> = {};
+  let myColor = "";
+  for (const p of state.players.values()) {
+    const choice = (p as any).colorChoice as string | undefined;
+    if (choice) takenBy[choice] = p.nickname;
+    if (p.sessionId === ctx.mySessionId && choice) myColor = choice;
+  }
+  const swatches = CATAN_PLAYABLE_COLORS.map((c) => {
+    const owner = takenBy[c];
+    const mine = c === myColor;
+    const lockedByOther = owner !== undefined && !mine;
+    const title = lockedByOther ? `Taken by ${owner}` : mine ? "Your color (tap to clear)" : c;
+    return `<button class="catan-color-swatch ${mine ? "catan-color-selected" : ""}" data-color="${c}" style="background:${PLAYER_COLOR[c]}" ${
+      lockedByOther ? "disabled" : ""
+    } title="${escapeHtml(title)}"></button>`;
+  }).join("");
+  const colorRow = `<div class="catan-lobby-setting"><span>Your color</span><div class="catan-color-row">${swatches}</div></div>`;
+
   const addBot = ctx.isHost
     ? `<button id="catan-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>
         ${seatsLeft > 0 ? "+ Add AI opponent" : "Table is full"}
       </button>`
     : "";
-  container.innerHTML = twoRules + note + robber + addBot;
+  container.innerHTML = colorRow + twoRules + note + robber + addBot;
+  container.querySelectorAll<HTMLButtonElement>(".catan-color-swatch").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const c = btn.dataset.color!;
+      room.send(CatanMsg.PICK_COLOR, { color: c === myColor ? "" : c });
+    });
+  });
   container.querySelector<HTMLSelectElement>("#catan-two-rules")?.addEventListener("change", (ev) => {
     room.send(CatanMsg.CONFIG, { useTwoPlayerVariant: (ev.target as HTMLSelectElement).value === "official" });
   });

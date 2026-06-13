@@ -10,7 +10,7 @@
  * geometry via CatanEngine.buildBoardGeometry(), and the flat arrays below are
  * indexed by its hex/vertex/edge ids.
  */
-import { ArraySchema, entity, Schema, type, view } from "@colyseus/schema";
+import { ArraySchema, Schema, type, view } from "@colyseus/schema";
 import { BasePlayer, BaseState } from "../../state.js";
 
 export * as CatanEngine from "./engine/index.js";
@@ -27,7 +27,13 @@ export const CatanMsg = {
   /** Host-only, lobby-only. Payload: { useTwoPlayerVariant?: boolean;
    *  robberBounty?: boolean } - the pre-game rule toggles. */
   CONFIG: "catan/config",
+  /** Any player, lobby-only. Payload: { color?: string } - pick your piece
+   *  color ("" clears). Rejected if another player already chose it. */
+  PICK_COLOR: "catan/pickColor",
 } as const;
+
+/** The piece colors players may pick (the board palette has exactly these). */
+export const CATAN_PLAYABLE_COLORS = ["red", "blue", "white", "orange"] as const;
 
 /** Sentinel for "nobody holds this award" in the holder fields below. */
 export const CATAN_NO_HOLDER = 255;
@@ -81,8 +87,10 @@ export class CatanSeat extends Schema {
   @view() @type([CatanDevCard]) devCards = new ArraySchema<CatanDevCard>();
 }
 
-@entity
-export class CatanPlayer extends BasePlayer {}
+export class CatanPlayer extends BasePlayer {
+  /** Lobby color pick ("" = none yet); honored at game start if still free. */
+  @type("string") colorChoice = "";
+}
 
 export class CatanState extends BaseState {
   @type([CatanSeat]) seats = new ArraySchema<CatanSeat>();

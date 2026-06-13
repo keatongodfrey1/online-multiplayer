@@ -1191,3 +1191,28 @@ button.spl-gem.selected {
   margin-top: 2px;
   flex: none;
 }
+
+/* Catan lobby color picker */
+.catan-color-row {
+  display: flex;
+  gap: 8px;
+}
+
+.catan-color-swatch {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 2px solid #353a4f;
+  padding: 0;
+  cursor: pointer;
+}
+
+.catan-color-swatch.catan-color-selected {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.catan-color-swatch:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

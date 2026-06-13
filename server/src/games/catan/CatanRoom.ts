@@ -27,6 +27,7 @@ import {
   type BasePlayer,
   CATAN,
   CATAN_NO_HOLDER,
+  CATAN_PLAYABLE_COLORS,
   CatanDevCard,
   CatanEngine,
   CatanMsg,
@@ -114,6 +115,43 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     if (typeof seed === "number" && Number.isFinite(seed)) this.seedOption = seed >>> 0;
     this.onMessage(CatanMsg.ACTION, (client, payload) => this.handleAction(client, payload));
     this.onMessage(CatanMsg.CONFIG, (client, payload) => this.handleConfig(client, payload));
+    this.onMessage(CatanMsg.PICK_COLOR, (client, payload) => this.handlePickColor(client, payload));
+  }
+
+  /** Any player picks their piece color in the lobby ("" clears it). */
+  private handlePickColor(client: Client, payload: unknown): void {
+    if (this.state.phase !== Phase.LOBBY) return;
+    const player = this.state.players.get(client.sessionId) as CatanPlayer | undefined;
+    if (!player) return;
+    const color = (payload as { color?: unknown } | null)?.color;
+    if (color === "" || color === undefined) {
+      player.colorChoice = "";
+      return;
+    }
+    if (typeof color !== "string" || !(CATAN_PLAYABLE_COLORS as readonly string[]).includes(color)) return;
+    for (const p of this.state.players.values()) {
+      if (p.sessionId !== client.sessionId && (p as CatanPlayer).colorChoice === color) return; // taken
+    }
+    player.colorChoice = color;
+  }
+
+  /** Assign engine-seat colors: honor lobby picks, then fill from the palette
+   *  (so unchosen humans and the 2p neutrals take what's left). */
+  private buildColors(players: CatanPlayer[], totalSeats: number): string[] {
+    const playable = [...CATAN_PLAYABLE_COLORS] as string[];
+    const colors: string[] = new Array(totalSeats).fill("");
+    const used = new Set<string>();
+    players.forEach((p, i) => {
+      const choice = p.colorChoice;
+      if (choice && playable.includes(choice) && !used.has(choice)) {
+        colors[i] = choice;
+        used.add(choice);
+      }
+    });
+    const remaining = playable.filter((c) => !used.has(c));
+    let r = 0;
+    for (let i = 0; i < totalSeats; i++) if (!colors[i]) colors[i] = remaining[r++]!;
+    return colors;
   }
 
   /** Host adjusts the pre-game rule toggles while in the lobby. */
@@ -132,6 +170,7 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     this.frameworkSeatByEngineSeat = players.map((p) => p.seat);
     const seed = this.seedOption ?? Math.floor(Math.random() * 0xffffffff) >>> 0;
     const twoPlayerVariant = players.length === 2 && this.state.useTwoPlayerVariant;
+    const totalSeats = twoPlayerVariant ? 4 : players.length;
     this.engine = createInitialGameState(geo, {
       numPlayers: players.length,
       seed,
@@ -141,6 +180,7 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
       rollForOrder: true,
       twoPlayerVariant,
       robberBounty: this.state.robberBounty,
+      colors: this.buildColors(players as CatanPlayer[], totalSeats),
     });
     this.ghost = new RandomPolicy((seed ^ 0x9e3779b9) >>> 0);
     this.botBrains.clear();
