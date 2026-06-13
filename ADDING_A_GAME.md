@@ -103,6 +103,13 @@ actions, never mutate state locally. The framework already renders the
 lobby, the "Reconnecting..." overlay, and the game-over/rematch screen -
 your view only covers the playing phase.
 
+Turn alerts are a default, not an extra: players on other tablets need to
+hear/see when it is their moment. Use `client/src/framework/turnAlert.ts` -
+call `turnChime()` + `flashToast(root, "Your turn!")` on the RISING EDGE of
+"this player must act" (track a boolean across renders so it fires once),
+and offer a 🔔/🔕 button wired to `isMuted()`/`setMuted()` (one shared,
+site-wide preference). See SplendorView and CatanView for the pattern.
+
 ### 5. `client/src/games/registry.ts` - one entry
 
 ```ts
