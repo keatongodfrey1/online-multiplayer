@@ -275,4 +275,41 @@ describe("space chase room", () => {
     await until(() => room.state.currentTurn !== first);
     assert.notEqual(room.state.currentTurn, clients[1]!.sessionId, "Ben is skipped");
   });
+
+  it("portal 1: a rocket that exits at #36 is never sucked back in on a later turn", async () => {
+    const { room, a, b } = await startedGame(3);
+    const ada = () => room.engine.players[0]!;
+    const benRolls1 = async () => {
+      await until(() => room.state.currentTurn === b.sessionId);
+      room.engine.forcedRolls.push(1);
+      b.send(SpaceChaseMsg.ROLL, {});
+      await until(() => room.state.currentTurn === a.sessionId);
+    };
+
+    // Ada rolls onto #4 from START -> enters portal 1 heading 4->36.
+    room.engine.forcedRolls.push(4);
+    a.send(SpaceChaseMsg.ROLL, {});
+    await until(() => ada().portalId === 1);
+    assert.equal(ada().position, 4);
+    assert.equal(ada().portalForward, true);
+
+    // Traverse the 7 internal spaces across turns (Ben rolls in between).
+    await benRolls1();
+    room.engine.forcedRolls.push(6);
+    a.send(SpaceChaseMsg.ROLL, {}); // progress 0 -> 6
+    await until(() => ada().portalProgress === 6);
+
+    await benRolls1();
+    room.engine.forcedRolls.push(2);
+    a.send(SpaceChaseMsg.ROLL, {}); // 1 to the lip, 1 to step out -> exit onto #36
+    await until(() => ada().position === 36 && ada().portalId === 0);
+    assert.equal(ada().justExitedPortal, 36, "guard remembers the mouth just exited");
+
+    // Ada's NEXT turn: a forward roll must move off #36, NOT re-enter (no 36->4 reversal).
+    await benRolls1();
+    room.engine.forcedRolls.push(4);
+    a.send(SpaceChaseMsg.ROLL, {});
+    await until(() => ada().position === 40);
+    assert.equal(ada().portalId, 0, "not sucked back into the portal");
+  });
 });

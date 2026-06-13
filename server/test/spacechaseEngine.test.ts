@@ -138,6 +138,100 @@ describe("spacechase engine - board math", () => {
   });
 });
 
+describe("spacechase engine - portals (all three, both directions)", () => {
+  const mk = () => ({ position: 0, portalId: 0, portalProgress: 0, portalForward: true, justExitedPortal: 0, gone: false });
+  const stepKinds = (s: MoveStep[]) => s.map((x) => x.kind);
+  // [id, a, b, internal] - the three portals from GAME_RULES.md.
+  const PORTALS: [number, number, number, number][] = [
+    [1, 4, 36, 7],
+    [2, 28, 61, 3],
+    [3, 39, 51, 3],
+  ];
+
+  for (const [id, a, b, internal] of PORTALS) {
+    for (const dir of ["a->b", "b->a"] as const) {
+      const entry = dir === "a->b" ? a : b;
+      const far = dir === "a->b" ? b : a;
+
+      it(`portal ${id} (${entry}->${far}): enter, traverse, exit exactly on the far mouth`, () => {
+        const s = mk();
+        assert.deepEqual(stepKinds(landOn(s, entry)), ["enterPortal"]);
+        assert.equal(s.portalId, id);
+        assert.equal(s.portalForward, entry === a);
+        assert.equal(s.portalProgress, 0);
+        // internal + 1 moves leaves exactly on the far mouth (the +1 is the exit step).
+        assert.deepEqual(stepKinds(moveBy(s, internal + 1)), ["portalMove", "exitPortal"]);
+        assert.equal(s.portalId, 0, "out of the portal after exiting");
+        assert.equal(s.position, far);
+        assert.equal(s.justExitedPortal, far);
+      });
+
+      it(`portal ${id} (${entry}->${far}): leftover movement continues forward off the exit`, () => {
+        const s = mk();
+        landOn(s, entry);
+        moveBy(s, internal + 3); // 2 spaces of overflow past the exit
+        assert.equal(s.portalId, 0);
+        assert.equal(s.position, far + 2, "overflow continues forward from the exit mouth");
+      });
+    }
+  }
+
+  it("OWNER SCENARIO: exit portal 1 at #36, then next turn does NOT get sucked back (no #36->#4 reversal)", () => {
+    const s = mk();
+    landOn(s, 4); // enter portal 1 at the #4 end
+    assert.equal(s.portalForward, true);
+    moveBy(s, 8); // 7 internal + 1 to step out -> stand ON #36, OUT of the portal
+    assert.equal(s.portalId, 0);
+    assert.equal(s.position, 36);
+    assert.equal(s.justExitedPortal, 36);
+    // Next turn: the engine clears the guard (what beginTurn does).
+    s.justExitedPortal = 0;
+    // A forward roll must move away on the board, NOT re-enter and reverse to #4.
+    assert.deepEqual(stepKinds(moveBy(s, 4)), ["move"]);
+    assert.equal(s.portalId, 0, "still out of the portal - not sucked back in");
+    assert.equal(s.position, 40);
+  });
+
+  it("OWNER SCENARIO mirror: exit portal 1 at #4 (entered at #36), next turn no re-entry", () => {
+    const s = mk();
+    landOn(s, 36); // enter at the #36 end, heading 36->4
+    assert.equal(s.portalForward, false);
+    moveBy(s, 8); // exit onto #4
+    assert.equal(s.portalId, 0);
+    assert.equal(s.position, 4);
+    assert.equal(s.justExitedPortal, 4);
+    s.justExitedPortal = 0; // next turn
+    assert.deepEqual(stepKinds(moveBy(s, 3)), ["move"]);
+    assert.equal(s.portalId, 0);
+    assert.equal(s.position, 7);
+  });
+
+  it("standing on a mouth never auto-enters, but a FRESH landing does", () => {
+    const s = mk();
+    landOn(s, 4);
+    moveBy(s, 8); // -> standing on #36, portalId 0
+    s.justExitedPortal = 0; // guard cleared next turn
+    moveBy(s, 0); // doing nothing does not enter
+    assert.equal(s.portalId, 0, "merely standing on the mouth does not re-enter");
+    // A genuine landing on #36 from elsewhere DOES enter (intended), heading 36->4.
+    const fresh = mk();
+    fresh.position = 33;
+    assert.deepEqual(stepKinds(moveBy(fresh, 3)), ["move", "enterPortal"]);
+    assert.equal(fresh.portalId, 1);
+    assert.equal(fresh.portalForward, false, "a fresh landing on #36 heads 36->4");
+  });
+
+  it("within ONE resolution the guard blocks an immediate reversal back onto the exit mouth", () => {
+    const s = mk();
+    landOn(s, 4);
+    moveBy(s, 8); // exit at #36 (guard = 36, still set this turn)
+    moveBy(s, -2); // 34
+    assert.deepEqual(stepKinds(moveBy(s, 2)), ["move"]); // back onto #36 -> NOT re-entered
+    assert.equal(s.portalId, 0);
+    assert.equal(s.position, 36);
+  });
+});
+
 describe("spacechase engine - turn flow", () => {
   it("starts at seat 0 awaiting ACTION; a roll moves and passes the turn", () => {
     const g = start(2, 5);
