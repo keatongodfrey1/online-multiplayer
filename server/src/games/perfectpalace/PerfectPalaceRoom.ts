@@ -38,11 +38,12 @@ import {
   PPSeat,
 } from "@backbone/shared";
 import { ArraySchema } from "@colyseus/schema";
+import type { Delayed } from "@colyseus/timer";
 import { BaseGameRoom } from "../../framework/BaseGameRoom.js";
 import { sanitizeAction } from "./sanitize.js";
 import { parseSave, serializeSave, type ParsedSave, type SaveSeat } from "./save.js";
 
-const { createReadyState, tryReduce, rollDieFrom, getSquare, rankPlayers, totalPoints, staffWeight } =
+const { chooseAction, createReadyState, tryReduce, rollDieFrom, rankPlayers, totalPoints, staffWeight } =
   PerfectPalaceEngine;
 type GameState = PerfectPalaceEngine.GameState;
 type GameAction = PerfectPalaceEngine.GameAction;
@@ -57,7 +58,11 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
   readonly minPlayers = 2;
   readonly maxPlayers = 6;
   override supportsSaves = true;
-  // supportsBots / allowLateJoin / supportsReclaim stay false (defaults).
+  override supportsBots = true;
+  // Never lock the room: anyone with the code can join mid-game to reclaim a
+  // seat whose player left for good. The 180s in-game grace is the framework default.
+  override allowLateJoin = true;
+  override supportsReclaim = true;
 
   /** Server-only engine truth (never synced). Public for white-box tests. */
   public engine!: GameState;
@@ -69,6 +74,9 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
   private engineIdBySession = new Map<string, string>();
   private seedOption?: number;
   private actionsApplied = 0;
+  /** Pace of an AI / vacated-seat decision (~a second reads as "it took a turn"). */
+  public botDelayMs = 850;
+  private autoTimer?: Delayed;
 
   protected createPlayer(): PerfectPalacePlayer {
     return new PerfectPalacePlayer();
@@ -103,7 +111,7 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
   public buildSave(): object {
     const seats: SaveSeat[] = this.seatOrder.map((sessionId, i) => ({
       nickname: this.state.seats[i]?.nickname ?? `Seat ${i + 1}`,
-      isBot: false,
+      isBot: sessionId ? this.state.players.get(sessionId)?.isBot === true : false,
       gone: !sessionId,
     }));
     // turnCount label = the furthest-along base turn (equal-turns accounting).
@@ -124,10 +132,13 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
 
     if (load) {
       this.engine = load.engine;
-      // Match saved seats to present players by nickname; a gone seat stays "".
+      // Match saved seats to present players by nickname + role (humans rejoin;
+      // bots are re-seated by the framework before start). A gone seat stays "".
       this.seatOrder = load.seats.map((s) => {
         if (s.gone) return "";
-        const match = players.find((p) => p.nickname.toLowerCase() === s.nickname.toLowerCase());
+        const match = players.find(
+          (p) => p.isBot === s.isBot && p.nickname.toLowerCase() === s.nickname.toLowerCase(),
+        );
         return match?.sessionId ?? "";
       });
       this.engine.log = [`Game resumed (turn ${load.turnCount + 1}).`];
@@ -161,6 +172,7 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
     });
 
     this.syncFromEngine();
+    this.maybeScheduleAuto(); // bots (and any resumed-gone seats) start playing
   }
 
   // ---- message handling ----------------------------------------------------
@@ -227,7 +239,72 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
   private afterApply(): void {
     this.autoAdvance();
     this.syncFromEngine();
-    if (this.engine.phase === "game-over") this.finishGame();
+    if (this.engine.phase === "game-over") {
+      this.finishGame();
+      return;
+    }
+    this.maybeScheduleAuto();
+  }
+
+  // ---- AI / vacated-seat auto-play -----------------------------------------
+
+  /** A seat played by the server: an AI bot, or a human who left for good. A
+   *  merely-disconnected human (within the 180s grace) is NOT auto-played — the
+   *  table waits for them, then their seat vacates and a bot takes over. */
+  private isAutoSeat(i: number): boolean {
+    const sid = this.seatOrder[i];
+    if (!sid) return true; // vacated (left for good)
+    return this.state.players.get(sid)?.isBot === true;
+  }
+
+  /** Engine seats that must act now (mapping: every unlocked seat; duel: every
+   *  contender yet to roll; otherwise the current player), filtered to auto seats. */
+  private awaitingAutoSeats(): number[] {
+    const e = this.engine;
+    if (!e || e.phase === "game-over") return [];
+    let seats: number[];
+    if (e.phase === "initial-mapping") {
+      seats = e.players.map((_, i) => i).filter((i) => !e.players[i]!.removed && !e.players[i]!.mappingLocked);
+    } else if (e.turn.phase === "duel" && e.duel) {
+      const d = e.duel;
+      seats = d.contenders.filter((id) => d.rolls[id] == null).map((id) => e.players.findIndex((p) => p.id === id));
+    } else {
+      const idx = e.players.findIndex((p) => p.id === e.currentPlayerId);
+      seats = idx >= 0 ? [idx] : [];
+    }
+    return seats.filter((i) => i >= 0 && this.isAutoSeat(i));
+  }
+
+  /** If an auto seat is waiting, play ONE of its actions a beat from now. The
+   *  decision runs afterApply(), which calls back here — so chained actions and
+   *  back-to-back auto seats each get their own visible beat. */
+  private maybeScheduleAuto(): void {
+    this.autoTimer?.clear();
+    this.autoTimer = undefined;
+    if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.phase === "game-over") return;
+    if (this.awaitingAutoSeats().length === 0) return;
+    this.autoTimer = this.clock.setTimeout(() => {
+      this.autoTimer = undefined;
+      if (this.state.phase !== Phase.PLAYING || this.engine.phase === "game-over") return;
+      const seat = this.awaitingAutoSeats()[0];
+      if (seat === undefined) return;
+      this.playAuto(seat);
+    }, this.botDelayMs);
+  }
+
+  private playAuto(seatIdx: number): void {
+    const engineId = this.engine.players[seatIdx]?.id;
+    if (!engineId) return;
+    let action = chooseAction(this.engine, engineId);
+    if (action.type === "turn/duelRollForPlayer") {
+      const { value, rngState } = rollDieFrom(this.engine);
+      this.engine = { ...this.engine, rngState };
+      action = { ...action, value };
+    }
+    if (this.dispatch(action)) return;
+    // Safety net: the policy emitted something illegal (shouldn't happen) — end
+    // the turn so the table never stalls; if even that is illegal, re-schedule.
+    if (!this.dispatch({ type: "turn/endTurn" })) this.maybeScheduleAuto();
   }
 
   /**
@@ -377,81 +454,67 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
     return idx >= 0 ? this.seatOrder[idx] ?? "" : "";
   }
 
-  // ---- departures ----------------------------------------------------------
+  // ---- departures & mid-game seat reclaim ----------------------------------
 
   protected override onPlayerLeftForGood(player: BasePlayer): void {
-    const engineId = this.engineIdBySession.get(player.sessionId);
     this.engineIdBySession.delete(player.sessionId);
     const idx = this.seatOrder.indexOf(player.sessionId);
-    if (idx >= 0) this.seatOrder[idx] = ""; // mark the seat vacated
+    if (idx >= 0) this.seatOrder[idx] = ""; // vacate — do NOT remove from the engine
 
     if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.phase === "game-over") return;
-    // With too few humans left the framework ends the game "abandoned" right
-    // after this hook — just reflect the vacated seat, don't remove from engine.
-    if (this.state.players.size < this.minPlayers) {
-      this.syncFromEngine();
+    // The seat is now an auto seat: the bot policy plays it (resolving anything
+    // the leaver owed — a duel roll, a pending decision) until someone reclaims it.
+    // Two ways the game still ends: the framework ends "abandoned" when the
+    // roster (humans + bots) drops below minPlayers, and the guard below ends it
+    // when no humans remain at all (a bots-only table shouldn't run forever).
+    if (this.humanCount() === 0) {
+      this.endGame(EndReason.ABANDONED);
       return;
     }
-    if (!engineId) return;
-    // Auto-resolve anything the leaver owed (safe defaults), then remove them.
-    this.autoResolvePendingFor(engineId);
-    // (auto-resolution may itself have ended the game, e.g. an endTurn that
-    //  completed the palace-win tally — re-read the phase as a plain string.)
-    const phaseAfter: string = this.engine.phase;
-    if (phaseAfter !== "game-over") this.dispatch({ type: "system/removePlayer", id: engineId });
+    this.afterApply(); // re-project the vacated seat and (re)schedule auto-play
   }
 
-  /**
-   * Clear any pause the leaving player is blocking, with a safe default, so the
-   * table never stalls. Duels are fully resolved with seeded rolls (dice are
-   * server-owned, so auto-rolling the remaining contenders is fair) to avoid a
-   * dangling duel surviving the removal.
-   */
-  private autoResolvePendingFor(engineId: string): void {
-    const e = this.engine;
-    const tp = e.turn.phase;
-    if (tp === "duel" && e.duel) {
-      this.resolveDuelFully();
-      return;
-    }
-    if (e.currentPlayerId !== engineId) return; // only the active player can block
-    switch (tp) {
-      case "pre-move-bailiff":
-        this.dispatch({ type: "turn/bailiffStealPreMoveSkip" });
-        break;
-      case "post-roll-bailiff":
-        this.dispatch({ type: "turn/bailiffStealPostRollSkip" });
-        break;
-      case "square-effect": {
-        if (e.turn.pendingFine) {
-          this.dispatch({ type: "turn/payFine", bricks: 0, sticks: 0, walls: 0, roofs: 0 });
-          break;
-        }
-        const me = e.players.find((p) => p.id === engineId);
-        const sq = me ? getSquare(me.position) : undefined;
-        if (sq?.effect.kind === "bricks-or-wall") this.dispatch({ type: "turn/gift10Bricks" });
-        else this.dispatch({ type: "turn/declineAlliance" });
-        break;
-      }
-      default:
-        break; // turn-start/rolling/optional-actions: removePlayer handles it
-    }
+  private humanCount(): number {
+    let n = 0;
+    for (const p of this.state.players.values()) if (!p.isBot) n++;
+    return n;
   }
 
-  /** Roll (seeded) for every contender who hasn't, until the duel clears. */
-  private resolveDuelFully(): void {
-    let guard = 0;
-    while (this.engine.duel && this.engine.turn.phase === "duel" && ++guard <= 100) {
-      const d = this.engine.duel;
-      const next = d.contenders.find((id) => d.rolls[id] == null);
-      if (next === undefined) break; // all rolled; autoAdvance will resolve
-      const { value, rngState } = rollDieFrom(this.engine);
-      this.engine = { ...this.engine, rngState };
-      this.dispatch({ type: "turn/duelRollForPlayer", id: next, value });
-    }
+  /** First vacated (left-for-good) seat a newcomer can take over. */
+  protected override findReclaimableSeat(): number {
+    return this.seatOrder.findIndex((sid, i) => !sid && !!this.engine?.players[i]);
   }
+
+  /** Bind a mid-game joiner to a vacated seat (its position/inventory intact). */
+  protected override reclaimSeat(i: number, player: BasePlayer): void {
+    const seat = this.state.seats[i];
+    if (!seat || !this.engine?.players[i]) return;
+    const oldNickname = seat.nickname;
+    this.seatOrder[i] = player.sessionId;
+    this.frameworkSeatByEngineSeat[i] = player.seat; // else a win maps to the departed seat
+    this.engineIdBySession.set(player.sessionId, this.engine.players[i]!.id);
+    seat.sessionId = player.sessionId;
+    seat.nickname = player.nickname;
+    seat.gone = false;
+    this.engine = {
+      ...this.engine,
+      players: this.engine.players.map((p, idx) => (idx === i ? { ...p, name: player.nickname } : p)),
+      log: [...this.engine.log, `${player.nickname} takes over ${oldNickname}'s seat.`],
+    };
+    this.afterApply(); // stop auto-playing the now-claimed seat; re-project
+  }
+
+  // ---- bots (framework owns roster entry / removal) ------------------------
+
+  protected override onBotAdded(): void {
+    // Stateless policy — nothing to set up. The bot plays once the game starts.
+  }
+  protected override onBotRemoved(): void {}
+  protected override onLoadedBotSeated(): void {}
 
   protected override onGameEnded(): void {
+    this.autoTimer?.clear();
+    this.autoTimer = undefined;
     this.state.currentTurn = "";
     this.state.duelActive = false;
   }

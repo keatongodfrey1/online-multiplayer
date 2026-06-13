@@ -162,11 +162,10 @@ export function parseSave(raw: unknown): ParsedSave | null {
   const seenNames = new Set<string>();
   for (const s of raw.seats) {
     if (!isObj(s) || !isStr(s.nickname) || !isBool(s.isBot) || !isBool(s.gone)) return null;
-    if (s.isBot) return null; // no bots in v1
     const key = s.nickname.toLowerCase();
     if (seenNames.has(key)) return null; // unique nicknames
     seenNames.add(key);
-    seats.push({ nickname: s.nickname, isBot: false, gone: s.gone });
+    seats.push({ nickname: s.nickname, isBot: s.isBot, gone: s.gone });
   }
   if (seats.every((s) => s.gone)) return null; // someone must be able to resume
 
