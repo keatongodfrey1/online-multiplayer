@@ -48,15 +48,39 @@ function mulberry32(seed: number): () => number {
 }
 
 /**
+ * A mulberry32 generator resumed at `rngState`. `draw()` yields a float in
+ * [0,1); `state()` reads back the advanced 32-bit accumulator to persist on the
+ * GameState. This carries mulberry32's REAL counter: an earlier version
+ * re-seeded the generator from its own previous output and stored a 31-bit
+ * value, which trapped the sequence in a short cycle and skewed the dice (face 3
+ * ~15.7% vs the ideal 16.7% over millions of rolls). Carrying the true
+ * accumulator restores the full 2^32 period and a flat distribution. rngState
+ * stays unsigned so save.ts's validator (0..0xffffffff) accepts it. (Same
+ * approach as the spacechase engine's nextRandom.)
+ */
+function rngFrom(rngState: number): { draw: () => number; state: () => number } {
+  let a = rngState | 0
+  return {
+    draw() {
+      a = (a + 0x6d2b79f5) | 0
+      let t = Math.imul(a ^ (a >>> 15), 1 | a)
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    },
+    state: () => a >>> 0,
+  }
+}
+
+/**
  * Draw one float in [0,1) from the state's seeded PRNG. Returns BOTH the value
  * and the next rngState. This reducer is immutable/spread-based (unlike Catan,
  * which mutates a clone), so callers thread the returned rngState into the new
  * state rather than mutating in place.
  */
 function advanceRng(state: GameState): { value: number; rngState: number } {
-  const r = mulberry32(state.rngState)
-  const value = r()
-  return { value, rngState: (r() * 2 ** 31) >>> 0 }
+  const r = rngFrom(state.rngState)
+  const value = r.draw()
+  return { value, rngState: r.state() }
 }
 
 /**
@@ -518,10 +542,11 @@ function drawOneCard(state: GameState, drawerId: PlayerId): GameState {
   let newState = state
   if (newState.deck.length === 0) {
     // Reshuffle discard into deck using the seeded server PRNG (never Math.random,
-    // or save/resume and tests would diverge). Advance rngState past the shuffle.
-    const r = mulberry32(newState.rngState)
-    const deck = shuffle([...newState.discard], r)
-    newState = { ...newState, deck, discard: [], rngState: (r() * 2 ** 31) >>> 0 }
+    // or save/resume and tests would diverge). Carry the PRNG accumulator past
+    // the shuffle so the stream keeps its full period.
+    const r = rngFrom(newState.rngState)
+    const deck = shuffle([...newState.discard], r.draw)
+    newState = { ...newState, deck, discard: [], rngState: r.state() }
   }
   if (newState.deck.length === 0) return newState // nothing to draw (edge case)
   const [cardId, ...rest] = newState.deck
