@@ -867,5 +867,40 @@ export function renderPerfectPalaceGameSummary(
           .join("")}
       </tbody>
     </table>
-    <p class="muted center">Tiebreaker: points → staff weight → cash.</p>`;
+    <p class="muted center">Tiebreaker: points → staff weight → cash.</p>
+    <button id="pp-share" class="secondary">📋 Share results</button>`;
+
+  // Build a tidy text scoreboard for the clipboard / native share sheet.
+  const room2 = room as Room<any, any>;
+  const code = room2.roomId ?? (room.state as any).roomCode ?? "";
+  const lines = [
+    `🏰 The Perfect Palace — Final Results${code ? ` (room ${code})` : ""}`,
+    ...rows.map((r, i) => `${r.win ? "👑" : `${i + 1}.`} ${r.name} — ${r.pts} pts · ${r.staff} staff · $${r.cash}`),
+    `Tiebreak: points → staff → cash`,
+  ];
+  const text = lines.join("\n");
+  const btn = container.querySelector<HTMLButtonElement>("#pp-share");
+  btn?.addEventListener("click", async () => {
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch {
+      // clipboard blocked (e.g. insecure context) — fall back to the share sheet.
+    }
+    if (!copied && typeof navigator.share === "function") {
+      try {
+        await navigator.share({ text });
+        copied = true;
+      } catch {
+        /* user dismissed the share sheet */
+      }
+    }
+    if (btn) {
+      btn.textContent = copied ? "Copied ✓" : "Copy failed — long-press to copy";
+      setTimeout(() => {
+        if (btn) btn.textContent = "📋 Share results";
+      }, 2000);
+    }
+  });
 }

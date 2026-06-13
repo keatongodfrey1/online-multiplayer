@@ -2076,3 +2076,6 @@ button.spl-gem.selected {
 .pp-timer { font-weight: 700; font-variant-numeric: tabular-nums; opacity: 0.95; }
 .pp-timer.warn { color: #ffd23f; animation: pp-timer-pulse 1s ease-in-out infinite; }
 @keyframes pp-timer-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* Perfect Palace — share-results button on the end screen */
+#pp-share { display: block; margin: 10px auto 0; }
