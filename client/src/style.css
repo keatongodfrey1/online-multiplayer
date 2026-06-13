@@ -2029,3 +2029,13 @@ button.spl-gem.selected {
   60% { transform: scale(1.18); }
   100% { transform: scale(1); opacity: 1; }
 }
+
+/* Perfect Palace — lobby colour picker */
+.pp-color-setting { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.pp-color-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.pp-color-swatch {
+  width: 32px; height: 32px; border-radius: 8px; padding: 0; cursor: pointer;
+  border: 2px solid #353a4f;
+}
+.pp-color-swatch.pp-color-selected { border-color: var(--text); box-shadow: 0 0 0 2px var(--warn); }
+.pp-color-swatch:disabled { opacity: 0.35; cursor: not-allowed; }

@@ -157,6 +157,29 @@ describe("perfect palace", () => {
     assert.equal(room.state.lastRollBy, current, "feed records who rolled");
   });
 
+  it("honors lobby colour picks and rejects a taken colour", async () => {
+    const room = (await colyseus.createRoom(PERFECT_PALACE, { seed: 30 })) as unknown as PerfectPalaceRoom;
+    const a = await colyseus.connectTo(room, { nickname: "Player0" });
+    const b = await colyseus.connectTo(room, { nickname: "Player1" });
+    await until(() => room.state.players.size === 2);
+    const choiceOf = (sid: string) => (room.state.players.get(sid) as any).colorChoice as number;
+
+    a.send(PerfectPalaceMsg.PICK_COLOR, { color: 3 });
+    await until(() => choiceOf(a.sessionId) === 3);
+    b.send(PerfectPalaceMsg.PICK_COLOR, { color: 3 }); // already taken → ignored
+    await sleep(60);
+    assert.equal(choiceOf(b.sessionId), -1, "taken colour rejected");
+    b.send(PerfectPalaceMsg.PICK_COLOR, { color: 1 });
+    await until(() => choiceOf(b.sessionId) === 1);
+
+    a.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    const seatA = [...room.state.seats].find((s) => s.sessionId === a.sessionId)!;
+    const seatB = [...room.state.seats].find((s) => s.sessionId === b.sessionId)!;
+    assert.equal(seatA.colorIndex, 3, "Player0's chosen colour lands on their seat");
+    assert.equal(seatB.colorIndex, 1, "Player1's chosen colour lands on their seat");
+  });
+
   // ---- simultaneous mapping ------------------------------------------------
 
   it("keeps initial picks hidden until everyone locks, and binds the lock to the sender", async () => {

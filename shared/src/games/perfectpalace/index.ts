@@ -13,7 +13,7 @@
 // ready. At mapping/revealAll every card is published to everyone. The DECK is
 // never synced — only deck/discard COUNTS. The held Royal Pardon is public
 // (a count on the seat inventory).
-import { ArraySchema, entity, Schema, type } from "@colyseus/schema";
+import { ArraySchema, Schema, type } from "@colyseus/schema";
 import { BasePlayer, BaseState } from "../../state.js";
 
 export * as PerfectPalaceEngine from "./engine/index.js";
@@ -29,6 +29,9 @@ export const PERFECT_PALACE = "perfectpalace";
  */
 export const PerfectPalaceMsg = {
   ACTION: "perfectpalace/action",
+  /** Any player, lobby-only. Payload: { color: number } — a palette index 0-5,
+   *  or -1 to clear. Rejected if another player already chose that color. */
+  PICK_COLOR: "perfectpalace/pickColor",
 } as const;
 
 /** Per-player palette (indexed by seat order). Kid-friendly, distinct hues. */
@@ -138,12 +141,12 @@ export class PPSeat extends Schema {
 }
 
 /**
- * No extra fields beyond BasePlayer (colors are assigned by seat order, no lobby
- * picker in v1). Empty schema subclasses must be tagged @entity to register with
- * the serializer's TypeRegistry.
+ * Lobby color pick: a palette index 0-5, or -1 = none yet (honored at game start
+ * if still free). The seat's final color lives on PPSeat.colorIndex.
  */
-@entity
-export class PerfectPalacePlayer extends BasePlayer {}
+export class PerfectPalacePlayer extends BasePlayer {
+  @type("int8") colorChoice = -1;
+}
 
 export class PerfectPalaceState extends BaseState {
   /** One per engine player, in engine player-array order (id `p${i+1}`). */

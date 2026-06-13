@@ -78,6 +78,8 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
   private rollSeq = 0;
   private lastDieValue = 0;
   private lastDieBy = "";
+  /** Display colour index per engine seat (lobby picks honoured; see buildColorIndices). */
+  private seatColorIndex: number[] = [];
   /** Pace of an AI / vacated-seat decision (~a second reads as "it took a turn"). */
   public botDelayMs = 850;
   private autoTimer?: Delayed;
@@ -91,6 +93,50 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
     const seed = (options as { seed?: unknown } | null)?.seed;
     if (typeof seed === "number" && Number.isFinite(seed)) this.seedOption = seed >>> 0;
     this.onMessage(PerfectPalaceMsg.ACTION, (client, payload) => this.handleAction(client, payload));
+    this.onMessage(PerfectPalaceMsg.PICK_COLOR, (client, payload) => this.handlePickColor(client, payload));
+  }
+
+  /** Any player picks their palace colour in the lobby (-1 clears). Mirrors Catan. */
+  private handlePickColor(client: Client, payload: unknown): void {
+    if (this.state.phase !== Phase.LOBBY) return;
+    const player = this.state.players.get(client.sessionId) as PerfectPalacePlayer | undefined;
+    if (!player) return;
+    const color = (payload as { color?: unknown } | null)?.color;
+    if (color === -1) {
+      player.colorChoice = -1;
+      return;
+    }
+    if (typeof color !== "number" || !Number.isInteger(color) || color < 0 || color >= PERFECT_PALACE_COLORS.length) return;
+    for (const p of this.state.players.values()) {
+      if (p.sessionId !== client.sessionId && (p as PerfectPalacePlayer).colorChoice === color) return; // taken
+    }
+    player.colorChoice = color;
+  }
+
+  /** Final display colour index per ENGINE seat: honour each seat occupant's
+   *  lobby pick, then fill the rest from the palette (unchosen humans + bots).
+   *  Indexed via seatOrder so it's correct for both fresh and resumed games. */
+  private buildColorIndices(): number[] {
+    const n = this.engine.players.length;
+    const out = new Array<number>(n).fill(-1);
+    const used = new Set<number>();
+    for (let i = 0; i < n; i++) {
+      const sid = this.seatOrder[i];
+      const p = sid ? (this.state.players.get(sid) as PerfectPalacePlayer | undefined) : undefined;
+      const c = p?.colorChoice ?? -1;
+      if (c >= 0 && c < PERFECT_PALACE_COLORS.length && !used.has(c)) {
+        out[i] = c;
+        used.add(c);
+      }
+    }
+    let next = 0;
+    for (let i = 0; i < n; i++) {
+      if (out[i]! >= 0) continue;
+      while (used.has(next)) next++;
+      out[i] = next;
+      used.add(next);
+    }
+    return out;
   }
 
   // ---- save/resume hooks (framework owns the orchestration) ----------------
@@ -162,6 +208,7 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
       const sid = this.seatOrder[i];
       if (sid) this.engineIdBySession.set(sid, ep.id);
     });
+    this.seatColorIndex = this.buildColorIndices();
     this.actionsApplied = 0;
     this.rollSeq = 0;
     this.lastDieValue = 0;
@@ -174,7 +221,7 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
       seat.engineId = ep.id;
       seat.sessionId = this.seatOrder[i] ?? "";
       seat.nickname = ep.name;
-      seat.colorIndex = ep.colorIndex % PERFECT_PALACE_COLORS.length;
+      seat.colorIndex = this.seatColorIndex[i] ?? i % PERFECT_PALACE_COLORS.length;
       this.state.seats.push(seat);
     });
 
@@ -404,7 +451,7 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
       const sid = this.seatOrder[i] ?? "";
       set(seat, "sessionId", sid);
       set(seat, "nickname", ep.name);
-      set(seat, "colorIndex", ep.colorIndex % PERFECT_PALACE_COLORS.length);
+      set(seat, "colorIndex", this.seatColorIndex[i] ?? i % PERFECT_PALACE_COLORS.length);
       set(seat, "position", ep.position);
       writeInventory(seat.inventory, ep.inventory);
       set(seat, "inDungeon", ep.dungeon.inDungeon);

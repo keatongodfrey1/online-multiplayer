@@ -666,13 +666,38 @@ export function renderPerfectPalaceLobbySettings(
   const addBot = ctx.isHost
     ? `<button id="pp-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>➕ Add an AI player 🤖</button>`
     : "";
+
+  // Each player picks their palace colour; colours taken by others are locked out.
+  const takenBy = new Map<number, string>();
+  let myColor = -1;
+  for (const p of state.players.values()) {
+    const choice = (p as any).colorChoice as number | undefined;
+    if (choice !== undefined && choice >= 0) takenBy.set(choice, p.nickname);
+    if (p.sessionId === ctx.mySessionId && choice !== undefined) myColor = choice;
+  }
+  const swatches = PERFECT_PALACE_COLORS.map((hex, i) => {
+    const owner = takenBy.get(i);
+    const mine = i === myColor;
+    const lockedByOther = owner !== undefined && !mine;
+    const title = lockedByOther ? `Taken by ${owner}` : mine ? "Your colour (tap to clear)" : "Pick this colour";
+    return `<button class="pp-color-swatch${mine ? " pp-color-selected" : ""}" data-pick-color="${i}" style="background:${hex}" ${lockedByOther ? "disabled" : ""} title="${escapeHtml(title)}"></button>`;
+  }).join("");
+  const colorRow = `<div class="pp-color-setting"><span class="muted">Your colour</span><div class="pp-color-row">${swatches}</div></div>`;
+
   container.innerHTML = `
     <p class="muted">A regal, Monopoly-style race to build palaces — 2–6 players, one device each.
       Add AI players to fill out the table; if someone leaves mid-game an AI keeps their seat and anyone can take it over.</p>
+    ${colorRow}
     ${addBot}
     <div class="pp-saves-block"></div>`;
   container.querySelector<HTMLButtonElement>("#pp-add-bot")?.addEventListener("click", () => {
     room.send(LobbyMsg.ADD_BOT, {});
+  });
+  container.querySelectorAll<HTMLButtonElement>(".pp-color-swatch").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const i = Number(btn.dataset.pickColor);
+      room.send(PerfectPalaceMsg.PICK_COLOR, { color: i === myColor ? -1 : i });
+    });
   });
   renderSaveSlots(container.querySelector<HTMLElement>(".pp-saves-block")!, room, {
     key: PP_SAVES_KEY,
