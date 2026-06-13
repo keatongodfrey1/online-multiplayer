@@ -2218,3 +2218,99 @@ describe('createReadyState bootstrap', () => {
     }
   })
 })
+
+// ==================== Bot policy ====================
+// Validates the pure "plays a real game" policy under the same conditions the
+// room provides: the policy emits one action per call, the harness injects the
+// seeded duel die and auto-reveals / auto-resolves exactly like the room.
+
+describe('Bot policy', () => {
+  const { chooseAction, createReadyState, tryReduce, rollDieFrom } = PerfectPalaceEngine;
+
+  function awaiting(s: GameState): string[] {
+    if (s.phase === 'game-over') return [];
+    if (s.phase === 'initial-mapping') return s.players.filter((p) => !p.removed && !p.mappingLocked).map((p) => p.id);
+    if (s.turn.phase === 'duel' && s.duel) return s.duel.contenders.filter((id) => s.duel!.rolls[id] == null);
+    return s.currentPlayerId ? [s.currentPlayerId] : [];
+  }
+
+  // Mirror the room's autoAdvance: reveal when all locked, resolve a duel when
+  // every contender has rolled (tie re-rounds clear rolls and re-await).
+  function autoAdvance(s: GameState): GameState {
+    for (let g = 0; g < 1000; g++) {
+      if (s.phase === 'initial-mapping') {
+        const active = s.players.filter((p) => !p.removed);
+        if (active.length && active.every((p) => p.mappingLocked)) {
+          const o = tryReduce(s, { type: 'mapping/revealAll' });
+          if (o.ok) { s = o.state; continue; }
+        }
+        return s;
+      }
+      if (s.turn.phase === 'duel' && s.duel && s.duel.contenders.length &&
+          s.duel.contenders.every((id) => s.duel!.rolls[id] != null)) {
+        const o = tryReduce(s, { type: 'turn/duelResolve' });
+        if (o.ok) { s = o.state; continue; }
+      }
+      return s;
+    }
+    return s;
+  }
+
+  // One policy action for the first awaiting seat, with the room's dice
+  // injection + safety net (a rejected action falls back to ending the turn).
+  function step(s: GameState): { state: GameState; rejected: boolean; stalled: boolean } {
+    const seats = awaiting(s);
+    if (!seats.length) return { state: s, rejected: false, stalled: true };
+    const id = seats[0]!;
+    let action = chooseAction(s, id);
+    if (action.type === 'turn/duelRollForPlayer') {
+      const r = rollDieFrom(s);
+      s = { ...s, rngState: r.rngState };
+      action = { ...action, value: r.value };
+    }
+    const out = tryReduce(s, action);
+    if (out.ok) return { state: autoAdvance(out.state), rejected: false, stalled: false };
+    const fb = tryReduce(s, { type: 'turn/endTurn' });
+    return { state: fb.ok ? autoAdvance(fb.state) : s, rejected: true, stalled: !fb.ok };
+  }
+
+  function playBotGame(seed: number, players: number) {
+    let s = createReadyState(Array.from({ length: players }, (_, i) => ({ name: `Bot${i + 1}` })), seed);
+    let rejects = 0;
+    let i = 0;
+    for (; i < 25000 && s.phase !== 'game-over'; i++) {
+      const r = step(s);
+      assert.ok(!r.stalled, `policy stalled at action ${i} (${s.phase}/${s.turn.phase})`);
+      if (r.rejected) rejects++;
+      s = r.state;
+    }
+    return { state: s, rejects, actions: i };
+  }
+
+  it('drives a bot-only game to a palace win, emitting only legal actions', () => {
+    for (const seed of [12345, 42, 7]) {
+      const { state, rejects } = playBotGame(seed, 3);
+      expect(state.phase).toBe('game-over'); // the bots play a complete game
+      expect(state.palaceBuiltBy !== undefined).toBe(true);
+      expect(rejects).toBe(0); // the policy never emits an illegal action
+    }
+  });
+
+  it('finishes 2- and 6-player bot games without stalling', () => {
+    expect(playBotGame(99, 2).state.phase).toBe('game-over');
+    expect(playBotGame(2024, 6).state.phase).toBe('game-over');
+  });
+
+  it('builds the ladder greedily when flush with resources', () => {
+    let s = createReadyState([{ name: 'A' }, { name: 'B' }], 3);
+    while (s.phase === 'initial-mapping') s = step(s).state;
+    // Drop the active player into optional-actions with plenty to build a wall.
+    const cur = s.currentPlayerId!;
+    s = {
+      ...s,
+      turn: { ...s.turn, phase: 'optional-actions' },
+      players: s.players.map((p) => (p.id === cur ? { ...p, inventory: { ...p.inventory, bricks: 5, sticks: 5 } } : p)),
+    };
+    expect(chooseAction(s, cur).type).toBe('turn/build'); // builds rather than ending the turn
+  });
+});

@@ -61,6 +61,12 @@ export class PerfectPalaceView implements GameView {
   /** Local-only fine forfeit selection. */
   private fineSel = { bricks: 0, sticks: 0, walls: 0, roofs: 0 };
   private iWasActing = false;
+  /** Whether the rules/help modal is open. */
+  private showRules = false;
+  /** Dice animation: a portal element (outside the re-rendered DOM) + timers. */
+  private diceLayer?: HTMLElement;
+  private diceTimers = new Set<ReturnType<typeof setTimeout>>();
+  private lastSeenRollSeq = 0;
 
   mount(root: HTMLElement, room: Room<any, BaseState>, ctx: GameViewContext): void {
     this.root = root;
@@ -69,6 +75,12 @@ export class PerfectPalaceView implements GameView {
     root.classList.add("pp");
     root.addEventListener("click", this.onClick);
     root.addEventListener("change", this.onChange);
+    // Dice overlay lives on <body> so the full innerHTML re-render never wipes it
+    // mid-tumble. Start in sync so a roll that happened before we joined doesn't replay.
+    this.diceLayer = document.createElement("div");
+    this.diceLayer.className = "pp-dice-layer";
+    document.body.appendChild(this.diceLayer);
+    this.lastSeenRollSeq = this.room.state?.lastRollSeq ?? 0;
     hookSaveData(this.room, PP_SAVES_KEY, (blob) => (blob?.turnCount ?? 0) + 1, () =>
       flashToast(this.root!, "Game saved ✓"),
     );
@@ -81,8 +93,43 @@ export class PerfectPalaceView implements GameView {
     this.root?.removeEventListener("click", this.onClick);
     this.root?.removeEventListener("change", this.onChange);
     this.root?.classList.remove("pp");
+    for (const t of this.diceTimers) clearTimeout(t);
+    this.diceTimers.clear();
+    this.diceLayer?.remove();
+    this.diceLayer = undefined;
     this.root = undefined;
     this.room = undefined;
+  }
+
+  private after(ms: number, fn: () => void): void {
+    const t = setTimeout(() => {
+      this.diceTimers.delete(t);
+      fn();
+    }, ms);
+    this.diceTimers.add(t);
+  }
+
+  /** Tumble a die that lands on `value` (matching Space Chase's timing/feel). */
+  private showDice(value: number, who: string): void {
+    const layer = this.diceLayer;
+    if (!layer) return;
+    const FACES = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"];
+    const face = (n: number) => FACES[Math.max(0, Math.min(5, n - 1))]!;
+    layer.innerHTML = `<div class="pp-dice"><div class="pp-die"></div><div class="pp-die-cap">${escapeHtml(who)} rolled a ${value}</div></div>`;
+    layer.classList.add("show");
+    const die = layer.querySelector<HTMLElement>(".pp-die")!;
+    let flips = 0;
+    const spin = () => {
+      if (flips++ > 6) {
+        die.textContent = face(value);
+        die.classList.add("landed");
+        return;
+      }
+      die.textContent = face(Math.floor(Math.random() * 6) + 1);
+      this.after(80, spin);
+    };
+    spin();
+    this.after(1750, () => layer.classList.remove("show"));
   }
 
   // ---- identity helpers ----------------------------------------------------
@@ -127,6 +174,11 @@ export class PerfectPalaceView implements GameView {
     if (!this.root || !this.room?.state) return;
     const s = this.room.state;
     const me = this.mySeat();
+    // A fresh server roll (seq bumped) tumbles the dice overlay.
+    if (s.lastRollSeq > this.lastSeenRollSeq) {
+      this.lastSeenRollSeq = s.lastRollSeq;
+      this.showDice(s.lastRollValue, this.seatById(s.lastRollBy)?.nickname ?? "Someone");
+    }
     const acting = this.iMustAct();
     if (acting && !this.iWasActing) {
       turnChime();
@@ -139,6 +191,7 @@ export class PerfectPalaceView implements GameView {
         <div class="pp-title">The Perfect Palace</div>
         <div class="pp-phasebar">${escapeHtml(this.phaseHeadline())}</div>
         <div class="pp-toptools">
+          <button class="pp-icon" data-action="rules" title="Rules & help">❓</button>
           <button class="pp-icon" data-action="mute" title="${isMuted() ? "Sounds off" : "Sounds on"}">${isMuted() ? "🔕" : "🔔"}</button>
           ${me ? `<button class="subtle" data-action="save">Save</button>` : ""}
         </div>
@@ -149,6 +202,57 @@ export class PerfectPalaceView implements GameView {
           <div class="pp-action">${this.renderAction()}</div>
           <div class="pp-players">${this.renderPlayers()}</div>
           <div class="pp-log">${this.renderLog()}</div>
+        </div>
+      </div>
+      ${this.showRules ? this.renderRulesModal() : ""}`;
+  }
+
+  /** A condensed, kid-friendly rulebook (ported from the standalone RulesModal). */
+  private renderRulesModal(): string {
+    return `
+      <div class="pp-modal-backdrop">
+        <div class="pp-modal">
+          <div class="pp-modal-header">
+            <h2>📖 How to play</h2>
+            <button class="pp-icon" data-action="closeRules" title="Close">✕</button>
+          </div>
+          <div class="pp-rules-body">
+            <h3>🎯 Goal</h3>
+            <p>Build a <b>Palace</b> first. When someone builds one, everyone gets the same number of turns, then the <b>most points</b> wins.</p>
+
+            <h3>🎴 Your resource card</h3>
+            <p>You map die faces 1–6 to six rewards (5🪵, 5🧱, 10🧱, $5, $10, draw a card). Whenever <i>anyone</i> rolls, <i>every</i> player gains what their own card says for that number. Pass or land on Start for +$10 and a chance to swap one card slot.</p>
+
+            <h3>🎲 Your turn</h3>
+            <p>If you hold the Bailiff you may steal first. <b>Roll</b> (everyone gains from their card), move, and trigger the square. Then <b>shop, trade, and build</b> as much as you like, and end your turn.</p>
+
+            <h3>🏗 Build ladder (points)</h3>
+            <ul>
+              <li>Wall = 5🧱 · Roof = 5🪵</li>
+              <li>Room = 4 walls + 1 roof — <b>5 pts</b></li>
+              <li>Building = 3 rooms + any 1 staff — <b>20 pts</b></li>
+              <li>3-Story = 3 buildings + a Server, Chef &amp; Cleaner — <b>75 pts</b></li>
+              <li>Palace = 3 three-storys — <b>300 pts</b></li>
+            </ul>
+
+            <h3>🛍 Shop (on your turn)</h3>
+            <p>🧱/🪵 $1 each · 👷 Worker $50 (makes resources each turn) · 🍽️ Server $15 · 👨‍🍳 Chef $30 · 🧹 Cleaner $20 (these need a Room) · 🛡️ Knight $75 (blocks the Bailiff) · 👑 Queen $300 (200 pts).</p>
+
+            <h3>🎩 The Bailiff</h3>
+            <p>Pick it up on squares 5, 13, 27 or by card. Once per turn, steal 1 wall, 1 roof, 5🧱, 5🪵, or $5 from any opponent who doesn't hold a Knight. Land in the dungeon and you lose it.</p>
+
+            <h3>⛓️ The Dungeon</h3>
+            <p>Landing on Royal Court (10) sends you to the dungeon: no moving, buying, or building. Roll a 1 to break out (or wait out your third turn), or play a Royal Pardon card for a full turn.</p>
+
+            <h3>⚔️ Same-square duel</h3>
+            <p>Land where another player sits and you duel: the arriver sets a stake, everyone matches and rolls — highest roll takes the whole pot (ties re-roll).</p>
+
+            <h3>💸 Fines &amp; invasions</h3>
+            <p>Squares 7, 11 &amp; 28 charge you. Cash is taken first; if you're short you forfeit items (🧱/🪵 = $1, wall/roof = $5). An <b>Alliance</b> (squares 3 &amp; 20) waives the $100 invasion tribute.</p>
+
+            <h3>🏁 Winning &amp; ties</h3>
+            <p>First palace starts the finish; everyone finishes the round. Tie-break by total staff (Queen = 10, Whole-House-Cleaner = 5, others = 1), then by most cash.</p>
+          </div>
         </div>
       </div>`;
   }
@@ -207,8 +311,10 @@ export class PerfectPalaceView implements GameView {
       .map((seat) => {
         const isTurn = seat.engineId === s.currentPlayerId && s.enginePhase !== "game-over";
         const me = seat.sessionId === this.ctx?.mySessionId;
+        const isBot = !seat.gone && s.players.get(seat.sessionId)?.isBot === true;
         const inv = seat.inventory;
         const color = PERFECT_PALACE_COLORS[seat.colorIndex] ?? "#888";
+        const nameTag = me ? " (you)" : isBot ? " 🤖" : seat.gone ? " · empty seat" : "";
         const badges = [
           inv.allied ? "🤝" : "",
           inv.queen ? "👑" : "",
@@ -216,13 +322,13 @@ export class PerfectPalaceView implements GameView {
           s.bailiffKind === "held" && s.bailiffBy === seat.engineId ? "🎩" : "",
           seat.inDungeon ? `⛓️ ${seat.dungeonTurnsServed}/3` : "",
           inv.pardonCards > 0 ? "📜" : "",
-          seat.gone ? "🚪" : "",
+          seat.gone ? "🚪 reclaimable" : "",
         ].filter(Boolean).join(" ");
         return `
           <div class="pp-pcard${isTurn ? " pp-pcard-turn" : ""}${seat.gone ? " pp-pcard-gone" : ""}">
             <div class="pp-pcard-head">
               <span class="pp-dot" style="background:${color}"></span>
-              <strong>${escapeHtml(seat.nickname)}${me ? " (you)" : ""}</strong>
+              <strong>${escapeHtml(seat.nickname)}${nameTag}</strong>
               <span class="pp-badges">${badges}</span>
               <span class="pp-pts">${totalPoints(inv as any)} pts</span>
             </div>
@@ -494,13 +600,30 @@ export class PerfectPalaceView implements GameView {
   }
 
   private handleClick(e: MouseEvent): void {
+    // Click on the modal backdrop (but not its inner panel) closes the rules.
+    if ((e.target as HTMLElement).classList.contains("pp-modal-backdrop")) {
+      this.showRules = false;
+      this.render();
+      return;
+    }
     const btn = (e.target as HTMLElement).closest<HTMLElement>("[data-action]");
     if (!btn || !this.room) return;
     const action = btn.dataset.action!;
     switch (action) {
+      case "rules":
+        this.showRules = true;
+        this.render();
+        return;
+      case "closeRules":
+        this.showRules = false;
+        this.render();
+        return;
       case "mute":
         setMuted(!isMuted());
         this.render();
+        return;
+      case "save":
+        this.room.send(LobbyMsg.SAVE, {});
         return;
       case "save":
         this.room.send(LobbyMsg.SAVE, {});
@@ -609,9 +732,44 @@ export function renderPerfectPalaceLobbySettings(
   room: Room<any, BaseState>,
   ctx: LobbySettingsContext,
 ): void {
+  const state = room.state as BaseState;
+  const seatsLeft = (state.maxPlayers || 6) - state.players.size;
+  const addBot = ctx.isHost
+    ? `<button id="pp-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>➕ Add an AI player 🤖</button>`
+    : "";
+
+  // Each player picks their palace colour; colours taken by others are locked out.
+  const takenBy = new Map<number, string>();
+  let myColor = -1;
+  for (const p of state.players.values()) {
+    const choice = (p as any).colorChoice as number | undefined;
+    if (choice !== undefined && choice >= 0) takenBy.set(choice, p.nickname);
+    if (p.sessionId === ctx.mySessionId && choice !== undefined) myColor = choice;
+  }
+  const swatches = PERFECT_PALACE_COLORS.map((hex, i) => {
+    const owner = takenBy.get(i);
+    const mine = i === myColor;
+    const lockedByOther = owner !== undefined && !mine;
+    const title = lockedByOther ? `Taken by ${owner}` : mine ? "Your colour (tap to clear)" : "Pick this colour";
+    return `<button class="pp-color-swatch${mine ? " pp-color-selected" : ""}" data-pick-color="${i}" style="background:${hex}" ${lockedByOther ? "disabled" : ""} title="${escapeHtml(title)}"></button>`;
+  }).join("");
+  const colorRow = `<div class="pp-color-setting"><span class="muted">Your colour</span><div class="pp-color-row">${swatches}</div></div>`;
+
   container.innerHTML = `
-    <p class="muted">A regal, Monopoly-style race to build palaces — 2–6 players, one device each.</p>
+    <p class="muted">A regal, Monopoly-style race to build palaces — 2–6 players, one device each.
+      Add AI players to fill out the table; if someone leaves mid-game an AI keeps their seat and anyone can take it over.</p>
+    ${colorRow}
+    ${addBot}
     <div class="pp-saves-block"></div>`;
+  container.querySelector<HTMLButtonElement>("#pp-add-bot")?.addEventListener("click", () => {
+    room.send(LobbyMsg.ADD_BOT, {});
+  });
+  container.querySelectorAll<HTMLButtonElement>(".pp-color-swatch").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const i = Number(btn.dataset.pickColor);
+      room.send(PerfectPalaceMsg.PICK_COLOR, { color: i === myColor ? -1 : i });
+    });
+  });
   renderSaveSlots(container.querySelector<HTMLElement>(".pp-saves-block")!, room, {
     key: PP_SAVES_KEY,
     isHost: ctx.isHost,

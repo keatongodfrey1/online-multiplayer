@@ -216,5 +216,29 @@ console.log(`Smoke-testing ${URL}\n`);
   await b2.leave(true);
 }
 
+// ---------- The Perfect Palace: AI bots + reclaim ---------------------
+{
+  console.log("\nThe Perfect Palace (bots & reclaim):");
+  const host = new ColyseusSDK(URL);
+  const a = await host.create("perfectpalace", { nickname: "HostA" });
+  await until(() => a.state?.players?.size === 1);
+  a.send("lobby/addBot", {}); // LobbyMsg.ADD_BOT
+  await until(() => a.state?.players?.size === 2);
+  ok([...a.state.players.values()].some((p) => p.isBot), "host seated an AI player");
+
+  a.send("lobby/start", {});
+  await until(() => a.state.phase === "playing");
+  // Host locks; the bot auto-locks → the reveal fires with no human input for it.
+  const card = [
+    { kind: "sticks", amount: 5 }, { kind: "bricks", amount: 5 }, { kind: "bricks", amount: 10 },
+    { kind: "dollars", amount: 5 }, { kind: "dollars", amount: 10 }, { kind: "draw-card", amount: 0 },
+  ];
+  a.send("perfectpalace/action", { type: "mapping/setInitial", card });
+  await until(() => a.state.enginePhase !== "initial-mapping", 6000);
+  ok(true, "the AI auto-locked its card and the game revealed");
+
+  await a.leave(true);
+}
+
 console.log(`\nALL ${checks} SMOKE CHECKS PASSED against ${URL}`);
 process.exit(0);

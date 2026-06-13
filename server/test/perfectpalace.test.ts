@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { boot, type ColyseusTestServer } from "@colyseus/testing";
 import { defineRoom, defineServer } from "colyseus";
-import { EndReason, LobbyMsg, PERFECT_PALACE, PerfectPalaceMsg, Phase } from "@backbone/shared";
+import { EndReason, LobbyMsg, PERFECT_PALACE, PerfectPalaceEngine, PerfectPalaceMsg, Phase } from "@backbone/shared";
 import { PerfectPalaceRoom } from "../src/games/perfectpalace/PerfectPalaceRoom.js";
 import { sleep, until } from "./StubRoom.js";
+
+const { chooseAction } = PerfectPalaceEngine;
 
 function makeConfig() {
   return defineServer({
@@ -32,15 +34,47 @@ describe("perfect palace", () => {
   after(async () => colyseus.shutdown());
   beforeEach(async () => await colyseus.cleanup());
 
-  async function startedGame(seed = 42, playerCount = 2) {
+  async function startedGame(seed = 42, playerCount = 2, beforeStart?: (room: PerfectPalaceRoom) => void) {
     const room = (await colyseus.createRoom(PERFECT_PALACE, { seed })) as unknown as PerfectPalaceRoom;
     const clients = [];
     for (let i = 0; i < playerCount; i++) {
       clients.push(await colyseus.connectTo(room, { nickname: `Player${i}` }));
     }
+    beforeStart?.(room);
     clients[0]!.send(LobbyMsg.START, {});
     await until(() => room.state.phase === Phase.PLAYING);
     return { room, clients };
+  }
+
+  /** Engine seats that must act now (mirrors the room's awaiting logic). */
+  function awaitingSeats(room: PerfectPalaceRoom): number[] {
+    const e = room.engine;
+    if (e.phase === "game-over") return [];
+    if (e.phase === "initial-mapping")
+      return e.players.map((_, i) => i).filter((i) => !e.players[i]!.mappingLocked);
+    if (e.turn.phase === "duel" && e.duel)
+      return e.duel.contenders.filter((id) => e.duel!.rolls[id] == null).map((id) => e.players.findIndex((p) => p.id === id));
+    const idx = e.players.findIndex((p) => p.id === e.currentPlayerId);
+    return idx >= 0 ? [idx] : [];
+  }
+
+  /** Drive every connected human seat with the bot policy (over the wire) while
+   *  the room auto-plays bot/vacated seats, until the game ends or a cap. */
+  async function driveToEnd(room: PerfectPalaceRoom, clients: any[], cap = 4000): Promise<void> {
+    const bySession = new Map(clients.map((c) => [c.sessionId, c]));
+    for (let i = 0; i < cap && room.state.phase === Phase.PLAYING; i++) {
+      const seat = awaitingSeats(room).find((idx) => {
+        const sid = room.seatOrder[idx];
+        return sid && bySession.has(sid);
+      });
+      if (seat === undefined) {
+        await sleep(8); // only bot/vacated seats are awaiting — let the room play them
+        continue;
+      }
+      const prev = room.engine;
+      bySession.get(room.seatOrder[seat])!.send(PerfectPalaceMsg.ACTION, chooseAction(room.engine, room.engine.players[seat]!.id));
+      await until(() => room.engine !== prev, 2000).catch(() => {});
+    }
   }
 
   /** The connected client owning a given engine seat. */
@@ -110,6 +144,40 @@ describe("perfect palace", () => {
     clientForId(room, clients, current)!.send(PerfectPalaceMsg.ACTION, { type: "turn/rollDie", value: 6 });
     await until(() => room.engine !== prev);
     assert.ok(room.state.lastRoll >= 1 && room.state.lastRoll <= 6, "server rolled a real d6");
+  });
+
+  it("bumps the dice-animation feed on each server roll", async () => {
+    const { room, clients } = await startedGame(8, 2);
+    await completeMapping(room, clients);
+    const current = room.engine.currentPlayerId!;
+    const seq0 = room.state.lastRollSeq;
+    clientForId(room, clients, current)!.send(PerfectPalaceMsg.ACTION, { type: "turn/rollDie" });
+    await until(() => room.state.lastRollSeq > seq0);
+    assert.ok(room.state.lastRollValue >= 1 && room.state.lastRollValue <= 6, "die value is 1-6");
+    assert.equal(room.state.lastRollBy, current, "feed records who rolled");
+  });
+
+  it("honors lobby colour picks and rejects a taken colour", async () => {
+    const room = (await colyseus.createRoom(PERFECT_PALACE, { seed: 30 })) as unknown as PerfectPalaceRoom;
+    const a = await colyseus.connectTo(room, { nickname: "Player0" });
+    const b = await colyseus.connectTo(room, { nickname: "Player1" });
+    await until(() => room.state.players.size === 2);
+    const choiceOf = (sid: string) => (room.state.players.get(sid) as any).colorChoice as number;
+
+    a.send(PerfectPalaceMsg.PICK_COLOR, { color: 3 });
+    await until(() => choiceOf(a.sessionId) === 3);
+    b.send(PerfectPalaceMsg.PICK_COLOR, { color: 3 }); // already taken → ignored
+    await sleep(60);
+    assert.equal(choiceOf(b.sessionId), -1, "taken colour rejected");
+    b.send(PerfectPalaceMsg.PICK_COLOR, { color: 1 });
+    await until(() => choiceOf(b.sessionId) === 1);
+
+    a.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    const seatA = [...room.state.seats].find((s) => s.sessionId === a.sessionId)!;
+    const seatB = [...room.state.seats].find((s) => s.sessionId === b.sessionId)!;
+    assert.equal(seatA.colorIndex, 3, "Player0's chosen colour lands on their seat");
+    assert.equal(seatB.colorIndex, 1, "Player1's chosen colour lands on their seat");
   });
 
   // ---- simultaneous mapping ------------------------------------------------
@@ -306,15 +374,109 @@ describe("perfect palace", () => {
     assert.equal(room.state.currentTurn, "");
   });
 
-  it("removes a departing player from a 3p game and plays on", async () => {
-    const { room, clients } = await startedGame(21, 3);
+  it("holds a departed seat as bot-played and lets a newcomer reclaim it", async () => {
+    const { room, clients } = await startedGame(21, 3, (r) => (r.botDelayMs = 1));
     await completeMapping(room, clients);
-    const leaver = room.engine.players[1]!.id; // p2 (not the current player)
-    await clients[1]!.leave(true);
-    await until(() => room.engine.players.find((p) => p.id === leaver)?.removed === true);
-    assert.equal(room.state.phase, Phase.PLAYING, "game continues with 2 players");
-    assert.equal(room.state.seats[1]!.gone, true);
-    // the Bailiff is never left in a removed player's hands.
-    assert.ok(room.state.bailiffBy !== leaver);
+
+    // The current player leaves for good → their seat is HELD (not removed) and
+    // immediately auto-played by the bot policy.
+    const goneSeat = room.engine.players.findIndex((p) => p.id === room.engine.currentPlayerId);
+    await clientFor(room, clients, goneSeat)!.leave(true);
+    await until(() => room.state.seats[goneSeat]!.gone === true);
+    assert.equal(room.state.phase, Phase.PLAYING, "the game keeps going");
+    assert.equal(room.seatOrder[goneSeat], "", "the seat is vacated");
+    assert.equal(room.engine.players[goneSeat]!.removed, false, "the seat is kept, not removed");
+    // it plays on autopilot: the held seat takes turns on its own
+    const before = room.engine.players[goneSeat]!.baseTurnsTaken;
+    await until(() => room.engine.players[goneSeat]!.baseTurnsTaken > before, 4000);
+
+    // A brand-new client joins mid-game and takes over the seat.
+    const newcomer = await colyseus.connectTo(room, { nickname: "Latecomer" });
+    await until(() => room.state.seats[goneSeat]!.gone === false, 3000);
+    assert.equal(room.seatOrder[goneSeat], newcomer.sessionId, "seatOrder rebound to the newcomer");
+    assert.equal(room.state.seats[goneSeat]!.nickname, "Latecomer");
+    assert.ok([...room.state.log].some((l) => l.includes("takes over")));
+  });
+
+  it("rejects a mid-game joiner when no seat is open", async () => {
+    const { room } = await startedGame(22, 3);
+    let rejected = false;
+    try {
+      await colyseus.connectTo(room, { nickname: "Crasher" });
+    } catch {
+      rejected = true;
+    }
+    assert.ok(rejected, "the join was refused (no vacated seat)");
+    assert.equal(room.state.players.size, 3, "roster unchanged");
+    assert.equal(room.state.phase, Phase.PLAYING);
+  });
+
+  it("ends a bot game as abandoned when the last human leaves", async () => {
+    const room = (await colyseus.createRoom(PERFECT_PALACE, { seed: 23 })) as unknown as PerfectPalaceRoom;
+    room.botDelayMs = 1;
+    const host = await colyseus.connectTo(room, { nickname: "Solo" });
+    host.send(LobbyMsg.ADD_BOT, {});
+    host.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 3);
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    await host.leave(true); // only bots remain
+    await until(() => room.state.phase === Phase.ENDED);
+    assert.equal(room.state.endReason, EndReason.ABANDONED);
+  });
+
+  // ---- bots ----------------------------------------------------------------
+
+  it("auto-plays AI players and drives a 1-human + 2-bot game to a win", async () => {
+    const room = (await colyseus.createRoom(PERFECT_PALACE, { seed: 24 })) as unknown as PerfectPalaceRoom;
+    room.botDelayMs = 1;
+    const host = await colyseus.connectTo(room, { nickname: "Human" });
+    host.send(LobbyMsg.ADD_BOT, {});
+    host.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 3);
+    assert.ok([...room.state.players.values()].filter((p) => p.isBot).length === 2, "two bots seated");
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+
+    // The human locks their card; the bots auto-lock → the reveal fires on its own.
+    host.send(PerfectPalaceMsg.ACTION, { type: "mapping/setInitial", card: validCard() });
+    await until(() => room.engine.phase !== "initial-mapping", 4000);
+
+    // Put everyone one build from a palace so the game finishes quickly, then let
+    // the human (policy-driven) and the auto-played bots play it out to a win.
+    room.engine = {
+      ...room.engine,
+      players: room.engine.players.map((p) => ({ ...p, inventory: { ...p.inventory, threeStoryBuildings: 3 } })),
+    };
+    (room as any).syncFromEngine();
+    await driveToEnd(room, [host]);
+    await until(() => room.state.phase === Phase.ENDED, 5000);
+    assert.ok(room.state.endReason.startsWith("win:"), `a winner emerged (${room.state.endReason})`);
+  });
+
+  it("saves and resumes a game that includes a bot", async () => {
+    const room = (await colyseus.createRoom(PERFECT_PALACE, { seed: 25 })) as unknown as PerfectPalaceRoom;
+    room.botDelayMs = 1;
+    const host = await colyseus.connectTo(room, { nickname: "Host" });
+    host.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 2);
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    host.send(PerfectPalaceMsg.ACTION, { type: "mapping/setInitial", card: validCard() });
+    await until(() => room.engine.phase !== "initial-mapping", 4000);
+    const snapshot = JSON.parse(JSON.stringify(room.buildSave()));
+
+    const room2 = (await colyseus.createRoom(PERFECT_PALACE, { seed: 991 })) as unknown as PerfectPalaceRoom;
+    room2.botDelayMs = 1;
+    const host2 = await colyseus.connectTo(room2, { nickname: "Host" });
+    host2.send(LobbyMsg.LOAD, snapshot);
+    await until(() => room2.state.loadedSave !== "");
+    assert.ok([...room2.state.players.values()].some((p) => p.isBot), "the saved bot was re-seated");
+    host2.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING, 4000);
+    // Resumed past the opening, not a fresh game. (Don't compare live engine
+    // fields — both rooms' bots keep playing and would race the assertion.)
+    assert.notEqual(room2.engine.phase, "initial-mapping", "resumed an in-progress game, not a fresh one");
+    assert.equal(room2.engine.players.length, snapshot.engine.players.length, "the full roster resumed");
   });
 });
