@@ -2,10 +2,15 @@
  * Every game registers itself here with one entry.
  * The home screen's "create a game" menu is generated from this list.
  */
-import { ARENA, CATAN, SPACE_CHASE, SPLENDOR, TICTACTOE } from "@backbone/shared";
+import { ARENA, CATAN, PERFECT_PALACE, SPACE_CHASE, SPLENDOR, TICTACTOE } from "@backbone/shared";
 import type { GameDefinition } from "../framework/GameView.js";
 import { ArenaView } from "./arena/ArenaView.js";
 import { CatanView, renderCatanGameSummary, renderCatanLobbySettings } from "./catan/CatanView.js";
+import {
+  PerfectPalaceView,
+  renderPerfectPalaceGameSummary,
+  renderPerfectPalaceLobbySettings,
+} from "./perfectpalace/PerfectPalaceView.js";
 import {
   renderSpaceChaseGameSummary,
   renderSpaceChaseLobbySettings,
@@ -54,6 +59,14 @@ export const games: GameDefinition[] = [
     createView: () => new SpaceChaseView(),
     renderLobbySettings: renderSpaceChaseLobbySettings,
     renderGameSummary: renderSpaceChaseGameSummary,
+  },
+  {
+    gameType: PERFECT_PALACE,
+    displayName: "The Perfect Palace",
+    description: "A regal, Monopoly-style race to build palaces — 2–6 players.",
+    createView: () => new PerfectPalaceView(),
+    renderLobbySettings: renderPerfectPalaceLobbySettings,
+    renderGameSummary: renderPerfectPalaceGameSummary,
   },
 ];
 

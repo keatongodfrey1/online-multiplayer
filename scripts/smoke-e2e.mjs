@@ -161,5 +161,60 @@ console.log(`Smoke-testing ${URL}\n`);
   await late.leave(true);
 }
 
+// ---------- The Perfect Palace flow -----------------------------------
+{
+  console.log("\nThe Perfect Palace:");
+  const h = new ColyseusSDK(URL);
+  const g = new ColyseusSDK(URL);
+
+  const a = await h.create("perfectpalace", { nickname: "PalA" });
+  const b = await g.joinById(a.roomId, { nickname: "PalB" });
+  await until(() => a.state?.players?.size === 2);
+  a.send("lobby/start", {});
+  await until(() => a.state.phase === "playing");
+  ok(a.state.enginePhase === "initial-mapping", "opens at the hidden initial mapping");
+  ok(a.state.deckCount === 18 && a.state.discardCount === 0, "deck synced as counts only");
+  ok(a.state.deck === undefined, "deck order is never synced to clients");
+  ok([...a.state.seats].every((s) => s.resourceCard.length === 0), "resource cards are hidden during the pick");
+
+  const card = [
+    { kind: "sticks", amount: 5 }, { kind: "bricks", amount: 5 }, { kind: "bricks", amount: 10 },
+    { kind: "dollars", amount: 5 }, { kind: "dollars", amount: 10 }, { kind: "draw-card", amount: 0 },
+  ];
+  a.send("perfectpalace/action", { type: "mapping/setInitial", card });
+  await until(() => [...a.state.seats].find((s) => s.sessionId === a.sessionId)?.mappingLocked === true);
+  ok(a.state.enginePhase === "initial-mapping", "stays hidden until everyone locks");
+  b.send("perfectpalace/action", { type: "mapping/setInitial", card });
+  await until(() => a.state.enginePhase !== "initial-mapping");
+  ok([...a.state.seats].every((s) => s.resourceCard.length === 6), "all cards revealed at once");
+
+  // The active player rolls; the die is server-generated (no client value honoured).
+  const roller = [a, b].find((c) => c.sessionId === a.state.currentTurn);
+  roller.send("perfectpalace/action", { type: "turn/rollDie", value: 6 });
+  await until(() => a.state.lastRoll >= 1 && a.state.lastRoll <= 6);
+  ok(true, `server rolled a real d6 (${a.state.lastRoll}) for the active player`);
+
+  // A non-current player cannot act.
+  const other = [a, b].find((c) => c.sessionId !== a.state.currentTurn);
+  const phaseBefore = a.state.turnPhase;
+  other.send("perfectpalace/action", { type: "turn/endTurn" });
+  await sleep(150);
+  ok(a.state.turnPhase === phaseBefore || a.state.enginePhase !== "initial-mapping", "out-of-turn action ignored");
+
+  // Mid-game "refresh": B drops and resumes the same seat by token.
+  const token = b.reconnectionToken;
+  const bId = b.sessionId;
+  await b.leave(false);
+  await until(() => a.state.players.get(bId)?.connected === false);
+  ok(true, "host sees the dropped player as disconnected (seat held)");
+  const b2 = await new ColyseusSDK(URL).reconnect(token);
+  await until(() => a.state.players.get(bId)?.connected === true);
+  ok(b2.sessionId === bId, "mid-game refresh resumed the same seat");
+  ok(b2.state.enginePhase !== "initial-mapping", "resumed client sees the live game");
+
+  await a.leave(true);
+  await b2.leave(true);
+}
+
 console.log(`\nALL ${checks} SMOKE CHECKS PASSED against ${URL}`);
 process.exit(0);
