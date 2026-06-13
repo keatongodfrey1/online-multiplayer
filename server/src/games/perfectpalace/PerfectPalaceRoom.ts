@@ -39,7 +39,7 @@ import {
 } from "@backbone/shared";
 import { ArraySchema } from "@colyseus/schema";
 import type { Delayed } from "@colyseus/timer";
-import { BaseGameRoom } from "../../framework/BaseGameRoom.js";
+import { BaseGameRoom, type FrameworkSaveSeat } from "../../framework/BaseGameRoom.js";
 import { sanitizeAction } from "./sanitize.js";
 import { parseSave, serializeSave, type ParsedSave, type SaveSeat } from "./save.js";
 
@@ -47,6 +47,7 @@ const { chooseAction, createReadyState, tryReduce, rollDieFrom, rankPlayers, tot
   PerfectPalaceEngine;
 type GameState = PerfectPalaceEngine.GameState;
 type GameAction = PerfectPalaceEngine.GameAction;
+type Difficulty = PerfectPalaceEngine.Difficulty;
 type EngineInventory = PerfectPalaceEngine.PlayerInventory;
 
 const LOG_CAP = 60;
@@ -80,6 +81,8 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
   private lastDieBy = "";
   /** Display colour index per engine seat (lobby picks honoured; see buildColorIndices). */
   private seatColorIndex: number[] = [];
+  /** Difficulty per bot sessionId, chosen when the host seats it. */
+  private botDifficulty = new Map<string, Difficulty>();
   /** Pace of an AI / vacated-seat decision (~a second reads as "it took a turn"). */
   public botDelayMs = 850;
   private autoTimer?: Delayed;
@@ -159,11 +162,15 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
 
   /** Current game -> save blob. Public for white-box tests. */
   public buildSave(): object {
-    const seats: SaveSeat[] = this.seatOrder.map((sessionId, i) => ({
-      nickname: this.state.seats[i]?.nickname ?? `Seat ${i + 1}`,
-      isBot: sessionId ? this.state.players.get(sessionId)?.isBot === true : false,
-      gone: !sessionId,
-    }));
+    const seats: SaveSeat[] = this.seatOrder.map((sessionId, i) => {
+      const isBot = sessionId ? this.state.players.get(sessionId)?.isBot === true : false;
+      return {
+        nickname: this.state.seats[i]?.nickname ?? `Seat ${i + 1}`,
+        isBot,
+        gone: !sessionId,
+        ...(isBot ? { difficulty: this.botDifficulty.get(sessionId) ?? "normal" } : {}),
+      };
+    });
     // turnCount label = the furthest-along base turn (equal-turns accounting).
     const turnCount = this.engine.players.reduce((m, p) => Math.max(m, p.baseTurnsTaken), 0);
     return serializeSave({ engine: this.engine, seats, turnCount });
@@ -358,7 +365,11 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
   private playAuto(seatIdx: number): void {
     const engineId = this.engine.players[seatIdx]?.id;
     if (!engineId) return;
-    const action = chooseAction(this.engine, engineId);
+    // A seated bot plays at its chosen difficulty; a vacated seat or a timed-out
+    // human turn is finished at "normal".
+    const sid = this.seatOrder[seatIdx];
+    const difficulty = (sid && this.botDifficulty.get(sid)) || "normal";
+    const action = chooseAction(this.engine, engineId, difficulty);
     // Rolls go through the same server-owned die path as a human's (so the bot's
     // rolls animate too); everything else dispatches directly.
     const ok =
@@ -576,11 +587,28 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
 
   // ---- bots (framework owns roster entry / removal) ------------------------
 
-  protected override onBotAdded(): void {
-    // Stateless policy — nothing to set up. The bot plays once the game starts.
+  /** Read + clamp a difficulty from an ADD_BOT payload (default "normal"). */
+  private parseDifficulty(options: unknown): Difficulty {
+    const d = (options as { difficulty?: unknown } | null)?.difficulty;
+    return d === "easy" || d === "hard" ? d : "normal";
   }
-  protected override onBotRemoved(): void {}
-  protected override onLoadedBotSeated(): void {}
+
+  protected override onBotAdded(bot: BasePlayer, options: unknown): void {
+    const difficulty = this.parseDifficulty(options);
+    this.botDifficulty.set(bot.sessionId, difficulty);
+    bot.nickname = `${bot.nickname} (${difficulty})`; // e.g. "Botty (hard)"
+  }
+
+  protected override onLoadedBotSeated(bot: BasePlayer, savedSeat: FrameworkSaveSeat): void {
+    const saved = (this.pendingLoad?.payload as ParsedSave | undefined)?.seats.find(
+      (s) => s.isBot && s.nickname.toLowerCase() === savedSeat.nickname.toLowerCase(),
+    );
+    this.botDifficulty.set(bot.sessionId, saved?.difficulty ?? "normal");
+  }
+
+  protected override onBotRemoved(sessionId: string): void {
+    this.botDifficulty.delete(sessionId);
+  }
 
   protected override onGameEnded(): void {
     this.autoTimer?.clear();

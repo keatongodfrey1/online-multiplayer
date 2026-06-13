@@ -1,33 +1,36 @@
-// The Perfect Palace bot policy — a pure, deterministic "plays a real game"
-// strategy. Given the engine state and a seat's engine id, it returns ONE legal
-// action; the room loops it (paced for AI players, and for a dropped human's
-// seat until someone reclaims it). It is used identically for AI opponents and
-// for auto-playing vacated seats, so it must always make progress toward
+// The Perfect Palace bot policy — a pure, deterministic strategy. Given the
+// engine state, a seat's engine id, and a difficulty, it returns ONE legal
+// action; the room loops it (for AI players, for a dropped human's seat until
+// reclaim, and to finish a timed-out turn). It must always make progress toward
 // endTurn and never invent randomness: roll actions carry no value (the reducer
 // derives turn/rollDie; the room injects the seeded die for duel rolls).
 //
-// Strategy: lock the default resource card; roll; skip risky Bailiff steals;
-// decline costly alliances; pay fines from the cheapest items; in a duel stake
-// the cheapest affordable minimum then roll; and in optional-actions greedily
-// build up the construction ladder (buying the bricks/sticks the next tier
-// needs) before ending the turn.
+// Difficulty:
+//  - easy:   builds only from on-hand resources, never buys — a pushover.
+//  - normal: greedy build-the-ladder (buys bricks/sticks + staff) — the default,
+//            also used for vacated seats and timed-out turns.
+//  - hard:   normal PLUS aggression — Bailiff-steals from the leader, accepts
+//            alliances, grabs the Queen, raises duel stakes, buys a Knight.
 
 import type { DuelStake, GameState, Player, PlayerId } from './types.js'
 import type { GameAction } from './actions.js'
 import { getSquare } from './board.js'
 import { DUEL_MIN_STAKE, PRICE, RECIPE } from './constants.js'
+import { totalPoints } from './scoring.js'
+
+export type Difficulty = 'easy' | 'normal' | 'hard'
 
 function seatOf(state: GameState, id: PlayerId): Player | undefined {
   return state.players.find((p) => p.id === id)
 }
 
 /**
- * The single next action for `id` to take in the current state. The room only
- * calls this for a seat that is genuinely awaiting (the active player, or — in
- * the simultaneous mapping/duel phases — any seat that still owes an action), so
- * the relevant branch always applies. endTurn is the safe terminal fallback.
+ * The single next action for `id`. The room only calls this for a seat that is
+ * genuinely awaiting (the active player, or — in mapping/duel — any seat still
+ * owing an action), so the relevant branch always applies. endTurn is the safe
+ * terminal fallback.
  */
-export function chooseAction(state: GameState, id: PlayerId): GameAction {
+export function chooseAction(state: GameState, id: PlayerId, difficulty: Difficulty = 'normal'): GameAction {
   const me = seatOf(state, id)
   if (!me) return { type: 'turn/endTurn' }
 
@@ -42,7 +45,7 @@ export function chooseAction(state: GameState, id: PlayerId): GameAction {
     const stakeSet =
       d.stake.dollars + d.stake.bricks + d.stake.sticks + d.stake.walls + d.stake.roofs + d.stake.rooms > 0
     if (!stakeSet && state.currentPlayerId === id) {
-      return { type: 'turn/duelSetStake', stake: cheapestStake(me) }
+      return { type: 'turn/duelSetStake', stake: duelStake(me, difficulty) }
     }
     // Value is injected by the room from the seeded PRNG (clients/bots never roll).
     return { type: 'turn/duelRollForPlayer', id, value: 0 }
@@ -52,31 +55,73 @@ export function chooseAction(state: GameState, id: PlayerId): GameAction {
   switch (state.turn.phase) {
     case 'turn-start':
       if (me.dungeon.inDungeon && me.inventory.pardonCards > 0) return { type: 'dungeon/redeemPardon' }
-      return { type: 'turn/rollDie' } // skip the optional pre-roll Bailiff steal
+      if (difficulty === 'hard') {
+        const steal = hardSteal(state, me, 'turn/bailiffStealPreRoll')
+        if (steal) return steal
+      }
+      return { type: 'turn/rollDie' }
     case 'rolling':
       return { type: 'turn/rollDie' }
     case 'pre-move-bailiff':
-      return { type: 'turn/bailiffStealPreMoveSkip' }
+      return (difficulty === 'hard' && hardSteal(state, me, 'turn/bailiffStealPreMove')) || { type: 'turn/bailiffStealPreMoveSkip' }
     case 'post-roll-bailiff':
-      return { type: 'turn/bailiffStealPostRollSkip' }
+      return (difficulty === 'hard' && hardSteal(state, me, 'turn/bailiffStealPostRoll')) || { type: 'turn/bailiffStealPostRollSkip' }
     case 'square-effect': {
       if (state.turn.pendingFine) return payFineAction(me, state.turn.pendingFine.amount)
       const sq = getSquare(me.position)
-      if (sq.effect.kind === 'alliance-offer') return { type: 'turn/declineAlliance' }
+      if (sq.effect.kind === 'alliance-offer') {
+        const c = sq.effect.cost
+        const canAfford = me.inventory.bricks >= c.bricks && me.inventory.sticks >= c.sticks
+        return difficulty === 'hard' && canAfford ? { type: 'turn/acceptAlliance' } : { type: 'turn/declineAlliance' }
+      }
       if (sq.effect.kind === 'bricks-or-wall') return { type: 'turn/gift10Bricks' }
       return { type: 'turn/advancePhase' }
     }
     case 'optional-actions':
-      return optionalAction(me)
+      return optionalAction(me, difficulty)
     default:
       return { type: 'turn/endTurn' }
   }
 }
 
-/** The cheapest minimum stake this player can afford (DESIGN §13). */
-function cheapestStake(p: Player): DuelStake {
+/** The highest-points opponent the Bailiff can legally rob (not me/removed, no
+ *  Knight, and holding something), or undefined. */
+function leaderTarget(state: GameState, myId: PlayerId): Player | undefined {
+  let best: Player | undefined
+  for (const p of state.players) {
+    if (p.id === myId || p.removed || p.inventory.knight) continue
+    const inv = p.inventory
+    const hasLoot = inv.dollars >= 5 || inv.walls >= 1 || inv.roofs >= 1 || inv.bricks >= 5 || inv.sticks >= 5
+    if (!hasLoot) continue
+    if (!best || totalPoints(inv) > totalPoints(best.inventory)) best = p
+  }
+  return best
+}
+
+/** A Hard Bailiff steal of the leader's best loot, or undefined when it can't
+ *  steal now (doesn't hold it, already used it this sequence, or no target). */
+function hardSteal(
+  state: GameState,
+  me: Player,
+  type: 'turn/bailiffStealPreRoll' | 'turn/bailiffStealPreMove' | 'turn/bailiffStealPostRoll',
+): GameAction | undefined {
+  if (state.bailiff.kind !== 'held' || state.bailiff.by !== me.id) return undefined
+  if (state.turn.bailiffStealUsedThisTurnSequence) return undefined
+  const t = leaderTarget(state, me.id)
+  if (!t) return undefined
+  const inv = t.inventory
+  const item =
+    inv.dollars >= 5 ? 'dollars' : inv.walls >= 1 ? 'wall' : inv.roofs >= 1 ? 'roof' : inv.bricks >= 5 ? 'bricks' : 'sticks'
+  return { type, targetId: t.id, item }
+}
+
+/** Duel stake: Hard stakes bigger when flush; otherwise the cheapest minimum. */
+function duelStake(p: Player, difficulty: Difficulty): DuelStake {
   const z: DuelStake = { dollars: 0, bricks: 0, sticks: 0, walls: 0, roofs: 0, rooms: 0 }
   const inv = p.inventory
+  if (difficulty === 'hard' && inv.dollars >= 2 * DUEL_MIN_STAKE.dollars) {
+    return { ...z, dollars: 2 * DUEL_MIN_STAKE.dollars }
+  }
   if (inv.dollars >= DUEL_MIN_STAKE.dollars) return { ...z, dollars: DUEL_MIN_STAKE.dollars }
   if (inv.bricks >= DUEL_MIN_STAKE.bricks) return { ...z, bricks: DUEL_MIN_STAKE.bricks }
   if (inv.sticks >= DUEL_MIN_STAKE.sticks) return { ...z, sticks: DUEL_MIN_STAKE.sticks }
@@ -88,9 +133,8 @@ function cheapestStake(p: Player): DuelStake {
 
 /**
  * Forfeit the cheapest items covering the fine. The engine enforces no-overpay
- * (exact, or the max feasible below owed when it can't be hit exactly), so spend
- * $1 items (bricks then sticks) first to land on the exact amount, then use $5
- * items (walls/roofs) only for whole-$5 chunks of any remainder.
+ * (exact, or the max feasible below owed), so spend $1 items (bricks then sticks)
+ * to land on the exact amount, then $5 items (walls/roofs) for whole-$5 chunks.
  */
 function payFineAction(p: Player, owed: number): GameAction {
   const inv = p.inventory
@@ -107,19 +151,17 @@ function payFineAction(p: Player, owed: number): GameAction {
 }
 
 /**
- * Greedy build-the-ladder, one step per call (the room loops). Build the highest
- * tier that is actually legal — including the staff prerequisites the engine
- * enforces (a Building needs any 1 staff; a 3-Story needs a Server + Chef +
- * Cleaner) — then buy the cheapest missing input toward the next tier, else end
- * the turn. Checks mirror the engine's canBuild/canBuy so every emitted action
- * makes real progress (and a rejected one safely falls back to endTurn).
+ * Build the highest legal tier (mirrors the engine's canBuild incl. staff
+ * prereqs). Easy stops there (never buys); Normal/Hard then buy the cheapest
+ * missing input toward the next tier. Hard also grabs the Queen (200 pts) and a
+ * Knight when flush. One step per call (the room loops).
  */
-function optionalAction(p: Player): GameAction {
+function optionalAction(p: Player, difficulty: Difficulty): GameAction {
   const inv = p.inventory
   const anyStaff = inv.servers + inv.chefs + inv.cleaners + inv.wholeHouseCleaners >= 1
   const hasCleaner = inv.cleaners + inv.wholeHouseCleaners >= 1
 
-  // 1) Build the highest legal tier.
+  // 1) Build the highest legal tier (all difficulties build what they can).
   if (inv.threeStoryBuildings >= RECIPE.palace.threeStoryBuildings)
     return { type: 'turn/build', item: 'palace', count: 1 }
   if (inv.buildings >= RECIPE.threeStoryBuilding.buildings && inv.servers >= 1 && inv.chefs >= 1 && hasCleaner)
@@ -131,8 +173,14 @@ function optionalAction(p: Player): GameAction {
   if (inv.sticks >= RECIPE.roof.sticks) return { type: 'turn/build', item: 'roof', count: 1 }
   if (inv.bricks >= RECIPE.wall.bricks) return { type: 'turn/build', item: 'wall', count: 1 }
 
-  // 2) Buy a staff member that unlocks the next build (the bot has owned a Room,
-  //    so the Server/Chef/Cleaner shop prereq is satisfied).
+  if (difficulty === 'easy') return { type: 'turn/endTurn' } // Easy never buys.
+
+  // Hard: grab the Queen (200 pts) the moment it can afford it outright.
+  if (difficulty === 'hard' && !inv.queen && inv.dollars >= PRICE.queen)
+    return { type: 'turn/buy', item: 'queen' }
+
+  // 2) Buy staff to unlock the next build (the bot has owned a Room, so the
+  //    Server/Chef/Cleaner shop prereq is satisfied).
   if (inv.rooms >= RECIPE.building.rooms && !anyStaff && inv.dollars >= PRICE.server)
     return { type: 'turn/buy', item: 'server' }
   if (inv.buildings >= RECIPE.threeStoryBuilding.buildings) {
@@ -146,5 +194,10 @@ function optionalAction(p: Player): GameAction {
     return { type: 'turn/buy', item: 'brick', quantity: 5 }
   if (inv.sticks < RECIPE.roof.sticks && inv.dollars >= 5 * PRICE.stick)
     return { type: 'turn/buy', item: 'stick', quantity: 5 }
+
+  // Hard: a Knight for Bailiff protection once comfortably rich.
+  if (difficulty === 'hard' && !inv.knight && inv.dollars >= PRICE.knight + 100)
+    return { type: 'turn/buy', item: 'knight' }
+
   return { type: 'turn/endTurn' }
 }

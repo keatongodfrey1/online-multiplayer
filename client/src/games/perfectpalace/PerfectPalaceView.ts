@@ -735,7 +735,14 @@ export function renderPerfectPalaceLobbySettings(
   const state = room.state as BaseState;
   const seatsLeft = (state.maxPlayers || 6) - state.players.size;
   const addBot = ctx.isHost
-    ? `<button id="pp-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>➕ Add an AI player 🤖</button>`
+    ? `<div class="pp-lobby-row">
+        <select id="pp-bot-difficulty" class="pp-mini-select" title="AI difficulty">
+          <option value="easy">Easy</option>
+          <option value="normal" selected>Normal</option>
+          <option value="hard">Hard</option>
+        </select>
+        <button id="pp-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>➕ Add AI 🤖</button>
+      </div>`
     : "";
 
   // Each player picks their palace colour; colours taken by others are locked out.
@@ -762,7 +769,8 @@ export function renderPerfectPalaceLobbySettings(
     ${addBot}
     <div class="pp-saves-block"></div>`;
   container.querySelector<HTMLButtonElement>("#pp-add-bot")?.addEventListener("click", () => {
-    room.send(LobbyMsg.ADD_BOT, {});
+    const difficulty = container.querySelector<HTMLSelectElement>("#pp-bot-difficulty")?.value ?? "normal";
+    room.send(LobbyMsg.ADD_BOT, { difficulty });
   });
   container.querySelectorAll<HTMLButtonElement>(".pp-color-swatch").forEach((btn) => {
     btn.addEventListener("click", () => {

@@ -2067,3 +2067,7 @@ button.spl-gem.selected {
 .pp-rules-body p { margin: 4px 0; font-size: 13.5px; color: var(--pp-soft, #5a4e6f); }
 .pp-rules-body ul { margin: 4px 0; padding-left: 20px; font-size: 13.5px; color: var(--pp-soft, #5a4e6f); }
 .pp-rules-body li { margin: 2px 0; }
+
+/* Perfect Palace — lobby controls (difficulty + turn timer) */
+.pp-lobby-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+.pp-mini-select { padding: 8px 10px; border-radius: 8px; }

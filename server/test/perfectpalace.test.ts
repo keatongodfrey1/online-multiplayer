@@ -479,4 +479,34 @@ describe("perfect palace", () => {
     assert.notEqual(room2.engine.phase, "initial-mapping", "resumed an in-progress game, not a fresh one");
     assert.equal(room2.engine.players.length, snapshot.engine.players.length, "the full roster resumed");
   });
+
+  it("seats AI players at a chosen difficulty and keeps it across save/resume", async () => {
+    const room = (await colyseus.createRoom(PERFECT_PALACE, { seed: 40 })) as unknown as PerfectPalaceRoom;
+    room.botDelayMs = 1;
+    const host = await colyseus.connectTo(room, { nickname: "Host" });
+    host.send(LobbyMsg.ADD_BOT, { difficulty: "hard" });
+    await until(() => room.state.players.size === 2);
+    const bot = [...room.state.players.values()].find((p) => p.isBot)!;
+    assert.ok(bot.nickname.includes("(hard)"), `bot named by difficulty: ${bot.nickname}`);
+
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    host.send(PerfectPalaceMsg.ACTION, { type: "mapping/setInitial", card: validCard() });
+    await until(() => room.engine.phase !== "initial-mapping", 4000);
+    const snapshot = JSON.parse(JSON.stringify(room.buildSave()));
+    assert.equal(snapshot.seats.find((s: any) => s.isBot).difficulty, "hard", "difficulty saved in the blob");
+
+    const room2 = (await colyseus.createRoom(PERFECT_PALACE, { seed: 992 })) as unknown as PerfectPalaceRoom;
+    room2.botDelayMs = 1;
+    const h2 = await colyseus.connectTo(room2, { nickname: "Host" });
+    h2.send(LobbyMsg.LOAD, snapshot);
+    await until(() => room2.state.loadedSave !== "");
+    h2.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING, 4000);
+    assert.equal(
+      JSON.parse(JSON.stringify(room2.buildSave())).seats.find((s: any) => s.isBot).difficulty,
+      "hard",
+      "difficulty restored on resume",
+    );
+  });
 });
