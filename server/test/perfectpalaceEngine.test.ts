@@ -2258,11 +2258,11 @@ describe('Bot policy', () => {
 
   // One policy action for the first awaiting seat, with the room's dice
   // injection + safety net (a rejected action falls back to ending the turn).
-  function step(s: GameState): { state: GameState; rejected: boolean; stalled: boolean } {
+  function step(s: GameState, difficulty: any = 'normal'): { state: GameState; rejected: boolean; stalled: boolean } {
     const seats = awaiting(s);
     if (!seats.length) return { state: s, rejected: false, stalled: true };
     const id = seats[0]!;
-    let action = chooseAction(s, id);
+    let action = chooseAction(s, id, difficulty);
     if (action.type === 'turn/duelRollForPlayer') {
       const r = rollDieFrom(s);
       s = { ...s, rngState: r.rngState };
@@ -2274,12 +2274,12 @@ describe('Bot policy', () => {
     return { state: fb.ok ? autoAdvance(fb.state) : s, rejected: true, stalled: !fb.ok };
   }
 
-  function playBotGame(seed: number, players: number) {
+  function playBotGame(seed: number, players: number, difficulty: any = 'normal', cap = 25000) {
     let s = createReadyState(Array.from({ length: players }, (_, i) => ({ name: `Bot${i + 1}` })), seed);
     let rejects = 0;
     let i = 0;
-    for (; i < 25000 && s.phase !== 'game-over'; i++) {
-      const r = step(s);
+    for (; i < cap && s.phase !== 'game-over'; i++) {
+      const r = step(s, difficulty);
       assert.ok(!r.stalled, `policy stalled at action ${i} (${s.phase}/${s.turn.phase})`);
       if (r.rejected) rejects++;
       s = r.state;
@@ -2299,6 +2299,21 @@ describe('Bot policy', () => {
   it('finishes 2- and 6-player bot games without stalling', () => {
     expect(playBotGame(99, 2).state.phase).toBe('game-over');
     expect(playBotGame(2024, 6).state.phase).toBe('game-over');
+  });
+
+  it('Hard bots play aggressively and still finish a game legally', () => {
+    const { state, rejects } = playBotGame(31, 3, 'hard');
+    expect(state.phase).toBe('game-over');
+    expect(rejects).toBe(0);
+  });
+
+  it('Easy bots progress through many turns without stalling or illegal moves', () => {
+    const { state, rejects } = playBotGame(32, 3, 'easy', 8000);
+    // Easy never BUYS, so a bot-only easy game rarely reaches a palace — the point
+    // is that it keeps taking legal turns and never deadlocks.
+    const turns = state.players.reduce((n, p) => n + p.baseTurnsTaken, 0);
+    expect(turns > 30).toBe(true);
+    expect(rejects).toBe(0);
   });
 
   it('builds the ladder greedily when flush with resources', () => {

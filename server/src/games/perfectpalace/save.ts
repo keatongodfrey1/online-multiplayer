@@ -42,6 +42,8 @@ export interface SaveSeat {
   isBot: boolean;
   /** Seat had left for good when the game was saved. */
   gone: boolean;
+  /** AI difficulty for a bot seat (restored on resume). */
+  difficulty?: "easy" | "normal" | "hard";
 }
 
 export interface ParsedSave {
@@ -65,7 +67,12 @@ export function serializeSave({ engine, seats, turnCount }: SaveInput): object {
     game: "perfectpalace",
     savedAt: Date.now(),
     turnCount,
-    seats: seats.map((s) => ({ nickname: s.nickname, isBot: s.isBot, gone: s.gone })),
+    seats: seats.map((s) => ({
+      nickname: s.nickname,
+      isBot: s.isBot,
+      gone: s.gone,
+      ...(s.difficulty ? { difficulty: s.difficulty } : {}),
+    })),
     engine: clone,
   };
 }
@@ -165,7 +172,8 @@ export function parseSave(raw: unknown): ParsedSave | null {
     const key = s.nickname.toLowerCase();
     if (seenNames.has(key)) return null; // unique nicknames
     seenNames.add(key);
-    seats.push({ nickname: s.nickname, isBot: s.isBot, gone: s.gone });
+    const difficulty = s.difficulty === "easy" || s.difficulty === "hard" ? s.difficulty : "normal";
+    seats.push({ nickname: s.nickname, isBot: s.isBot, gone: s.gone, difficulty });
   }
   if (seats.every((s) => s.gone)) return null; // someone must be able to resume
 

@@ -479,4 +479,64 @@ describe("perfect palace", () => {
     assert.notEqual(room2.engine.phase, "initial-mapping", "resumed an in-progress game, not a fresh one");
     assert.equal(room2.engine.players.length, snapshot.engine.players.length, "the full roster resumed");
   });
+
+  it("seats AI players at a chosen difficulty and keeps it across save/resume", async () => {
+    const room = (await colyseus.createRoom(PERFECT_PALACE, { seed: 40 })) as unknown as PerfectPalaceRoom;
+    room.botDelayMs = 1;
+    const host = await colyseus.connectTo(room, { nickname: "Host" });
+    host.send(LobbyMsg.ADD_BOT, { difficulty: "hard" });
+    await until(() => room.state.players.size === 2);
+    const bot = [...room.state.players.values()].find((p) => p.isBot)!;
+    assert.ok(bot.nickname.includes("(hard)"), `bot named by difficulty: ${bot.nickname}`);
+
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    host.send(PerfectPalaceMsg.ACTION, { type: "mapping/setInitial", card: validCard() });
+    await until(() => room.engine.phase !== "initial-mapping", 4000);
+    const snapshot = JSON.parse(JSON.stringify(room.buildSave()));
+    assert.equal(snapshot.seats.find((s: any) => s.isBot).difficulty, "hard", "difficulty saved in the blob");
+
+    const room2 = (await colyseus.createRoom(PERFECT_PALACE, { seed: 992 })) as unknown as PerfectPalaceRoom;
+    room2.botDelayMs = 1;
+    const h2 = await colyseus.connectTo(room2, { nickname: "Host" });
+    h2.send(LobbyMsg.LOAD, snapshot);
+    await until(() => room2.state.loadedSave !== "");
+    h2.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING, 4000);
+    assert.equal(
+      JSON.parse(JSON.stringify(room2.buildSave())).seats.find((s: any) => s.isBot).difficulty,
+      "hard",
+      "difficulty restored on resume",
+    );
+  });
+
+  // ---- turn timer ----------------------------------------------------------
+
+  it("arms a turn deadline for a human turn and the AI finishes a timed-out turn", async () => {
+    const room = (await colyseus.createRoom(PERFECT_PALACE, { seed: 50 })) as unknown as PerfectPalaceRoom;
+    room.botDelayMs = 1;
+    const a = await colyseus.connectTo(room, { nickname: "P0" });
+    const b = await colyseus.connectTo(room, { nickname: "P1" });
+    await until(() => room.state.players.size === 2);
+    a.send(PerfectPalaceMsg.CONFIG, { turnSeconds: 30 });
+    await until(() => room.state.turnSeconds === 30);
+    a.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    await completeMapping(room, [a, b]);
+
+    // A connected human's single-actor turn → a deadline is armed.
+    assert.ok(room.state.turnDeadline > 0, "deadline armed for the human turn");
+    const before = room.engine.currentPlayerId;
+    // Simulate the clock running out: the AI finishes the turn and it advances.
+    (room as any).onTurnTimeout();
+    await until(() => room.engine.currentPlayerId !== before, 4000);
+    assert.notEqual(room.engine.currentPlayerId, before, "the timed-out turn was auto-finished and advanced");
+  });
+
+  it("does not arm a turn timer when it is off (default)", async () => {
+    const { room, clients } = await startedGame(51, 2);
+    await completeMapping(room, clients);
+    assert.equal(room.state.turnSeconds, 0);
+    assert.equal(room.state.turnDeadline, 0, "no deadline when the timer is off");
+  });
 });
