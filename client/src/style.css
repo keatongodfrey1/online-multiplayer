@@ -1273,3 +1273,35 @@ button.spl-gem.selected {
 .catan-topbar {
   gap: 6px;
 }
+
+/* Framework save slots (shared by every game with supportsSaves) */
+.fw-saves {
+  margin: 10px 0;
+}
+
+.fw-saves summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.fw-save-slot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #2a2e40;
+}
+
+.fw-save-slot button {
+  padding: 4px 8px;
+  font-size: 0.8rem;
+}
+
+.fw-loaded-save {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
