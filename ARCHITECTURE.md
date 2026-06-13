@@ -80,7 +80,7 @@ start   -> host sends LobbyMsg.START; needs >= minPlayers; phase="playing";
            (onGameStart MUST fully re-initialize game state - it runs
            again on every rematch)
 drop    -> onDrop (abnormal close: refresh, signal loss): player.connected
-           = false, allowReconnection(60s playing / 30s lobby),
+           = false, allowReconnection(180s playing / 30s lobby),
            game hook onPlayerDropped(player)
 return  -> onReconnect: connected = true, game hooks
            onPlayerReconnected(player) + syncPrivate(client)
@@ -100,6 +100,35 @@ Subclasses set `minPlayers`, `maxPlayers`, optionally `allowLateJoin`,
 `createPlayer(seat)` + `onGameStart()` plus any hooks they need. They
 never override onCreate/onJoin/onDrop/onReconnect/onLeave/onDispose -
 use the hooks.
+
+## Capabilities the framework already provides (opt in, don't re-build)
+
+Several things that look game-specific are actually framework features a
+game turns on with a flag plus a couple of small hooks. A new game should
+reach for these before writing its own - they are battle-tested across the
+shipped games and come with their reconnection/host-migration edge cases
+handled. ADDING_A_GAME.md has the exact wiring for each.
+
+- **Reconnection + host migration** (always on): abnormal drops hold the
+  seat for `reconnectionGraceSeconds` (default 180 - tuned for tablets that
+  lock their screen mid-game); the host role migrates automatically when the
+  host leaves. A game does nothing for this.
+- **AI bots** (`supportsBots = true`): the framework owns the lobby roster
+  entry (LobbyMsg.ADD_BOT, naming, removal); the game plays the bot's turns
+  off `player.isBot` and may read a difficulty choice in `onBotAdded`.
+- **Save / resume** (`supportsSaves = true`): the host snapshots a game
+  mid-play and resumes it from the lobby. The framework owns the SAVE/LOAD
+  messages, the lineup-gated start, and bot re-seating; the game implements
+  only `serializeSave`/`parseSave`/`isGameOver`/`loadedSaveTurnLabel`. The
+  blob lives in the host's browser and is re-validated on the way back in
+  (`client/src/framework/saveSlots.ts` is the shared UI).
+- **Mid-game seat reclaim** (`supportsReclaim = true` + `allowLateJoin`): a
+  newcomer with the room code takes over a seat that has fallen to autopilot.
+  The framework owns the join policy and the clean "no open seat" rejection;
+  the game implements `findReclaimableSeat`/`reclaimSeat`.
+- **Turn alerts** (client, `framework/turnAlert.ts`) and **slept-tablet
+  recovery** (`framework/wakeUp.ts`): see ADDING_A_GAME.md - turn alerts are
+  a default for any turn-based game, not an extra.
 
 ## State vs messages - the golden rule
 
@@ -154,6 +183,57 @@ See `server/src/framework/privateState.ts` for both patterns:
    @type(...)`, then `grantPrivateView(client, player.hand)` in onJoin.
    Synced only to that client; survives reconnection automatically.
 2. One-shot secrets: `client.send(...)` + re-send from `syncPrivate`.
+
+**Schema-v4 per-item gating gotcha (the one that bites).** A `@view()`
+field that is a *collection* (an `ArraySchema`/`MapSchema`) gates each item
+individually. `grantPrivateView(client, seat.reserved)` only covers the
+items present in that array *at grant time*; any item you `push` later is
+NOT visible to the client until you also `grantPrivateView(client, item)`
+on the new item. Splendor's `syncReserved` shows the pattern - it grants
+every freshly created reserved card, not just the array once. If a private
+hand "goes blank" for its owner after a card is added, this is why. The
+flip side: because the grant is per-array-instance, every `onGameStart`
+that builds new schema seats must RE-grant (and revoke the stale array) -
+see `regrantReserved`, called on start, reconnect, and seat reclaim.
+
+## Engine-backed rooms (the Splendor/Catan pattern)
+
+Rules-heavy games are not written directly against schema. They wrap a
+**pure, server-only engine** (`shared/src/games/<game>/engine/`) that knows
+nothing about Colyseus, and the room is the adapter between that engine and
+the synced schema. This keeps the hard game logic unit-testable in isolation
+and keeps the room small. Read `SplendorRoom.ts` and `CatanRoom.ts`
+together - they are deliberately the same shape:
+
+- **`engine` is the only source of truth** and is NEVER synced. Clients send
+  raw move/resolution JSON; the room whitelist-sanitizes it (`parseMove`,
+  `parseResolution` - rebuild a clean object, never trust the client's),
+  checks it is that seat's turn and the move is legal, then advances the
+  engine and rebuilds the schema mirror in place (`syncFromEngine`). The
+  schema is a projection, written top-to-bottom after every accepted input;
+  nothing reads back out of it.
+- **Two seat maps, snapshotted at `onGameStart`.** `seatOrder[engineSeat] =
+  sessionId` translates engine seats to players; `frameworkSeatByEngineSeat`
+  is kept *separately* because the winner may have left the players map by
+  game-over, and `endGame("win:<seat>")` still needs their framework seat.
+  Reclaim and load both rebind these.
+- **Vacated seats are played out, not removed.** A mid-game leaver's engine
+  seat keeps existing; a seeded `RandomPolicy` "ghost" makes its decisions so
+  the game never stalls (`settleEngine`). At 2 players there is no one to play
+  on, so the framework ends the game `"abandoned"` instead - reclaim/ghost
+  logic therefore only ever matters at 3-4 players.
+- **Bots get a paced clock.** Bot decisions run one beat apart
+  (`maybeScheduleBot` + `clock.setTimeout`) so the board visibly changes "as
+  if someone took a turn" rather than all at once; chained sub-decisions each
+  get their own beat.
+- **`afterApply()` is the single funnel** run after every accepted input, every
+  ghost/bot decision, and every mid-game roster change: settle -> mirror ->
+  end-if-over -> re-align the turn rotation with the engine -> refreeze the
+  clock -> re-arm bots. If you add a new way to advance the engine, route it
+  through `afterApply` rather than re-implementing the tail.
+
+When you build a third engine-backed game, copy one of these rooms wholesale
+and swap the engine - do not start from the thin TicTacToe room.
 
 ## Client framework
 

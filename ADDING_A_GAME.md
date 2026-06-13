@@ -133,6 +133,74 @@ game-over screen, above the rematch button (see
 `renderSplendorGameSummary` for the pattern). Derive everything from the
 last synced state - the server leaves it in place when the game ends.
 
+## Opting into framework capabilities (NOT framework edits)
+
+These turn on existing framework features with a flag plus a few small
+hooks in YOUR room/view. You are *using* the framework, not editing it -
+nothing in any `framework/` directory changes. See ARCHITECTURE.md for the
+concepts. Splendor and Catan use all of these; copy from them.
+
+### Save / resume
+
+The host snapshots a game mid-play (a button that sends `LobbyMsg.SAVE`) and
+resumes it from the lobby. The framework owns the SAVE/LOAD messages, the
+lineup-gated start (it won't start until the saved humans are back), and bot
+re-seating. In your room:
+
+```ts
+override supportsSaves = true;
+
+protected override serializeSave(): object | null { return this.buildSave(); }     // game -> blob
+protected override parseSave(raw: unknown) { return parseSave(raw); }               // validate untrusted blob -> null to reject
+protected override isGameOver(): boolean { return this.engine.over; }              // don't offer Save on a finished game
+protected override loadedSaveTurnLabel(parsed: unknown) { return (parsed as ParsedSave).turnCount + 1; }
+// optional: restore lobby-config the save carried (turn timer, variant, ...)
+protected override onSaveStaged(parsed: unknown): void { /* this.state.turnSeconds = ... */ }
+// optional, for bot games: restore/clear per-bot state across re-seating
+protected override onLoadedBotSeated(bot, savedSeat): void { /* recover difficulty */ }
+protected override onBotRemoved(sessionId): void { /* clear per-bot state */ }
+```
+
+Keep your `serialize`/`parse` pair in a game `save.ts` (the validator is
+the only thing standing between a tampered blob and your engine - rebuild a
+clean object, never trust the input). In the view, wire the shared UI - no
+bespoke slot code:
+
+```ts
+import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
+const KEY = "foo-saves";
+const turnLabel = (blob: any) => (blob?.turnCount ?? 0) + 1; // the one blob-shape line
+
+// in mount(): hookSaveData(room, KEY, turnLabel, () => flash("Saved ✓"));
+// in lobby settings: renderSaveSlots(container, room, { key: KEY, isHost, loadedSave: room.state.loadedSave });
+// a Save button sends: room.send(LobbyMsg.SAVE, {});
+```
+
+### Mid-game seat reclaim (drop-in turn games)
+
+With `allowLateJoin`, a newcomer with the room code takes over a seat that
+has fallen to autopilot (a player who left for good). The framework owns the
+join policy and the clean "no open seat" rejection. In your room:
+
+```ts
+override allowLateJoin = true;
+override supportsReclaim = true;
+
+protected override findReclaimableSeat(): number {
+  return [...this.state.seats].findIndex((s) => s.gone); // engine-seat index, or -1
+}
+protected override reclaimSeat(i: number, player: BasePlayer): void {
+  // rebind your seat maps to the newcomer, re-grant any private view,
+  // re-enter them in the TurnManager (turns.insert), then settle/sync.
+}
+```
+
+Reclaim only matters at 3-4 players (a 2-player quit ends the game
+"abandoned" before anyone can take over). If your turn-based game removes a
+leaver from the `TurnManager`, reclaim must re-insert them (`turns.insert`) -
+without it the reclaimed seat is skipped forever. Copy `SplendorRoom`'s
+`reclaimSeat` for the full checklist.
+
 ## The test file
 
 Copy `server/test/tictactoe.test.ts` (or `arena.test.ts`) to
