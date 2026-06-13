@@ -1275,6 +1275,7 @@ function buy(state: GameState, item: ShopItem, quantity = 1): GameState {
   }
 
   let newState = state
+  let bought = 0
   for (let i = 0; i < q; i++) {
     const player = currentPlayer(newState)
     const check = canBuy(player, item)
@@ -1325,8 +1326,11 @@ function buy(state: GameState, item: ShopItem, quantity = 1): GameState {
         newState = updatePlayer(newState, player.id, (p) => patchInventory(p, { knight: true }))
         break
     }
+    bought++
   }
-  return log(newState, `${player.name} bought ${q}× ${item}.`)
+  // Nothing bought — a true no-op (return the same reference so tryReduce rejects).
+  if (bought === 0) return state
+  return log(newState, `${player.name} bought ${bought}× ${item}.`)
 }
 
 function trade(state: GameState, from: 'bricks' | 'sticks', amount: number): GameState {
@@ -1446,6 +1450,7 @@ function build(state: GameState, item: BuildItem, count: number): GameState {
   if (count <= 0) return state
 
   let newState = state
+  let built = 0
   for (let i = 0; i < count; i++) {
     const p = currentPlayer(newState)
     const check = canBuild(p, item)
@@ -1495,8 +1500,13 @@ function build(state: GameState, item: BuildItem, count: number): GameState {
         newState = checkPalaceTrigger(newState, p.id)
         break
     }
+    built++
   }
-  return log(newState, `${player.name} built ${count}× ${item}.`)
+  // Nothing built (couldn't afford even one) — a true no-op, so return the same
+  // reference. This lets tryReduce reject the action instead of treating an
+  // appended log line as an accepted change (which would loop a bot/ghost).
+  if (built === 0) return state
+  return log(newState, `${player.name} built ${built}× ${item}.`)
 }
 
 // ==================== Duel ====================
