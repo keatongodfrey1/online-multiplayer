@@ -207,8 +207,10 @@ export class PerfectPalaceView implements GameView {
       .map((seat) => {
         const isTurn = seat.engineId === s.currentPlayerId && s.enginePhase !== "game-over";
         const me = seat.sessionId === this.ctx?.mySessionId;
+        const isBot = !seat.gone && s.players.get(seat.sessionId)?.isBot === true;
         const inv = seat.inventory;
         const color = PERFECT_PALACE_COLORS[seat.colorIndex] ?? "#888";
+        const nameTag = me ? " (you)" : isBot ? " 🤖" : seat.gone ? " · empty seat" : "";
         const badges = [
           inv.allied ? "🤝" : "",
           inv.queen ? "👑" : "",
@@ -216,13 +218,13 @@ export class PerfectPalaceView implements GameView {
           s.bailiffKind === "held" && s.bailiffBy === seat.engineId ? "🎩" : "",
           seat.inDungeon ? `⛓️ ${seat.dungeonTurnsServed}/3` : "",
           inv.pardonCards > 0 ? "📜" : "",
-          seat.gone ? "🚪" : "",
+          seat.gone ? "🚪 reclaimable" : "",
         ].filter(Boolean).join(" ");
         return `
           <div class="pp-pcard${isTurn ? " pp-pcard-turn" : ""}${seat.gone ? " pp-pcard-gone" : ""}">
             <div class="pp-pcard-head">
               <span class="pp-dot" style="background:${color}"></span>
-              <strong>${escapeHtml(seat.nickname)}${me ? " (you)" : ""}</strong>
+              <strong>${escapeHtml(seat.nickname)}${nameTag}</strong>
               <span class="pp-badges">${badges}</span>
               <span class="pp-pts">${totalPoints(inv as any)} pts</span>
             </div>
@@ -609,9 +611,19 @@ export function renderPerfectPalaceLobbySettings(
   room: Room<any, BaseState>,
   ctx: LobbySettingsContext,
 ): void {
+  const state = room.state as BaseState;
+  const seatsLeft = (state.maxPlayers || 6) - state.players.size;
+  const addBot = ctx.isHost
+    ? `<button id="pp-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>➕ Add an AI player 🤖</button>`
+    : "";
   container.innerHTML = `
-    <p class="muted">A regal, Monopoly-style race to build palaces — 2–6 players, one device each.</p>
+    <p class="muted">A regal, Monopoly-style race to build palaces — 2–6 players, one device each.
+      Add AI players to fill out the table; if someone leaves mid-game an AI keeps their seat and anyone can take it over.</p>
+    ${addBot}
     <div class="pp-saves-block"></div>`;
+  container.querySelector<HTMLButtonElement>("#pp-add-bot")?.addEventListener("click", () => {
+    room.send(LobbyMsg.ADD_BOT, {});
+  });
   renderSaveSlots(container.querySelector<HTMLElement>(".pp-saves-block")!, room, {
     key: PP_SAVES_KEY,
     isHost: ctx.isHost,
