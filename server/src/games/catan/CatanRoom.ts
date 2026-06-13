@@ -80,10 +80,9 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
   readonly minPlayers = 2;
   readonly maxPlayers = 4;
   override supportsBots = true;
-  // Give a dropped tablet a generous window to come back (3 min), and never
-  // lock the room - so anyone with the code can rejoin and reclaim a seat that
-  // has fallen to autopilot (see onPlayerJoinedMidGame).
-  override reconnectionGraceSeconds = 180;
+  // Never lock the room - so anyone with the code can rejoin and reclaim a seat
+  // that has fallen to autopilot (see the reclaim hooks). The 180s grace is now
+  // the framework default.
   override allowLateJoin = true;
 
   /** Server-only engine truth (never synced). Public for white-box tests. */

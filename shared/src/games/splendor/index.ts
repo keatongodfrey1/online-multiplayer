@@ -136,9 +136,5 @@ export class SplendorState extends BaseState {
   @type("boolean") paused = false;
   /** Nickname of whoever paused, for the banner. */
   @type("string") pausedBy = "";
-  /**
-   * Non-empty while the lobby is staged to resume a saved game: a
-   * human-readable description incl. the players the save is waiting for.
-   */
-  @type("string") loadedSave = "";
+  // loadedSave now lives on BaseState (framework-owned save/resume).
 }

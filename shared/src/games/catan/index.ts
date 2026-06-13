@@ -180,6 +180,5 @@ export class CatanState extends BaseState {
   @type(["string"]) log = new ArraySchema<string>();
   /** Completed turns (for the HUD). */
   @type("uint16") turnCount = 0;
-  /** Lobby: a human-readable "resuming a saved game" banner ("" = none). */
-  @type("string") loadedSave = "";
+  // loadedSave now lives on BaseState (framework-owned save/resume).
 }

@@ -35,12 +35,24 @@ export const LobbyMsg = {
    * removed with the regular KICK message.
    */
   ADD_BOT: "lobby/addBot",
+  /**
+   * Host only, mid-game, games with supportsSaves: request a save snapshot.
+   * The server replies with ServerMsg.SAVE_DATA for the host to store.
+   */
+  SAVE: "lobby/save",
+  /**
+   * Host only, lobby only, games with supportsSaves: stage a save blob to
+   * resume (payload is the stored blob), or null to clear a staged load.
+   */
+  LOAD: "lobby/load",
 } as const;
 
 /** Framework-level messages (server -> client). */
 export const ServerMsg = {
   /** Sent when the player was kicked by the host. */
   KICKED: "lobby/kicked",
+  /** Reply to LobbyMsg.SAVE: the save blob, for the host to store locally. */
+  SAVE_DATA: "lobby/saveData",
 } as const;
 
 /**

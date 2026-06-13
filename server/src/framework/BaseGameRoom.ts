@@ -50,8 +50,12 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
   supportsBots = false;
   /** Names handed to bots in order; override for themed names. */
   protected botNicknames = ["Botty", "Chip", "Gizmo", "Pixel", "Widget", "Sprocket"];
-  /** Seconds a disconnected player's seat is held during a game. */
-  reconnectionGraceSeconds = 60;
+  /**
+   * Seconds a disconnected player's seat is held during a game. 3 minutes is
+   * forgiving for real tablets that lock their screen mid-game; it only
+   * affects abnormal drops (a consented Leave removes the seat immediately).
+   */
+  reconnectionGraceSeconds = 180;
   /** Seconds a disconnected player's seat is held in the lobby. */
   lobbyGraceSeconds = 30;
 
