@@ -441,6 +441,7 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     writeBag(s.tradeReceive, { ...emptyBagValues, ...(t?.receive ?? {}) });
     rewriteNumbers(s.tradeCandidates, t?.candidates ?? []);
     rewriteNumbers(s.tradeAcceptances, t?.acceptances ?? []);
+    rewriteNumbers(s.tradeDeclines, t?.declines ?? []);
 
     s.longestRoadHolder = e.longestRoadHolder ?? CATAN_NO_HOLDER;
     s.largestArmyHolder = e.largestArmyHolder ?? CATAN_NO_HOLDER;

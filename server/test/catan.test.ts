@@ -430,6 +430,49 @@ describe("catan", () => {
     assert.ok([...room.state.log].some((l) => l.includes("traded with")), "the trade is narrated");
   });
 
+  it("shows declines to the proposer and lets a candidate change their mind", async () => {
+    const { room, clients } = await startedGame(67, 3);
+    await driveSetup(room, clients);
+    await toMain(room, clients);
+
+    const proposerSeat = room.engine.currentPlayer;
+    const others = [0, 1, 2].filter((s) => s !== proposerSeat);
+    const proposer = clientFor(room, clients, proposerSeat)!;
+    const partner = clientFor(room, clients, others[0]!)!;
+
+    room.engine.players[proposerSeat]!.hand = { lumber: 0, brick: 0, wool: 0, grain: 0, ore: 2 };
+    proposer.send(CatanMsg.ACTION, { type: "proposeDomesticTrade", give: { ore: 1 }, receive: { wool: 1 } });
+    await until(() => room.state.tradeOpen === true);
+
+    // declining WITHOUT first accepting (the playtest bug) is now mirrored
+    partner.send(CatanMsg.ACTION, { type: "respondDomesticTrade", accept: false });
+    await until(() => room.state.tradeDeclines.length === 1);
+    assert.equal(room.state.tradeDeclines[0], others[0], "the proposer can see the decline");
+    assert.equal(room.state.tradeAcceptances.length, 0);
+
+    // change of mind: decline -> accept moves between the mirrored lists
+    partner.send(CatanMsg.ACTION, { type: "respondDomesticTrade", accept: true });
+    await until(() => room.state.tradeAcceptances.length === 1);
+    assert.equal(room.state.tradeDeclines.length, 0, "no longer declined");
+    assert.equal(room.state.tradeAcceptances[0], others[0]);
+  });
+
+  it("a leaver's seat auto-declines an open trade so the proposer isn't stuck", async () => {
+    const { room, clients } = await startedGame(68, 3);
+    await driveSetup(room, clients);
+    await toMain(room, clients);
+
+    const proposerSeat = room.engine.currentPlayer;
+    const others = [0, 1, 2].filter((s) => s !== proposerSeat);
+    const proposer = clientFor(room, clients, proposerSeat)!;
+    room.engine.players[proposerSeat]!.hand = { lumber: 0, brick: 0, wool: 0, grain: 0, ore: 2 };
+    proposer.send(CatanMsg.ACTION, { type: "proposeDomesticTrade", give: { ore: 1 }, receive: { wool: 1 } });
+    await until(() => room.state.tradeOpen === true);
+
+    await clientFor(room, clients, others[0]!)!.leave(true);
+    await until(() => [...room.state.tradeDeclines].includes(others[0]!), 3000);
+  });
+
   it("lets the ghost play out a quitter's seat in a 3p game (including a pending discard)", async () => {
     const { room, clients } = await startedGame(31, 3);
     await driveSetup(room, clients);

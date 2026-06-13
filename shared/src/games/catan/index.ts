@@ -156,6 +156,7 @@ export class CatanState extends BaseState {
   @type(CatanResources) tradeReceive = new CatanResources();
   @type(["uint8"]) tradeCandidates = new ArraySchema<number>();
   @type(["uint8"]) tradeAcceptances = new ArraySchema<number>();
+  @type(["uint8"]) tradeDeclines = new ArraySchema<number>();
 
   // ---- awards & log ----
   /** Holding seat or CATAN_NO_HOLDER (255). */

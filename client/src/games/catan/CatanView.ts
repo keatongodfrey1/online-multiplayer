@@ -685,34 +685,45 @@ export class CatanView implements GameView {
     const receive = bagStr(s.tradeReceive as unknown as Bag);
     const iAmProposer = s.tradeProposer === me;
     const accepted = new Set([...s.tradeAcceptances]);
+    const declined = new Set([...s.tradeDeclines]);
+    const candidates = [...s.tradeCandidates];
     if (iAmProposer) {
-      const rows = [...s.tradeCandidates]
+      const rows = candidates
         .map((c) => {
-          const ok = accepted.has(c);
-          return `<div class="catan-picker-row"><span>${this.nickname(c)}</span><span>${
-            ok ? "✅ accepted" : "…waiting"
-          }</span>${ok ? `<button class="primary" data-action="trade-confirm" data-id="${c}">Trade</button>` : ""}</div>`;
+          const status = accepted.has(c) ? "✅ accepted" : declined.has(c) ? "✖ declined" : "…waiting";
+          return `<div class="catan-picker-row"><span>${this.nickname(c)}</span><span>${status}</span>${
+            accepted.has(c) ? `<button class="primary" data-action="trade-confirm" data-id="${c}">Trade</button>` : ""
+          }</div>`;
         })
         .join("");
+      const allDeclined = candidates.length > 0 && candidates.every((c) => declined.has(c));
       return `
         <div class="catan-panel">
           <h3>Your offer: ${give} ⇄ ${receive}</h3>
           ${rows}
+          ${allDeclined ? '<p class="muted">Everyone declined — withdraw the offer?</p>' : ""}
           <button class="subtle" data-action="trade-cancel">Withdraw offer</button>
         </div>`;
     }
-    const amCandidate = [...s.tradeCandidates].includes(me);
-    const myAnswer = accepted.has(me);
+    const amCandidate = candidates.includes(me);
+    const iAccepted = accepted.has(me);
+    const iDeclined = declined.has(me);
     return `
       <div class="catan-panel">
         <h3>${this.nickname(s.tradeProposer)} offers ${give} for ${receive}</h3>
         ${
           amCandidate
             ? `<div class="catan-row">
-                 <button class="primary" data-action="trade-respond" data-accept="1" ${myAnswer ? "disabled" : ""}>Accept</button>
-                 <button data-action="trade-respond" data-accept="0" ${myAnswer ? "" : "disabled"}>Decline</button>
+                 <button class="primary ${iAccepted ? "catan-mode-on" : ""}" data-action="trade-respond" data-accept="1">Accept</button>
+                 <button class="${iDeclined ? "catan-mode-on" : ""}" data-action="trade-respond" data-accept="0">Decline</button>
                </div>
-               ${myAnswer ? '<p class="muted">Accepted — waiting for the proposer to confirm.</p>' : ""}`
+               ${
+                 iAccepted
+                   ? '<p class="muted">You accepted — waiting for the proposer to confirm. You can still change your mind.</p>'
+                   : iDeclined
+                     ? '<p class="muted">You declined. You can still change your mind.</p>'
+                     : ""
+               }`
             : '<p class="muted">Waiting…</p>'
         }
       </div>`;
