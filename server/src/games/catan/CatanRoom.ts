@@ -20,7 +20,7 @@
  * Players who leave for good mid-game (3-4p) are played out by a seeded
  * RandomPolicy ghost; 2p games end "abandoned" via the framework instead.
  */
-import type { Client } from "colyseus";
+import { type Client, ServerError } from "colyseus";
 import type { Delayed } from "@colyseus/timer";
 import type { ArraySchema } from "@colyseus/schema";
 import {
@@ -35,6 +35,7 @@ import {
   CatanSeat,
   CatanState,
   EndReason,
+  JoinError,
   Phase,
 } from "@backbone/shared";
 import { BaseGameRoom } from "../../framework/BaseGameRoom.js";
@@ -77,6 +78,11 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
   readonly minPlayers = 2;
   readonly maxPlayers = 4;
   override supportsBots = true;
+  // Give a dropped tablet a generous window to come back (3 min), and never
+  // lock the room - so anyone with the code can rejoin and reclaim a seat that
+  // has fallen to autopilot (see onPlayerJoinedMidGame).
+  override reconnectionGraceSeconds = 180;
+  override allowLateJoin = true;
 
   /** Server-only engine truth (never synced). Public for white-box tests. */
   public engine!: GameState;
@@ -647,6 +653,33 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     if (seat && (!client?.view || this.grantedPrivate.get(player.sessionId)?.hand !== seat.hand)) {
       this.regrantPrivate(player.sessionId, seat);
     }
+  }
+
+  /**
+   * Someone joined while a game is in progress (allowLateJoin). If a seat has
+   * fallen to autopilot (its human left for good), bind the newcomer to it -
+   * anyone with the room code can take over, from any device or nickname. If
+   * every human seat is still occupied (incl. players inside their reconnect
+   * grace), there is nothing to claim, so reject the join cleanly.
+   */
+  protected override onPlayerJoinedMidGame(player: BasePlayer): void {
+    const i = [...this.state.seats].findIndex((seat) => seat.gone && !seat.neutral);
+    if (i < 0) {
+      // No open seat. onJoin already inserted the player, so remove them and
+      // reject - the SDK surfaces this as a friendly home-screen message.
+      this.state.players.delete(player.sessionId);
+      throw new ServerError(JoinError.GAME_IN_PROGRESS, "This game is already underway with no open seat.");
+    }
+    const seat = this.state.seats[i]!;
+    const oldNickname = seat.nickname;
+    this.seatOrder[i] = player.sessionId;
+    this.frameworkSeatByEngineSeat[i] = player.seat; // else a win maps to the departed player's seat
+    seat.sessionId = player.sessionId;
+    seat.nickname = player.nickname;
+    seat.gone = false;
+    this.regrantPrivate(player.sessionId, seat); // hand back this seat's private hand/dev cards
+    this.pushLog(`${player.nickname} takes over ${oldNickname}'s seat.`);
+    this.afterApply(); // re-project and stop the ghost from playing the seat
   }
 
   protected override onPlayerLeftForGood(player: BasePlayer): void {

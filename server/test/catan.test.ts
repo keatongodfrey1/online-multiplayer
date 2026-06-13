@@ -520,6 +520,50 @@ describe("catan", () => {
     assert.equal(room.state.currentTurn, "");
   });
 
+  it("lets a newcomer reclaim an autopilot seat mid-game (rejoin from any device)", async () => {
+    const { room, clients } = await startedGame(38, 3);
+    await driveSetup(room, clients);
+
+    // seat 1's human leaves for good -> the seat falls to autopilot
+    const goneSeat = 1;
+    const leaver = clientFor(room, clients, goneSeat)!;
+    await leaver.leave(true);
+    await until(() => room.state.seats[goneSeat]!.gone === true);
+    assert.equal(room.state.seats[goneSeat]!.sessionId, "");
+
+    // a brand-new client joins with the code and a fresh nickname
+    const newcomer = await colyseus.connectTo(room, { nickname: "Latecomer" });
+    await until(() => room.state.seats[goneSeat]!.gone === false, 3000);
+    assert.equal(room.seatOrder[goneSeat], newcomer.sessionId, "seatOrder rebound");
+    assert.equal(room.state.seats[goneSeat]!.sessionId, newcomer.sessionId);
+    assert.equal(room.state.seats[goneSeat]!.nickname, "Latecomer");
+    assert.ok([...room.state.log].some((l) => l.includes("takes over")));
+
+    // the reclaimed seat is live: it can act and sees its private hand
+    room.engine.players[goneSeat]!.hand = { lumber: 0, brick: 0, wool: 0, grain: 0, ore: 5 };
+    // nudge a projection by advancing to this seat's turn is unnecessary - force one
+    const prev = room.engine;
+    room.engine = CatanEngine.cloneGameState(room.engine); // identity bump so project runs
+    (room as any).project();
+    const nState = () => newcomer.state as any;
+    await until(() => nState()?.seats?.at(goneSeat)?.hand?.ore === 5, 3000);
+    assert.equal(prev !== room.engine, true);
+  });
+
+  it("rejects a mid-game joiner when no seat is open", async () => {
+    const { room } = await startedGame(39, 3);
+    // all three humans are present -> nothing to reclaim
+    let rejected = false;
+    try {
+      await colyseus.connectTo(room, { nickname: "Crasher" });
+    } catch {
+      rejected = true;
+    }
+    assert.ok(rejected, "the join was refused");
+    assert.equal(room.state.players.size, 3, "roster unchanged");
+    assert.equal(room.state.phase, Phase.PLAYING, "game undisturbed");
+  });
+
   it("starts the official 2-player variant for two humans", async () => {
     const { room, clients } = await startedGame(41, 2);
     assert.equal(room.state.twoPlayerVariant, true);
