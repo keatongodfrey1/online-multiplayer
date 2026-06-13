@@ -10,6 +10,7 @@ import {
   EndReason,
   LobbyMsg,
   Phase,
+  ServerMsg,
   SPLENDOR_TURN_MAX_SECONDS,
   SPLENDOR_TURN_STEP_SECONDS,
   SplendorEngine,
@@ -197,12 +198,12 @@ export function renderSplendorLobbySettings(
     });
   });
   container.querySelector<HTMLButtonElement>("#spl-load-clear")?.addEventListener("click", () => {
-    room.send(SplendorMsg.LOAD, null);
+    room.send(LobbyMsg.LOAD, null);
   });
   container.querySelectorAll<HTMLButtonElement>(".spl-load-slot").forEach((btn) => {
     btn.addEventListener("click", () => {
       const slot = loadSaveSlots().find((s) => s.id === btn.dataset.saveId);
-      if (slot) room.send(SplendorMsg.LOAD, slot.save);
+      if (slot) room.send(LobbyMsg.LOAD, slot.save);
     });
   });
   container.querySelectorAll<HTMLButtonElement>(".spl-delete-slot").forEach((btn) => {
@@ -376,7 +377,7 @@ export class SplendorView implements GameView {
     const hooked = this.room as unknown as { __splSaveHooked?: boolean };
     if (!hooked.__splSaveHooked) {
       hooked.__splSaveHooked = true;
-      this.room.onMessage(SplendorMsg.SAVE_DATA, (save: unknown) => {
+      this.room.onMessage(ServerMsg.SAVE_DATA, (save: unknown) => {
         storeSaveSlot(save);
         onSaveStored?.();
       });
@@ -460,7 +461,7 @@ export class SplendorView implements GameView {
         this.room.send(SplendorMsg.PAUSE, { paused: !this.room.state.paused });
         return;
       case "save-game":
-        this.room.send(SplendorMsg.SAVE, {});
+        this.room.send(LobbyMsg.SAVE, {});
         return;
       case "toggle-mute":
         setMuted(!isMuted());

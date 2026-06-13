@@ -273,6 +273,72 @@ describe("splendor", () => {
     await until(() => room.state.currentTurn === c!.sessionId);
   });
 
+  it("lets a newcomer reclaim an autopilot seat mid-game", async function () {
+    this.timeout(20000);
+    const { room, clients } = await startedGame(85, 3, (r) => {
+      r.botDelayMs = 1;
+    });
+    const zero = { white: 0, blue: 0, green: 0, red: 0, black: 0 };
+
+    // seat 1's human leaves for good -> the seat falls to autopilot (ghost)
+    await clients[1]!.leave(true);
+    await until(() => room.state.seats[1]!.gone === true);
+    assert.strictEqual(room.state.seats[1]!.sessionId, "");
+    // give the gone seat a private reserved card so we can prove the re-grant
+    room.engine.players[1]!.reserved.push({ id: 87, tier: 1, bonus: "white", points: 0, cost: { ...zero } });
+
+    // a fresh client joins with the code and takes over the seat
+    const newcomer = await colyseus.connectTo(room, { nickname: "Latecomer" });
+    await until(() => room.state.seats[1]!.gone === false, 3000);
+    assert.strictEqual(room.seatOrder[1], newcomer.sessionId, "seatOrder rebound");
+    assert.strictEqual(room.state.seats[1]!.nickname, "Latecomer");
+    // the reclaimed seat's private reserved view is granted to the newcomer
+    const nState = () => newcomer.state as any;
+    await until(() => nState()?.seats?.at(1)?.reserved?.length === 1, 3000);
+    assert.strictEqual(nState().seats.at(1).reserved.at(0).id, 87, "owner sees its reserved card");
+
+    // the seat is live in the rotation: drive turns until the newcomer acts
+    const policy = new GreedyPolicy(3);
+    const seatClients = [clients[0]!, newcomer, clients[2]!];
+    const clientForSeat = (seat: number) => seatClients.find((c) => c.sessionId === room.seatOrder[seat]);
+    let guard = 0;
+    let newcomerActed = false;
+    const startTurns = room.engine.turnCount;
+    while (room.state.phase === Phase.PLAYING && guard++ < 80 && !(newcomerActed && room.engine.turnCount > startTurns)) {
+      const prev = room.engine;
+      const actor = clientForSeat(prev.awaiting.seat);
+      if (!actor) {
+        await sleep(30);
+        continue;
+      }
+      if (actor === newcomer) newcomerActed = true;
+      if (prev.awaiting.inputType === "MOVE") {
+        const m = policy.move(prev);
+        if (m) actor.send(SplendorMsg.MOVE, m);
+      } else if (prev.awaiting.inputType === "PICK_NOBLE") {
+        actor.send(SplendorMsg.RESOLVE, policy.pickNoble(prev));
+      } else {
+        actor.send(SplendorMsg.RESOLVE, policy.discard(prev));
+      }
+      await until(() => room.engine !== prev || room.state.phase !== Phase.PLAYING, 5000);
+    }
+    assert.ok(newcomerActed, "the reclaimed seat takes its turn (it is back in the rotation)");
+    assert.ok(room.engine.turnCount > startTurns, "the game advanced past the reclaim");
+  });
+
+  it("rejects a mid-game joiner when no seat is open", async () => {
+    const { room } = await startedGame(86, 3);
+    let rejected = false;
+    try {
+      await colyseus.connectTo(room, { nickname: "Crasher" });
+    } catch {
+      rejected = true;
+    }
+    assert.ok(rejected, "the join was refused");
+    assert.strictEqual(room.state.players.size, 3, "roster unchanged");
+    assert.strictEqual(room.state.phase, Phase.PLAYING);
+  });
+
   it("rematch fully resets the game and re-grants private views", async () => {
     const { room, clients } = await startedGame(17);
     const a = clients[0]!;
@@ -670,7 +736,7 @@ describe("splendor", () => {
     const room2 = (await colyseus.createRoom(SPLENDOR, {})) as unknown as SplendorRoom;
     const host2 = await colyseus.connectTo(room2, { nickname: "Player1" }); // was seat 1!
     const guest2 = await colyseus.connectTo(room2, { nickname: "Player0" });
-    host2.send(SplendorMsg.LOAD, blob);
+    host2.send(LobbyMsg.LOAD, blob);
     await until(() => room2.state.loadedSave !== "");
     assert.strictEqual(room2.state.turnSeconds, 90, "timer setting restored");
 
@@ -718,7 +784,7 @@ describe("splendor", () => {
     const room2 = (await colyseus.createRoom(SPLENDOR, {})) as unknown as SplendorRoom;
     const host2 = await colyseus.connectTo(room2, { nickname: "Player0" });
     const imposter = await colyseus.connectTo(room2, { nickname: "Imposter" });
-    host2.send(SplendorMsg.LOAD, blob);
+    host2.send(LobbyMsg.LOAD, blob);
     await until(() => room2.state.loadedSave !== "");
     assert.ok(room2.state.loadedSave.includes("Player0"), "lobby names the needed players");
     assert.ok(room2.state.loadedSave.includes("Player1"));
@@ -750,7 +816,7 @@ describe("splendor", () => {
     tampered4.v = 2;
 
     for (const bad of [tampered1, tampered2, tampered3, tampered4, {}, "junk", 42]) {
-      host2.send(SplendorMsg.LOAD, bad);
+      host2.send(LobbyMsg.LOAD, bad);
     }
     await sleep(150);
     assert.strictEqual(room2.state.loadedSave, "", "no tampered blob was staged");
@@ -779,7 +845,7 @@ describe("splendor", () => {
 
     const room2 = (await colyseus.createRoom(SPLENDOR, {})) as unknown as SplendorRoom;
     const host2 = await colyseus.connectTo(room2, { nickname: "Solo" });
-    host2.send(SplendorMsg.LOAD, blob);
+    host2.send(LobbyMsg.LOAD, blob);
     await until(() => room2.state.players.size === 2, 3000); // bot auto-seated
     const bot = [...room2.state.players.values()].find((p) => p.isBot)!;
     assert.ok(bot.nickname.endsWith("(easy)"), "bot name (and difficulty tag) restored");
@@ -803,7 +869,7 @@ describe("splendor", () => {
 
     const room2 = (await colyseus.createRoom(SPLENDOR, {})) as unknown as SplendorRoom;
     const host2 = await colyseus.connectTo(room2, { nickname: "Player0" });
-    host2.send(SplendorMsg.LOAD, blob);
+    host2.send(LobbyMsg.LOAD, blob);
     await until(() => room2.state.loadedSave !== "");
     assert.ok(!room2.state.loadedSave.includes("Player1"), "departed player not required");
     const third = await colyseus.connectTo(room2, { nickname: "Player2" });

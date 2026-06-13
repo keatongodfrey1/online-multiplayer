@@ -18,6 +18,7 @@ import {
   type CatanSeat,
   type CatanState,
   LobbyMsg,
+  ServerMsg,
 } from "@backbone/shared";
 import type { GameView, GameViewContext, LobbySettingsContext } from "../../framework/GameView.js";
 import { flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
@@ -211,12 +212,12 @@ export function renderCatanLobbySettings(
     });
   });
   container.querySelector<HTMLButtonElement>("#catan-load-clear")?.addEventListener("click", () => {
-    room.send(CatanMsg.LOAD, null);
+    room.send(LobbyMsg.LOAD, null);
   });
   container.querySelectorAll<HTMLButtonElement>(".catan-load-slot").forEach((btn) => {
     btn.addEventListener("click", () => {
       const slot = loadSaveSlots().find((s) => s.id === btn.dataset.saveId);
-      if (slot) room.send(CatanMsg.LOAD, slot.save);
+      if (slot) room.send(LobbyMsg.LOAD, slot.save);
     });
   });
   container.querySelectorAll<HTMLButtonElement>(".catan-delete-slot").forEach((btn) => {
@@ -351,7 +352,7 @@ export class CatanView implements GameView {
     const hooked = this.room as unknown as { __catanSaveHooked?: boolean };
     if (!hooked.__catanSaveHooked) {
       hooked.__catanSaveHooked = true;
-      this.room.onMessage(CatanMsg.SAVE_DATA, (save: unknown) => {
+      this.room.onMessage(ServerMsg.SAVE_DATA, (save: unknown) => {
         storeSaveSlot(save);
         onSaveStored?.();
       });
@@ -1011,7 +1012,7 @@ export class CatanView implements GameView {
         return;
       // action bar
       case "save-game":
-        this.room.send(CatanMsg.SAVE, {});
+        this.room.send(LobbyMsg.SAVE, {});
         return;
       case "toggle-mute":
         setMuted(!isMuted());

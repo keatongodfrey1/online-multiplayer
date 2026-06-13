@@ -30,12 +30,7 @@ export const CatanMsg = {
   /** Any player, lobby-only. Payload: { color?: string } - pick your piece
    *  color ("" clears). Rejected if another player already chose it. */
   PICK_COLOR: "catan/pickColor",
-  /** Host, mid-game. Asks the server for a save snapshot. */
-  SAVE: "catan/save",
-  /** Server -> host. The save blob to store in the host's browser. */
-  SAVE_DATA: "catan/saveData",
-  /** Host, lobby-only. Stage a save blob to resume (or null to clear). */
-  LOAD: "catan/load",
+  // SAVE / SAVE_DATA / LOAD are framework messages now (LobbyMsg / ServerMsg).
 } as const;
 
 /** The piece colors players may pick (the board palette has exactly these). */

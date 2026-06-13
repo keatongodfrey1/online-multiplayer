@@ -80,10 +80,12 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
   readonly minPlayers = 2;
   readonly maxPlayers = 4;
   override supportsBots = true;
+  override supportsSaves = true;
   // Never lock the room - so anyone with the code can rejoin and reclaim a seat
   // that has fallen to autopilot (see the reclaim hooks). The 180s grace is now
   // the framework default.
   override allowLateJoin = true;
+  override supportsReclaim = true;
 
   /** Server-only engine truth (never synced). Public for white-box tests. */
   public engine!: GameState;
@@ -103,8 +105,6 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
   /** The private instances each session was granted (re-granted per game). */
   private grantedPrivate = new Map<string, { hand: CatanResources; devCards: ArraySchema<CatanDevCard> }>();
   private actionsApplied = 0;
-  /** A saved game staged in the lobby; consumed by onGameStart. */
-  private pendingLoad?: ParsedSave;
 
   protected createPlayer(): CatanPlayer {
     return new CatanPlayer();
@@ -118,15 +118,31 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     this.onMessage(CatanMsg.ACTION, (client, payload) => this.handleAction(client, payload));
     this.onMessage(CatanMsg.CONFIG, (client, payload) => this.handleConfig(client, payload));
     this.onMessage(CatanMsg.PICK_COLOR, (client, payload) => this.handlePickColor(client, payload));
-    this.onMessage(CatanMsg.SAVE, (client) => this.handleSave(client));
-    this.onMessage(CatanMsg.LOAD, (client, payload) => this.handleLoad(client, payload));
   }
 
-  /** Host requests a save snapshot (sent back to its own browser to store). */
-  private handleSave(client: Client): void {
-    if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.winner !== null) return;
-    if (client.sessionId !== this.state.hostSessionId) return;
-    client.send(CatanMsg.SAVE_DATA, this.buildSave());
+  // ---- save/resume hooks (framework owns the orchestration) --------------
+
+  protected override isGameOver(): boolean {
+    return !this.engine || this.engine.winner !== null;
+  }
+
+  protected override loadedSaveTurnLabel(parsed: unknown): number {
+    return (parsed as ParsedSave).turnCount + 1;
+  }
+
+  /** Restore the lobby rule toggles a save carried. */
+  protected override onSaveStaged(parsed: unknown): void {
+    const p = parsed as ParsedSave;
+    this.state.useTwoPlayerVariant = p.config.useTwoPlayerVariant;
+    this.state.robberBounty = p.config.robberBounty;
+  }
+
+  protected override parseSave(raw: unknown): ParsedSave | null {
+    return parseSave(raw);
+  }
+
+  protected override serializeSave(): object | null {
+    return this.buildSave();
   }
 
   /** Current game -> save blob. Public for white-box tests. */
@@ -145,56 +161,6 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
       config: { useTwoPlayerVariant: this.state.useTwoPlayerVariant, robberBounty: this.state.robberBounty },
       turnCount: this.state.turnCount,
     });
-  }
-
-  /**
-   * Host stages a saved game in the lobby (or clears it with a null payload).
-   * Saved bots are re-seated; the game can then only start once the present
-   * humans match the save's human lineup (canStartGame).
-   */
-  private handleLoad(client: Client, payload: unknown): void {
-    if (this.state.phase !== Phase.LOBBY) return;
-    if (client.sessionId !== this.state.hostSessionId) return;
-    if (payload === null || payload === undefined) {
-      this.pendingLoad = undefined;
-      this.state.loadedSave = "";
-      this.removeBots();
-      return;
-    }
-    const parsed = parseSave(payload);
-    if (!parsed) return; // corrupt or tampered: ignore silently
-
-    this.pendingLoad = parsed;
-    this.state.useTwoPlayerVariant = parsed.config.useTwoPlayerVariant;
-    this.state.robberBounty = parsed.config.robberBounty;
-    this.removeBots();
-    for (const seat of parsed.seats) {
-      if (!seat.isBot || seat.gone) continue;
-      if (this.state.players.size >= this.maxPlayers) break;
-      this.seatBot(seat.nickname);
-    }
-    const humans = parsed.seats.filter((s) => !s.isBot && !s.gone).map((s) => s.nickname);
-    this.state.loadedSave = `Resuming a saved game (turn ${parsed.turnCount + 1}). Players needed: ${humans.join(", ")}`;
-  }
-
-  /** While a save is staged, only the exact saved lineup may start. */
-  protected override canStartGame(): boolean {
-    if (!this.pendingLoad) return true;
-    const required = new Set(
-      this.pendingLoad.seats.filter((s) => !s.isBot && !s.gone).map((s) => s.nickname.toLowerCase()),
-    );
-    const humans = [...this.state.players.values()].filter((p) => !p.isBot);
-    if (humans.length !== required.size) return false;
-    if (!humans.every((p) => required.has(p.nickname.toLowerCase()))) return false;
-    const requiredBots = this.pendingLoad.seats.filter((s) => s.isBot && !s.gone).length;
-    const presentBots = this.state.players.size - humans.length;
-    return presentBots === requiredBots;
-  }
-
-  private removeBots(): void {
-    for (const player of [...this.state.players.values()]) {
-      if (player.isBot) this.state.players.delete(player.sessionId);
-    }
   }
 
   /** Any player picks their piece color in the lobby ("" clears it). */
@@ -246,7 +212,7 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     // Full re-init - this also runs on rematch. A staged saved game is
     // consumed here (and cleared, so a later rematch starts fresh).
     const players = [...this.state.players.values()].sort((a, b) => a.seat - b.seat);
-    const load = this.pendingLoad;
+    const load = this.pendingLoad?.payload as ParsedSave | undefined;
     this.pendingLoad = undefined;
     this.state.loadedSave = "";
     const seed = this.seedOption ?? Math.floor(Math.random() * 0xffffffff) >>> 0;
@@ -805,20 +771,16 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
   }
 
   /**
-   * Someone joined while a game is in progress (allowLateJoin). If a seat has
-   * fallen to autopilot (its human left for good), bind the newcomer to it -
-   * anyone with the room code can take over, from any device or nickname. If
-   * every human seat is still occupied (incl. players inside their reconnect
-   * grace), there is nothing to claim, so reject the join cleanly.
+   * Seat reclaim (framework calls these when a newcomer joins mid-game). A
+   * seat that has fallen to autopilot (its human left for good) can be taken
+   * over by anyone with the room code, from any device or nickname; neutral
+   * seats are never reclaimable.
    */
-  protected override onPlayerJoinedMidGame(player: BasePlayer): void {
-    const i = [...this.state.seats].findIndex((seat) => seat.gone && !seat.neutral);
-    if (i < 0) {
-      // No open seat. onJoin already inserted the player, so remove them and
-      // reject - the SDK surfaces this as a friendly home-screen message.
-      this.state.players.delete(player.sessionId);
-      throw new ServerError(JoinError.GAME_IN_PROGRESS, "This game is already underway with no open seat.");
-    }
+  protected override findReclaimableSeat(): number {
+    return [...this.state.seats].findIndex((seat) => seat.gone && !seat.neutral);
+  }
+
+  protected override reclaimSeat(i: number, player: BasePlayer): void {
     const seat = this.state.seats[i]!;
     const oldNickname = seat.nickname;
     this.seatOrder[i] = player.sessionId;

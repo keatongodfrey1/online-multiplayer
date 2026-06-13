@@ -86,6 +86,18 @@ export class TurnManager {
     }
   }
 
+  /**
+   * Re-insert a seat into the rotation at `atIndex` (e.g. a newcomer
+   * reclaiming an autopilot seat after remove() took it out). No-op if the
+   * seat is already present; keeps "current" pointing at the same player.
+   */
+  insert(sessionId: string, atIndex: number): void {
+    if (this.order.includes(sessionId)) return;
+    const i = Math.max(0, Math.min(atIndex, this.order.length));
+    this.order.splice(i, 0, sessionId);
+    if (i <= this.index) this.index++;
+  }
+
   /** Freeze the turn clock (current player disconnected). */
   pause(): void {
     if (!this.timer || this.pausedRemainingMs !== undefined) return;
