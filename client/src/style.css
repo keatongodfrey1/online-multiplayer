@@ -1642,20 +1642,41 @@ button.spl-gem.selected {
   100% { transform: scale(1); opacity: 1; }
 }
 
-/* Prompt modal */
+/* Prompt modal - a centered, click-through floating panel near the bottom
+   (click-through so the SPACE prompt's click-a-cell still reaches the board). */
 .sc-modal-layer {
-  position: relative;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 18px;
+  display: flex;
+  justify-content: center;
+  padding: 0 12px;
+  pointer-events: none;
+  z-index: 40;
+}
+.sc-passive,
+.sc-prompt {
+  pointer-events: auto;
+  max-width: 520px;
+  width: 100%;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.55);
 }
 .sc-passive {
   text-align: center;
   color: var(--muted);
-  padding: 8px;
+  padding: 10px 14px;
+  background: var(--card);
+  border: 1px solid rgba(150, 160, 210, 0.3);
+  border-radius: 12px;
 }
 .sc-prompt {
   background: var(--card);
   border: 1px solid var(--accent);
   border-radius: 12px;
   padding: 12px;
+  max-height: 60vh;
+  overflow-y: auto;
 }
 .sc-prompt-title {
   font-weight: 700;
