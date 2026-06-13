@@ -190,6 +190,13 @@ export class PerfectPalaceState extends BaseState {
   @type("uint8") deckCount = 0;
   @type("uint8") discardCount = 0;
 
+  // ---- dice animation: a monotonic seq bumped on EVERY server-rolled die (turn
+  // or duel) so the client can animate each roll, even when the value repeats. ----
+  @type("uint32") lastRollSeq = 0;
+  @type("uint8") lastRollValue = 0;
+  /** Engine id of whoever rolled lastRollValue. */
+  @type("string") lastRollBy = "";
+
   // ---- outcome ----
   /** Engine id of the winner (set at game-over), or "". */
   @type("string") winnerId = "";

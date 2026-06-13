@@ -74,6 +74,10 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
   private engineIdBySession = new Map<string, string>();
   private seedOption?: number;
   private actionsApplied = 0;
+  /** Dice-animation feed: a monotonic counter + the last die the server rolled. */
+  private rollSeq = 0;
+  private lastDieValue = 0;
+  private lastDieBy = "";
   /** Pace of an AI / vacated-seat decision (~a second reads as "it took a turn"). */
   public botDelayMs = 850;
   private autoTimer?: Delayed;
@@ -159,6 +163,9 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
       if (sid) this.engineIdBySession.set(sid, ep.id);
     });
     this.actionsApplied = 0;
+    this.rollSeq = 0;
+    this.lastDieValue = 0;
+    this.lastDieBy = "";
 
     // Seats mirror engine players (rebuilt every game; the view never persists).
     this.state.seats.clear();
@@ -213,16 +220,25 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
     }
   }
 
-  /** Client action: inject a server-owned die for the value-taking duel roll,
-   *  then dispatch through the engine. */
+  /** Client action: the server owns every die — for a turn or duel roll it
+   *  generates the seeded value, records it for the animation, and dispatches. */
   private applyClientAction(action: GameAction, senderId: string): void {
-    if (action.type === "turn/duelRollForPlayer") {
-      const { value, rngState } = rollDieFrom(this.engine);
-      this.engine = { ...this.engine, rngState };
-      this.dispatch({ type: "turn/duelRollForPlayer", id: senderId, value });
-      return;
-    }
+    if (action.type === "turn/rollDie") return void this.rollAndDispatch("turn", senderId);
+    if (action.type === "turn/duelRollForPlayer") return void this.rollAndDispatch("duel", senderId);
     this.dispatch(action);
+  }
+
+  /** Generate the seeded server die, record it (feeds the client dice animation
+   *  via lastRollSeq/Value/By in syncFromEngine), thread the rng, and dispatch. */
+  private rollAndDispatch(kind: "turn" | "duel", byEngineId: string): boolean {
+    const { value, rngState } = rollDieFrom(this.engine);
+    this.engine = { ...this.engine, rngState };
+    this.rollSeq++;
+    this.lastDieValue = value;
+    this.lastDieBy = byEngineId;
+    return kind === "duel"
+      ? this.dispatch({ type: "turn/duelRollForPlayer", id: byEngineId, value })
+      : this.dispatch({ type: "turn/rollDieWithValue", value });
   }
 
   /** Validate via the engine; adopt + funnel when accepted. */
@@ -295,13 +311,16 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
   private playAuto(seatIdx: number): void {
     const engineId = this.engine.players[seatIdx]?.id;
     if (!engineId) return;
-    let action = chooseAction(this.engine, engineId);
-    if (action.type === "turn/duelRollForPlayer") {
-      const { value, rngState } = rollDieFrom(this.engine);
-      this.engine = { ...this.engine, rngState };
-      action = { ...action, value };
-    }
-    if (this.dispatch(action)) return;
+    const action = chooseAction(this.engine, engineId);
+    // Rolls go through the same server-owned die path as a human's (so the bot's
+    // rolls animate too); everything else dispatches directly.
+    const ok =
+      action.type === "turn/rollDie"
+        ? this.rollAndDispatch("turn", engineId)
+        : action.type === "turn/duelRollForPlayer"
+          ? this.rollAndDispatch("duel", engineId)
+          : this.dispatch(action);
+    if (ok) return;
     // Safety net: the policy emitted something illegal (shouldn't happen) — end
     // the turn so the table never stalls; if even that is illegal, re-schedule.
     if (!this.dispatch({ type: "turn/endTurn" })) this.maybeScheduleAuto();
@@ -437,6 +456,10 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
     set(s, "bailiffBy", e.bailiff.kind === "held" ? e.bailiff.by : "");
     set(s, "deckCount", e.deck.length);
     set(s, "discardCount", e.discard.length);
+
+    set(s, "lastRollSeq", this.rollSeq);
+    set(s, "lastRollValue", this.lastDieValue);
+    set(s, "lastRollBy", this.lastDieBy);
 
     set(s, "winnerId", over ? this.computeWinnerId() : "");
     set(s, "palaceBuiltBy", e.palaceBuiltBy ?? "");

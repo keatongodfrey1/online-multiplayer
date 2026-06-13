@@ -146,6 +146,17 @@ describe("perfect palace", () => {
     assert.ok(room.state.lastRoll >= 1 && room.state.lastRoll <= 6, "server rolled a real d6");
   });
 
+  it("bumps the dice-animation feed on each server roll", async () => {
+    const { room, clients } = await startedGame(8, 2);
+    await completeMapping(room, clients);
+    const current = room.engine.currentPlayerId!;
+    const seq0 = room.state.lastRollSeq;
+    clientForId(room, clients, current)!.send(PerfectPalaceMsg.ACTION, { type: "turn/rollDie" });
+    await until(() => room.state.lastRollSeq > seq0);
+    assert.ok(room.state.lastRollValue >= 1 && room.state.lastRollValue <= 6, "die value is 1-6");
+    assert.equal(room.state.lastRollBy, current, "feed records who rolled");
+  });
+
   // ---- simultaneous mapping ------------------------------------------------
 
   it("keeps initial picks hidden until everyone locks, and binds the lock to the sender", async () => {

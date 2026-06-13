@@ -1987,3 +1987,45 @@ button.spl-gem.selected {
   .pp-side { flex: none; overflow: visible; }
   .pp-action, .pp-players, .pp-log { max-height: none; overflow: visible; flex: none; }
 }
+
+/* Perfect Palace — dice roll animation (a body-level portal so the view's
+   innerHTML re-render never wipes it mid-tumble). Mirrors Space Chase's timing. */
+.pp-dice-layer {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 60;
+}
+.pp-dice-layer.show { display: flex; }
+.pp-dice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.pp-die {
+  font-size: 120px;
+  line-height: 1;
+  color: #fffdf8;
+  text-shadow: 0 0 26px #e8d79a, 0 4px 10px rgba(0, 0, 0, 0.5);
+}
+.pp-die.landed { animation: pp-dice-pop 0.5s ease; }
+.pp-die-cap {
+  font-family: 'Cinzel', Georgia, serif;
+  font-weight: 700;
+  font-size: 18px;
+  color: #fffdf8;
+  background: rgba(92, 61, 138, 0.9);
+  border: 1px solid #c9a140;
+  border-radius: 10px;
+  padding: 4px 14px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+@keyframes pp-dice-pop {
+  0% { transform: scale(0.6); opacity: 0; }
+  60% { transform: scale(1.18); }
+  100% { transform: scale(1); opacity: 1; }
+}

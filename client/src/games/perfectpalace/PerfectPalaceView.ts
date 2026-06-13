@@ -61,6 +61,10 @@ export class PerfectPalaceView implements GameView {
   /** Local-only fine forfeit selection. */
   private fineSel = { bricks: 0, sticks: 0, walls: 0, roofs: 0 };
   private iWasActing = false;
+  /** Dice animation: a portal element (outside the re-rendered DOM) + timers. */
+  private diceLayer?: HTMLElement;
+  private diceTimers = new Set<ReturnType<typeof setTimeout>>();
+  private lastSeenRollSeq = 0;
 
   mount(root: HTMLElement, room: Room<any, BaseState>, ctx: GameViewContext): void {
     this.root = root;
@@ -69,6 +73,12 @@ export class PerfectPalaceView implements GameView {
     root.classList.add("pp");
     root.addEventListener("click", this.onClick);
     root.addEventListener("change", this.onChange);
+    // Dice overlay lives on <body> so the full innerHTML re-render never wipes it
+    // mid-tumble. Start in sync so a roll that happened before we joined doesn't replay.
+    this.diceLayer = document.createElement("div");
+    this.diceLayer.className = "pp-dice-layer";
+    document.body.appendChild(this.diceLayer);
+    this.lastSeenRollSeq = this.room.state?.lastRollSeq ?? 0;
     hookSaveData(this.room, PP_SAVES_KEY, (blob) => (blob?.turnCount ?? 0) + 1, () =>
       flashToast(this.root!, "Game saved ✓"),
     );
@@ -81,8 +91,43 @@ export class PerfectPalaceView implements GameView {
     this.root?.removeEventListener("click", this.onClick);
     this.root?.removeEventListener("change", this.onChange);
     this.root?.classList.remove("pp");
+    for (const t of this.diceTimers) clearTimeout(t);
+    this.diceTimers.clear();
+    this.diceLayer?.remove();
+    this.diceLayer = undefined;
     this.root = undefined;
     this.room = undefined;
+  }
+
+  private after(ms: number, fn: () => void): void {
+    const t = setTimeout(() => {
+      this.diceTimers.delete(t);
+      fn();
+    }, ms);
+    this.diceTimers.add(t);
+  }
+
+  /** Tumble a die that lands on `value` (matching Space Chase's timing/feel). */
+  private showDice(value: number, who: string): void {
+    const layer = this.diceLayer;
+    if (!layer) return;
+    const FACES = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"];
+    const face = (n: number) => FACES[Math.max(0, Math.min(5, n - 1))]!;
+    layer.innerHTML = `<div class="pp-dice"><div class="pp-die"></div><div class="pp-die-cap">${escapeHtml(who)} rolled a ${value}</div></div>`;
+    layer.classList.add("show");
+    const die = layer.querySelector<HTMLElement>(".pp-die")!;
+    let flips = 0;
+    const spin = () => {
+      if (flips++ > 6) {
+        die.textContent = face(value);
+        die.classList.add("landed");
+        return;
+      }
+      die.textContent = face(Math.floor(Math.random() * 6) + 1);
+      this.after(80, spin);
+    };
+    spin();
+    this.after(1750, () => layer.classList.remove("show"));
   }
 
   // ---- identity helpers ----------------------------------------------------
@@ -127,6 +172,11 @@ export class PerfectPalaceView implements GameView {
     if (!this.root || !this.room?.state) return;
     const s = this.room.state;
     const me = this.mySeat();
+    // A fresh server roll (seq bumped) tumbles the dice overlay.
+    if (s.lastRollSeq > this.lastSeenRollSeq) {
+      this.lastSeenRollSeq = s.lastRollSeq;
+      this.showDice(s.lastRollValue, this.seatById(s.lastRollBy)?.nickname ?? "Someone");
+    }
     const acting = this.iMustAct();
     if (acting && !this.iWasActing) {
       turnChime();
