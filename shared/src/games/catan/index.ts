@@ -30,12 +30,7 @@ export const CatanMsg = {
   /** Any player, lobby-only. Payload: { color?: string } - pick your piece
    *  color ("" clears). Rejected if another player already chose it. */
   PICK_COLOR: "catan/pickColor",
-  /** Host, mid-game. Asks the server for a save snapshot. */
-  SAVE: "catan/save",
-  /** Server -> host. The save blob to store in the host's browser. */
-  SAVE_DATA: "catan/saveData",
-  /** Host, lobby-only. Stage a save blob to resume (or null to clear). */
-  LOAD: "catan/load",
+  // SAVE / SAVE_DATA / LOAD are framework messages now (LobbyMsg / ServerMsg).
 } as const;
 
 /** The piece colors players may pick (the board palette has exactly these). */
@@ -180,6 +175,5 @@ export class CatanState extends BaseState {
   @type(["string"]) log = new ArraySchema<string>();
   /** Completed turns (for the HUD). */
   @type("uint16") turnCount = 0;
-  /** Lobby: a human-readable "resuming a saved game" banner ("" = none). */
-  @type("string") loadedSave = "";
+  // loadedSave now lives on BaseState (framework-owned save/resume).
 }

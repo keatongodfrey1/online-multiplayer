@@ -33,7 +33,7 @@ import {
   SplendorSeat,
   SplendorState,
 } from "@backbone/shared";
-import { BaseGameRoom } from "../../framework/BaseGameRoom.js";
+import { BaseGameRoom, type FrameworkSaveSeat } from "../../framework/BaseGameRoom.js";
 import { TurnManager } from "../../framework/TurnManager.js";
 import { grantPrivateView, revokePrivateView } from "../../framework/privateState.js";
 import { parseSave, serializeSave, type ParsedSave, type SaveSeat } from "./save.js";
@@ -65,6 +65,11 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
   readonly minPlayers = 2;
   readonly maxPlayers = 4;
   override supportsBots = true;
+  override supportsSaves = true;
+  // Never lock the room - a newcomer with the code can take over a seat that
+  // has fallen to autopilot (see the reclaim hooks).
+  override allowLateJoin = true;
+  override supportsReclaim = true;
 
   /** Server-only engine truth (never synced). Public for white-box tests. */
   public engine!: GameState;
@@ -79,8 +84,6 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
   public botBrains = new Map<string, Policy>();
   /** Difficulty per bot sessionId, chosen when the host seats it. */
   private botDifficulty = new Map<string, "easy" | "hard">();
-  /** A validated save staged in the lobby, consumed by the next start. */
-  private pendingLoad?: ParsedSave;
   /**
    * Pace of bot decisions. Instant bot turns would make the board mutate
    * with no visible cause; ~a second reads as "the bot took its turn".
@@ -114,15 +117,41 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     this.onMessage(SplendorMsg.RESOLVE, (client, payload) => this.handleResolve(client, payload));
     this.onMessage(SplendorMsg.CONFIG, (client, payload) => this.handleConfig(client, payload));
     this.onMessage(SplendorMsg.PAUSE, (client, payload) => this.handlePause(client, payload));
-    this.onMessage(SplendorMsg.SAVE, (client) => this.handleSave(client));
-    this.onMessage(SplendorMsg.LOAD, (client, payload) => this.handleLoad(client, payload));
   }
 
-  /** Hand the host a save blob to keep in their browser's save slots. */
-  private handleSave(client: Client): void {
-    if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.over) return;
-    if (client.sessionId !== this.state.hostSessionId) return;
-    client.send(SplendorMsg.SAVE_DATA, this.buildSave());
+  // ---- save/resume hooks (framework owns the orchestration) --------------
+
+  protected override isGameOver(): boolean {
+    return !this.engine || this.engine.over;
+  }
+
+  protected override loadedSaveTurnLabel(parsed: unknown): number {
+    return (parsed as ParsedSave).engine.turnCount + 1;
+  }
+
+  /** Restore the saved turn timer. */
+  protected override onSaveStaged(parsed: unknown): void {
+    this.state.turnSeconds = (parsed as ParsedSave).turnSeconds;
+  }
+
+  /** Restore a re-seated bot's difficulty (and its name suffix). */
+  protected override onLoadedBotSeated(bot: BasePlayer, savedSeat: FrameworkSaveSeat): void {
+    const saved = (this.pendingLoad?.payload as ParsedSave | undefined)?.seats.find(
+      (s) => s.isBot && s.nickname.toLowerCase() === savedSeat.nickname.toLowerCase()
+    );
+    this.botDifficulty.set(bot.sessionId, saved?.difficulty ?? "hard");
+  }
+
+  protected override onBotRemoved(sessionId: string): void {
+    this.botDifficulty.delete(sessionId);
+  }
+
+  protected override parseSave(raw: unknown): ParsedSave | null {
+    return parseSave(raw);
+  }
+
+  protected override serializeSave(): object | null {
+    return this.buildSave();
   }
 
   /** Current game -> save blob. Public for white-box tests. */
@@ -137,64 +166,6 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
       };
     });
     return serializeSave({ engine: this.engine, seats, turnSeconds: this.state.turnSeconds });
-  }
-
-  /**
-   * Host stages a saved game in the lobby (or clears it with a null
-   * payload). Bots from the save are auto-seated; the game can then only
-   * start once the present humans match the save's human lineup.
-   */
-  private handleLoad(client: Client, payload: unknown): void {
-    if (this.state.phase !== Phase.LOBBY) return;
-    if (client.sessionId !== this.state.hostSessionId) return;
-
-    if (payload === null || payload === undefined) {
-      this.pendingLoad = undefined;
-      this.state.loadedSave = "";
-      this.removeBots();
-      return;
-    }
-
-    const parsed = parseSave(payload);
-    if (!parsed) return; // corrupt or tampered: ignore silently
-
-    this.pendingLoad = parsed;
-    this.state.turnSeconds = parsed.turnSeconds;
-    // Recreate the save's bot lineup; humans have to show up themselves.
-    this.removeBots();
-    for (const seat of parsed.seats) {
-      if (!seat.isBot || seat.gone) continue;
-      if (this.state.players.size >= this.maxPlayers) break; // cannot happen for a valid save
-      const bot = this.seatBot(seat.nickname);
-      this.botDifficulty.set(bot.sessionId, seat.difficulty ?? "hard");
-    }
-    const humans = parsed.seats.filter((s) => !s.isBot && !s.gone).map((s) => s.nickname);
-    this.state.loadedSave =
-      `Resuming a saved game (turn ${parsed.engine.turnCount + 1}). ` +
-      `Players needed: ${humans.join(", ")}`;
-  }
-
-  /** While a save is staged, only the exact saved lineup may start. */
-  protected override canStartGame(): boolean {
-    if (!this.pendingLoad) return true;
-    const required = new Set(
-      this.pendingLoad.seats.filter((s) => !s.isBot && !s.gone).map((s) => s.nickname.toLowerCase())
-    );
-    const humans = [...this.state.players.values()].filter((p) => !p.isBot);
-    if (humans.length !== required.size) return false;
-    if (!humans.every((p) => required.has(p.nickname.toLowerCase()))) return false;
-    // No extra bots either (the host could have added some after loading).
-    const requiredBots = this.pendingLoad.seats.filter((s) => s.isBot && !s.gone).length;
-    const presentBots = this.state.players.size - humans.length;
-    return presentBots === requiredBots;
-  }
-
-  private removeBots(): void {
-    for (const player of [...this.state.players.values()]) {
-      if (!player.isBot) continue;
-      this.state.players.delete(player.sessionId);
-      this.botDifficulty.delete(player.sessionId);
-    }
   }
 
   /** Host adjusts the turn timer while in the lobby. */
@@ -234,7 +205,7 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
   protected onGameStart(): void {
     // Full re-init - this also runs on rematch.
     const players = [...this.state.players.values()].sort((a, b) => a.seat - b.seat);
-    const load = this.pendingLoad;
+    const load = this.pendingLoad?.payload as ParsedSave | undefined;
     this.pendingLoad = undefined; // consumed; a rematch later starts fresh
     this.state.loadedSave = "";
 
@@ -555,6 +526,27 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
   }
 
   // ---- framework hooks -------------------------------------------------------
+
+  /**
+   * Seat reclaim: a newcomer takes over a seat that left for good (the ghost
+   * was playing it). onPlayerLeftForGood removed it from the TurnManager, so
+   * reclaim must re-insert it into the rotation.
+   */
+  protected override findReclaimableSeat(): number {
+    return [...this.state.seats].findIndex((seat) => seat.gone);
+  }
+
+  protected override reclaimSeat(i: number, player: BasePlayer): void {
+    const seat = this.state.seats[i]!;
+    this.seatOrder[i] = player.sessionId;
+    this.frameworkSeatByEngineSeat[i] = player.seat; // else a win maps to the departed seat
+    seat.sessionId = player.sessionId;
+    seat.nickname = player.nickname;
+    seat.gone = false;
+    this.regrantReserved(player.sessionId, seat.reserved);
+    this.turns?.insert(player.sessionId, i); // back into the rotation (removed on leave)
+    this.afterApply(); // settle (ghost stops, isVacated is now false), sync, re-align the clock
+  }
 
   protected override onPlayerDropped(player: BasePlayer): void {
     if (this.turns?.current() === player.sessionId) this.syncClock();

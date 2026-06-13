@@ -833,7 +833,7 @@ describe("catan", () => {
     const room2 = (await colyseus.createRoom(CATAN, { seed: 999 })) as unknown as CatanRoom;
     const c2 = [];
     for (let i = 0; i < 3; i++) c2.push(await colyseus.connectTo(room2, { nickname: `Player${i}` }));
-    c2[0]!.send(CatanMsg.LOAD, snapshot);
+    c2[0]!.send(LobbyMsg.LOAD, snapshot);
     await until(() => room2.state.loadedSave !== "");
     c2[0]!.send(LobbyMsg.START, {});
     await until(() => room2.state.phase === Phase.PLAYING);
@@ -864,7 +864,7 @@ describe("catan", () => {
 
     const room2 = (await colyseus.createRoom(CATAN, { seed: 998 })) as unknown as CatanRoom;
     const host = await colyseus.connectTo(room2, { nickname: "Player0" });
-    host.send(CatanMsg.LOAD, snapshot);
+    host.send(LobbyMsg.LOAD, snapshot);
     await until(() => room2.state.loadedSave !== "");
 
     // only 1 of 3 saved humans present -> start is vetoed
@@ -911,12 +911,12 @@ describe("catan", () => {
       (() => { const b = structuredClone(good); b.engine.board.vertices[0].building = { owner: 9, type: "city" }; return b; })(), // owner range
     ];
     for (const bad of tampered) {
-      host.send(CatanMsg.LOAD, bad);
+      host.send(LobbyMsg.LOAD, bad);
       await sleep(40);
       assert.equal(room2.state.loadedSave, "", `rejected: ${JSON.stringify(bad).slice(0, 40)}`);
     }
     // the good one is still accepted
-    host.send(CatanMsg.LOAD, good);
+    host.send(LobbyMsg.LOAD, good);
     await until(() => room2.state.loadedSave !== "");
   });
 
@@ -946,7 +946,7 @@ describe("catan", () => {
     const room2 = (await colyseus.createRoom(CATAN, { seed: 996 })) as unknown as CatanRoom;
     const a2 = await colyseus.connectTo(room2, { nickname: "Ann" });
     room2.botDelayMs = 1;
-    a2.send(CatanMsg.LOAD, snapshot);
+    a2.send(LobbyMsg.LOAD, snapshot);
     await until(() => room2.state.loadedSave !== "");
     assert.ok([...room2.state.players.values()].some((p) => p.isBot), "the saved bot was re-seated");
     a2.send(LobbyMsg.START, {});

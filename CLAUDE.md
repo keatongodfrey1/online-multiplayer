@@ -32,6 +32,56 @@ be plain, and you must verify before declaring success.
 6. Schema subclasses with no new `@type` fields need `@entity`.
 7. ESM imports end in `.js` even between TypeScript files.
 
+## Before you write a new game: lock four decisions
+
+Settle these with the owner (in plain words) before any code - they shape
+the schema and the room, and changing them later is a rewrite:
+
+1. **Player count** - exact min and max (drives `minPlayers`/`maxPlayers`
+   and whether a 2-player edge case exists, e.g. "abandon vs play on").
+2. **AI bots?** - if yes, the room sets `supportsBots` and plays bot turns;
+   decide whether there are difficulty levels.
+3. **Hidden information?** - does any player see something others don't (a
+   hand, secret role)? If yes you need `@view()` private state - read the
+   schema-v4 per-item gotcha in ARCHITECTURE.md *before* designing the schema.
+4. **What it's called** - the `displayName` and one-line description shown in
+   the lobby.
+
+For a rules-heavy game, **port the rules as a pure engine first** (a
+`shared/src/games/<game>/engine/` module with no Colyseus imports), unit-test
+that engine on its own, then write the room as a thin adapter (copy
+`SplendorRoom`/`CatanRoom`, not the thin TicTacToe room). The engine's tests
+travel with it and are your regression net; do not fold game logic into the
+room.
+
+## Framework capabilities you INHERIT (don't re-implement them per game)
+
+These are framework features, turned on with a flag and a few hooks - never
+copy their machinery into a game. See ARCHITECTURE.md ("Capabilities the
+framework already provides") and ADDING_A_GAME.md for the wiring:
+
+- Reconnection (180s grace) + host migration - automatic.
+- AI bots - `supportsBots`.
+- Save / resume - `supportsSaves` + serialize/parse hooks (+ the shared
+  `saveSlots.ts` client UI). The save blob is never trusted; the server
+  re-validates it on load.
+- Mid-game seat reclaim - `supportsReclaim` + `allowLateJoin`.
+- Turn chime/toast (`framework/turnAlert.ts`) + slept-tablet recovery
+  (`framework/wakeUp.ts`) - turn alerts are a default for turn-based games.
+
+If a capability genuinely needs extending, that is a **deliberate framework
+task** (rule 2): edit the framework on its own, run the full suite, and
+update these docs - never fork it inside a game.
+
+## Verify in the browser, and show your work
+
+`typecheck && test && build` green is necessary, not sufficient. For
+anything with a UI, run the README two-window smoke test (including a
+mid-game refresh, and for drop-in games a fresh-browser rejoin) and **send
+the owner screenshots** of the actual result - they are a non-coder and the
+screenshot is how they confirm it works. Never declare a UI change done on
+green tests alone.
+
 ## Testing notes
 
 - Test suites build their server config via a factory (`makeConfig()`),

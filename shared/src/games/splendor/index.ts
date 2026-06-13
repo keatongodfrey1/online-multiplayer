@@ -28,16 +28,7 @@ export const SplendorMsg = {
    * freezes the turn clock and blocks moves until someone resumes.
    */
   PAUSE: "splendor/pause",
-  /** Host, mid-game: request a save snapshot. Server answers with SAVE_DATA. */
-  SAVE: "splendor/save",
-  /** Server -> requesting client: the save blob (stored in the host's browser). */
-  SAVE_DATA: "splendor/saveData",
-  /**
-   * Host, lobby only: stage a previously saved game (payload = the blob from
-   * SAVE_DATA; null clears). The lobby can then only start once the right
-   * players are present; the save is validated server-side.
-   */
-  LOAD: "splendor/load",
+  // SAVE / SAVE_DATA / LOAD are framework messages now (LobbyMsg / ServerMsg).
 } as const;
 
 /** Turn-timer options: 0 = off, otherwise 15s steps up to 5 minutes. */
@@ -136,9 +127,5 @@ export class SplendorState extends BaseState {
   @type("boolean") paused = false;
   /** Nickname of whoever paused, for the banner. */
   @type("string") pausedBy = "";
-  /**
-   * Non-empty while the lobby is staged to resume a saved game: a
-   * human-readable description incl. the players the save is waiting for.
-   */
-  @type("string") loadedSave = "";
+  // loadedSave now lives on BaseState (framework-owned save/resume).
 }

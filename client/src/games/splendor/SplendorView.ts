@@ -20,6 +20,7 @@ import {
   type SplendorState,
 } from "@backbone/shared";
 import type { GameView, GameViewContext, LobbySettingsContext } from "../../framework/GameView.js";
+import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
 import { escapeHtml } from "../../lobby/HomeScreen.js";
 import { clockChime, flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
 
@@ -79,50 +80,9 @@ function formatSeconds(total: number): string {
 
 // ---- save slots (host's browser keeps the box on its shelf) -------------------
 
-const SAVES_KEY = "splendor-saves";
-const MAX_SAVE_SLOTS = 12;
-
-interface SaveSlot {
-  id: string;
-  label: string;
-  savedAt: number;
-  save: unknown;
-}
-
-function loadSaveSlots(): SaveSlot[] {
-  try {
-    const raw = localStorage.getItem(SAVES_KEY);
-    const list = raw ? JSON.parse(raw) : [];
-    return Array.isArray(list) ? (list as SaveSlot[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeSaveSlots(slots: SaveSlot[]): void {
-  try {
-    localStorage.setItem(SAVES_KEY, JSON.stringify(slots.slice(0, MAX_SAVE_SLOTS)));
-  } catch {
-    // storage full/blocked - the in-game button will just not confirm
-  }
-}
-
-/** Set by the mounted view so the once-per-room message handler can reach it. */
-let onSaveStored: (() => void) | undefined;
-
-function storeSaveSlot(save: unknown): void {
-  const blob = save as { seats?: { nickname?: string }[]; engine?: { turnCount?: number } } | null;
-  const names = (blob?.seats ?? []).map((s) => s?.nickname ?? "?").join(", ");
-  const turn = (blob?.engine?.turnCount ?? 0) + 1;
-  const slots = loadSaveSlots();
-  slots.unshift({
-    id: `${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
-    label: `${names} — turn ${turn}`,
-    savedAt: Date.now(),
-    save,
-  });
-  writeSaveSlots(slots);
-}
+/** Save-slot storage key + the blob's turn field (framework save/resume). */
+const SPLENDOR_SAVES_KEY = "splendor-saves";
+const splendorTurnLabel = (blob: any) => (blob?.engine?.turnCount ?? 0) + 1;
 
 /**
  * Lobby settings (GameDefinition.renderLobbySettings): the turn-timer picker.
@@ -149,36 +109,6 @@ export function renderSplendorLobbySettings(
          </div>`
       : `<div class="spl-lobby-setting muted">Table is full</div>`
     : "";
-  // Saved games: slots live in this browser; loading stages the save on the
-  // server, which then waits for the saved players before Start unlocks.
-  let savedGames = "";
-  if (state.loadedSave) {
-    savedGames = `
-      <div class="spl-loaded-save">
-        <span class="badge warn">${escapeHtml(state.loadedSave)}</span>
-        ${ctx.isHost ? '<button id="spl-load-clear" class="subtle">Cancel</button>' : ""}
-      </div>`;
-  } else if (ctx.isHost) {
-    const slots = loadSaveSlots();
-    if (slots.length > 0) {
-      const rows = slots
-        .map(
-          (slot) => `
-          <li class="spl-save-slot">
-            <span>${escapeHtml(slot.label)}
-              <span class="muted">· ${new Date(slot.savedAt).toLocaleString()}</span></span>
-            <span>
-              <button class="spl-load-slot" data-save-id="${escapeHtml(slot.id)}">Resume</button>
-              <button class="subtle spl-delete-slot" data-save-id="${escapeHtml(slot.id)}">Delete</button>
-            </span>
-          </li>`
-        )
-        .join("");
-      savedGames = `<details class="spl-saves"><summary>Saved games (${slots.length})</summary>
-        <ul>${rows}</ul></details>`;
-    }
-  }
-
   container.innerHTML = `
     <label class="spl-lobby-setting">
       Turn timer
@@ -186,7 +116,13 @@ export function renderSplendorLobbySettings(
       ${ctx.isHost ? "" : '<span class="muted">(host chooses)</span>'}
     </label>
     ${addBots}
-    ${savedGames}`;
+    <div class="spl-saves-block"></div>`;
+  // Saved games (shared framework helper): banner while staged, else the slot list.
+  renderSaveSlots(container.querySelector<HTMLElement>(".spl-saves-block")!, room, {
+    key: SPLENDOR_SAVES_KEY,
+    isHost: ctx.isHost,
+    loadedSave: state.loadedSave,
+  });
   container.querySelector<HTMLSelectElement>("#spl-turn-seconds")?.addEventListener("change", (ev) => {
     const turnSeconds = Number((ev.target as HTMLSelectElement).value);
     room.send(SplendorMsg.CONFIG, { turnSeconds });
@@ -194,21 +130,6 @@ export function renderSplendorLobbySettings(
   container.querySelectorAll<HTMLButtonElement>(".spl-add-bot").forEach((btn) => {
     btn.addEventListener("click", () => {
       room.send(LobbyMsg.ADD_BOT, { difficulty: btn.dataset.difficulty });
-    });
-  });
-  container.querySelector<HTMLButtonElement>("#spl-load-clear")?.addEventListener("click", () => {
-    room.send(SplendorMsg.LOAD, null);
-  });
-  container.querySelectorAll<HTMLButtonElement>(".spl-load-slot").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const slot = loadSaveSlots().find((s) => s.id === btn.dataset.saveId);
-      if (slot) room.send(SplendorMsg.LOAD, slot.save);
-    });
-  });
-  container.querySelectorAll<HTMLButtonElement>(".spl-delete-slot").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      writeSaveSlots(loadSaveSlots().filter((s) => s.id !== btn.dataset.saveId));
-      renderSplendorLobbySettings(container, room, ctx); // re-render in place
     });
   });
 }
@@ -369,23 +290,13 @@ export class SplendorView implements GameView {
     `;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
-    // SAVE_DATA arrives in response to the Save button. Message handlers on
-    // the SDK room cannot be removed, and a rematch mounts a fresh view on
-    // the SAME room - so register once per room and route through a
-    // module-level hook that always points at the live view.
-    const hooked = this.room as unknown as { __splSaveHooked?: boolean };
-    if (!hooked.__splSaveHooked) {
-      hooked.__splSaveHooked = true;
-      this.room.onMessage(SplendorMsg.SAVE_DATA, (save: unknown) => {
-        storeSaveSlot(save);
-        onSaveStored?.();
-      });
-    }
-    onSaveStored = () => {
+    // SAVE_DATA returns from the host's Save button; the framework helper
+    // stores the snapshot and flashes "Saved ✓".
+    hookSaveData(this.room, SPLENDOR_SAVES_KEY, splendorTurnLabel, () => {
       this.saveFlashUntil = Date.now() + 2000;
       this.render();
       setTimeout(() => this.render(), 2100); // drop the "Saved ✓" label again
-    };
+    });
     this.ticker = setInterval(() => this.updateTimer(), 500);
     this.render();
   }
@@ -393,7 +304,6 @@ export class SplendorView implements GameView {
   unmount(): void {
     if (this.ticker) clearInterval(this.ticker);
     this.ticker = undefined;
-    onSaveStored = undefined;
     this.room?.onStateChange.remove(this.onState);
     this.root?.removeEventListener("click", this.onClick);
     this.root = undefined;
@@ -460,7 +370,7 @@ export class SplendorView implements GameView {
         this.room.send(SplendorMsg.PAUSE, { paused: !this.room.state.paused });
         return;
       case "save-game":
-        this.room.send(SplendorMsg.SAVE, {});
+        this.room.send(LobbyMsg.SAVE, {});
         return;
       case "toggle-mute":
         setMuted(!isMuted());

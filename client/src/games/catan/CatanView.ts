@@ -20,6 +20,7 @@ import {
   LobbyMsg,
 } from "@backbone/shared";
 import type { GameView, GameViewContext, LobbySettingsContext } from "../../framework/GameView.js";
+import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
 import { flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
 import { escapeHtml } from "../../lobby/HomeScreen.js";
 import { PLAYER_COLOR, renderBoardSvg, resourceIcon, type BoardUi } from "./board.js";
@@ -44,46 +45,9 @@ const geo = buildBoardGeometry();
 const zeroBag = (): Bag => ({ lumber: 0, brick: 0, wool: 0, grain: 0, ore: 0 });
 const bagTotal = (b: Bag) => RESOURCES.reduce((t, r) => t + b[r], 0);
 
-// ---- save slots (host's browser) --------------------------------------------
-const SAVES_KEY = "catan-saves";
-const MAX_SAVE_SLOTS = 12;
-interface SaveSlot {
-  id: string;
-  label: string;
-  savedAt: number;
-  save: unknown;
-}
-function loadSaveSlots(): SaveSlot[] {
-  try {
-    const raw = localStorage.getItem(SAVES_KEY);
-    const list = raw ? JSON.parse(raw) : [];
-    return Array.isArray(list) ? (list as SaveSlot[]) : [];
-  } catch {
-    return [];
-  }
-}
-function writeSaveSlots(slots: SaveSlot[]): void {
-  try {
-    localStorage.setItem(SAVES_KEY, JSON.stringify(slots.slice(0, MAX_SAVE_SLOTS)));
-  } catch {
-    // storage full/blocked - the Save button just won't confirm
-  }
-}
-/** Set by the mounted view so the once-per-room SAVE_DATA handler can reach it. */
-let onSaveStored: (() => void) | undefined;
-function storeSaveSlot(save: unknown): void {
-  const blob = save as { seats?: { nickname?: string }[]; turnCount?: number } | null;
-  const names = (blob?.seats ?? []).map((s) => s?.nickname ?? "?").join(", ");
-  const turn = (blob?.turnCount ?? 0) + 1;
-  const slots = loadSaveSlots();
-  slots.unshift({
-    id: `${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
-    label: `${names} — turn ${turn}`,
-    savedAt: Date.now(),
-    save,
-  });
-  writeSaveSlots(slots);
-}
+/** Save-slot storage key + the blob's turn field (framework save/resume). */
+const CATAN_SAVES_KEY = "catan-saves";
+const catanTurnLabel = (blob: any) => (blob?.turnCount ?? 0) + 1;
 
 /** Bridge the flat synced arrays back into an engine BoardState for the
  *  pure validators (board contents are public). */
@@ -175,54 +139,17 @@ export function renderCatanLobbySettings(
       </button>`
     : "";
 
-  // Saved games live in this browser; loading stages the save on the server,
-  // which then waits for the saved players before Start unlocks.
-  let savedGames = "";
-  if (state.loadedSave) {
-    savedGames = `
-      <div class="catan-loaded-save">
-        <span class="badge warn">${escapeHtml(state.loadedSave)}</span>
-        ${ctx.isHost ? '<button id="catan-load-clear" class="subtle">Cancel</button>' : ""}
-      </div>`;
-  } else if (ctx.isHost) {
-    const slots = loadSaveSlots();
-    if (slots.length > 0) {
-      const rows = slots
-        .map(
-          (slot) => `
-          <li class="catan-save-slot">
-            <span>${escapeHtml(slot.label)} <span class="muted">· ${new Date(slot.savedAt).toLocaleString()}</span></span>
-            <span>
-              <button class="catan-load-slot" data-save-id="${escapeHtml(slot.id)}">Resume</button>
-              <button class="subtle catan-delete-slot" data-save-id="${escapeHtml(slot.id)}">Delete</button>
-            </span>
-          </li>`,
-        )
-        .join("");
-      savedGames = `<details class="catan-saves"><summary>Saved games (${slots.length})</summary><ul>${rows}</ul></details>`;
-    }
-  }
-
-  container.innerHTML = colorRow + twoRules + note + robber + addBot + savedGames;
+  container.innerHTML = colorRow + twoRules + note + robber + addBot + `<div class="catan-saves-block"></div>`;
+  // Saved games (shared framework helper): banner while staged, else the slot list.
+  renderSaveSlots(container.querySelector<HTMLElement>(".catan-saves-block")!, room, {
+    key: CATAN_SAVES_KEY,
+    isHost: ctx.isHost,
+    loadedSave: state.loadedSave,
+  });
   container.querySelectorAll<HTMLButtonElement>(".catan-color-swatch").forEach((btn) => {
     btn.addEventListener("click", () => {
       const c = btn.dataset.color!;
       room.send(CatanMsg.PICK_COLOR, { color: c === myColor ? "" : c });
-    });
-  });
-  container.querySelector<HTMLButtonElement>("#catan-load-clear")?.addEventListener("click", () => {
-    room.send(CatanMsg.LOAD, null);
-  });
-  container.querySelectorAll<HTMLButtonElement>(".catan-load-slot").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const slot = loadSaveSlots().find((s) => s.id === btn.dataset.saveId);
-      if (slot) room.send(CatanMsg.LOAD, slot.save);
-    });
-  });
-  container.querySelectorAll<HTMLButtonElement>(".catan-delete-slot").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      writeSaveSlots(loadSaveSlots().filter((s) => s.id !== btn.dataset.saveId));
-      renderCatanLobbySettings(container, room, ctx); // re-render in place
     });
   });
   container.querySelector<HTMLSelectElement>("#catan-two-rules")?.addEventListener("change", (ev) => {
@@ -345,27 +272,17 @@ export class CatanView implements GameView {
       </div>`;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
-    // SAVE_DATA returns from the Save button. Message handlers can't be
-    // removed and a rematch mounts a fresh view on the SAME room, so register
-    // once per room and route through a module-level hook at the live view.
-    const hooked = this.room as unknown as { __catanSaveHooked?: boolean };
-    if (!hooked.__catanSaveHooked) {
-      hooked.__catanSaveHooked = true;
-      this.room.onMessage(CatanMsg.SAVE_DATA, (save: unknown) => {
-        storeSaveSlot(save);
-        onSaveStored?.();
-      });
-    }
-    onSaveStored = () => {
+    // SAVE_DATA returns from the host's Save button; the framework helper
+    // stores the snapshot and flashes "Saved ✓".
+    hookSaveData(this.room, CATAN_SAVES_KEY, catanTurnLabel, () => {
       this.saveFlashUntil = Date.now() + 2000;
       this.render();
       setTimeout(() => this.render(), 2100); // drop the "Saved ✓" label again
-    };
+    });
     this.render();
   }
 
   unmount(): void {
-    onSaveStored = undefined;
     this.room?.onStateChange.remove(this.onState);
     this.root?.removeEventListener("click", this.onClick);
     this.root = undefined;
@@ -1011,7 +928,7 @@ export class CatanView implements GameView {
         return;
       // action bar
       case "save-game":
-        this.room.send(CatanMsg.SAVE, {});
+        this.room.send(LobbyMsg.SAVE, {});
         return;
       case "toggle-mute":
         setMuted(!isMuted());
