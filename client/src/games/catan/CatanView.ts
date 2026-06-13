@@ -43,6 +43,47 @@ const geo = buildBoardGeometry();
 const zeroBag = (): Bag => ({ lumber: 0, brick: 0, wool: 0, grain: 0, ore: 0 });
 const bagTotal = (b: Bag) => RESOURCES.reduce((t, r) => t + b[r], 0);
 
+// ---- save slots (host's browser) --------------------------------------------
+const SAVES_KEY = "catan-saves";
+const MAX_SAVE_SLOTS = 12;
+interface SaveSlot {
+  id: string;
+  label: string;
+  savedAt: number;
+  save: unknown;
+}
+function loadSaveSlots(): SaveSlot[] {
+  try {
+    const raw = localStorage.getItem(SAVES_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? (list as SaveSlot[]) : [];
+  } catch {
+    return [];
+  }
+}
+function writeSaveSlots(slots: SaveSlot[]): void {
+  try {
+    localStorage.setItem(SAVES_KEY, JSON.stringify(slots.slice(0, MAX_SAVE_SLOTS)));
+  } catch {
+    // storage full/blocked - the Save button just won't confirm
+  }
+}
+/** Set by the mounted view so the once-per-room SAVE_DATA handler can reach it. */
+let onSaveStored: (() => void) | undefined;
+function storeSaveSlot(save: unknown): void {
+  const blob = save as { seats?: { nickname?: string }[]; turnCount?: number } | null;
+  const names = (blob?.seats ?? []).map((s) => s?.nickname ?? "?").join(", ");
+  const turn = (blob?.turnCount ?? 0) + 1;
+  const slots = loadSaveSlots();
+  slots.unshift({
+    id: `${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    label: `${names} — turn ${turn}`,
+    savedAt: Date.now(),
+    save,
+  });
+  writeSaveSlots(slots);
+}
+
 /** Bridge the flat synced arrays back into an engine BoardState for the
  *  pure validators (board contents are public). */
 function boardFromState(state: CatanState): CatanEngine.BoardState {
@@ -132,11 +173,55 @@ export function renderCatanLobbySettings(
         ${seatsLeft > 0 ? "+ Add AI opponent" : "Table is full"}
       </button>`
     : "";
-  container.innerHTML = colorRow + twoRules + note + robber + addBot;
+
+  // Saved games live in this browser; loading stages the save on the server,
+  // which then waits for the saved players before Start unlocks.
+  let savedGames = "";
+  if (state.loadedSave) {
+    savedGames = `
+      <div class="catan-loaded-save">
+        <span class="badge warn">${escapeHtml(state.loadedSave)}</span>
+        ${ctx.isHost ? '<button id="catan-load-clear" class="subtle">Cancel</button>' : ""}
+      </div>`;
+  } else if (ctx.isHost) {
+    const slots = loadSaveSlots();
+    if (slots.length > 0) {
+      const rows = slots
+        .map(
+          (slot) => `
+          <li class="catan-save-slot">
+            <span>${escapeHtml(slot.label)} <span class="muted">· ${new Date(slot.savedAt).toLocaleString()}</span></span>
+            <span>
+              <button class="catan-load-slot" data-save-id="${escapeHtml(slot.id)}">Resume</button>
+              <button class="subtle catan-delete-slot" data-save-id="${escapeHtml(slot.id)}">Delete</button>
+            </span>
+          </li>`,
+        )
+        .join("");
+      savedGames = `<details class="catan-saves"><summary>Saved games (${slots.length})</summary><ul>${rows}</ul></details>`;
+    }
+  }
+
+  container.innerHTML = colorRow + twoRules + note + robber + addBot + savedGames;
   container.querySelectorAll<HTMLButtonElement>(".catan-color-swatch").forEach((btn) => {
     btn.addEventListener("click", () => {
       const c = btn.dataset.color!;
       room.send(CatanMsg.PICK_COLOR, { color: c === myColor ? "" : c });
+    });
+  });
+  container.querySelector<HTMLButtonElement>("#catan-load-clear")?.addEventListener("click", () => {
+    room.send(CatanMsg.LOAD, null);
+  });
+  container.querySelectorAll<HTMLButtonElement>(".catan-load-slot").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const slot = loadSaveSlots().find((s) => s.id === btn.dataset.saveId);
+      if (slot) room.send(CatanMsg.LOAD, slot.save);
+    });
+  });
+  container.querySelectorAll<HTMLButtonElement>(".catan-delete-slot").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      writeSaveSlots(loadSaveSlots().filter((s) => s.id !== btn.dataset.saveId));
+      renderCatanLobbySettings(container, room, ctx); // re-render in place
     });
   });
   container.querySelector<HTMLSelectElement>("#catan-two-rules")?.addEventListener("change", (ev) => {
@@ -237,6 +322,8 @@ export class CatanView implements GameView {
   private tradeGivePick: Bag = zeroBag();
   private tradeReceivePick: Bag = zeroBag();
   private bankGive: Res | null = null;
+  /** Shows "Saved ✓" on the Save button for a beat after a snapshot stores. */
+  private saveFlashUntil = 0;
 
   mount(root: HTMLElement, room: Room<any, BaseState>, ctx: GameViewContext): void {
     this.root = root;
@@ -244,6 +331,7 @@ export class CatanView implements GameView {
     this.ctx = ctx;
     root.innerHTML = `
       <div class="catan">
+        <div id="catan-topbar" class="catan-topbar"></div>
         <div id="catan-status" class="catan-status"></div>
         <div class="catan-board-wrap"><div id="catan-board"></div></div>
         <div id="catan-actions" class="catan-actions"></div>
@@ -254,10 +342,27 @@ export class CatanView implements GameView {
       </div>`;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
+    // SAVE_DATA returns from the Save button. Message handlers can't be
+    // removed and a rematch mounts a fresh view on the SAME room, so register
+    // once per room and route through a module-level hook at the live view.
+    const hooked = this.room as unknown as { __catanSaveHooked?: boolean };
+    if (!hooked.__catanSaveHooked) {
+      hooked.__catanSaveHooked = true;
+      this.room.onMessage(CatanMsg.SAVE_DATA, (save: unknown) => {
+        storeSaveSlot(save);
+        onSaveStored?.();
+      });
+    }
+    onSaveStored = () => {
+      this.saveFlashUntil = Date.now() + 2000;
+      this.render();
+      setTimeout(() => this.render(), 2100); // drop the "Saved ✓" label again
+    };
     this.render();
   }
 
   unmount(): void {
+    onSaveStored = undefined;
     this.room?.onStateChange.remove(this.onState);
     this.root?.removeEventListener("click", this.onClick);
     this.root = undefined;
@@ -343,6 +448,7 @@ export class CatanView implements GameView {
     }
     if (s.tradeOpen) this.tradeComposing = false;
 
+    this.renderTopbar(s);
     this.renderStatus(s, me);
     this.renderBoard(s, me, mine);
     this.renderActions(s, me, mine);
@@ -350,6 +456,16 @@ export class CatanView implements GameView {
     this.renderMe(s, me);
     this.renderOpponents(s, me);
     this.renderLog(s);
+  }
+
+  /** Host-only Save snapshot button (the host's browser stores the blob). */
+  private renderTopbar(s: CatanState): void {
+    const el = this.root!.querySelector<HTMLElement>("#catan-topbar")!;
+    const amHost = this.st().players.get(this.ctx!.mySessionId)?.isHost === true;
+    const saved = Date.now() < this.saveFlashUntil;
+    el.innerHTML = amHost
+      ? `<button class="subtle" data-action="save-game">${saved ? "Saved ✓" : "💾 Save"}</button>`
+      : "";
   }
 
   private renderStatus(s: CatanState, me: number): void {
@@ -875,6 +991,9 @@ export class CatanView implements GameView {
         if (s.phaseDetail === "moveRobber") this.send({ type: "moveRobber", hex: id });
         return;
       // action bar
+      case "save-game":
+        this.room.send(CatanMsg.SAVE, {});
+        return;
       case "roll":
         this.send({ type: "rollDice" });
         return;

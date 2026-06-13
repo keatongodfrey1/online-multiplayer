@@ -42,6 +42,7 @@ import {
 import { BaseGameRoom } from "../../framework/BaseGameRoom.js";
 import { grantPrivateView, revokePrivateView } from "../../framework/privateState.js";
 import { sanitizeAction, type BoardLimits } from "./sanitize.js";
+import { parseSave, serializeSave, type ParsedSave, type SaveSeat } from "./save.js";
 
 const {
   RESOURCES,
@@ -103,6 +104,8 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
   /** The private instances each session was granted (re-granted per game). */
   private grantedPrivate = new Map<string, { hand: CatanResources; devCards: ArraySchema<CatanDevCard> }>();
   private actionsApplied = 0;
+  /** A saved game staged in the lobby; consumed by onGameStart. */
+  private pendingLoad?: ParsedSave;
 
   protected createPlayer(): CatanPlayer {
     return new CatanPlayer();
@@ -116,6 +119,83 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     this.onMessage(CatanMsg.ACTION, (client, payload) => this.handleAction(client, payload));
     this.onMessage(CatanMsg.CONFIG, (client, payload) => this.handleConfig(client, payload));
     this.onMessage(CatanMsg.PICK_COLOR, (client, payload) => this.handlePickColor(client, payload));
+    this.onMessage(CatanMsg.SAVE, (client) => this.handleSave(client));
+    this.onMessage(CatanMsg.LOAD, (client, payload) => this.handleLoad(client, payload));
+  }
+
+  /** Host requests a save snapshot (sent back to its own browser to store). */
+  private handleSave(client: Client): void {
+    if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.winner !== null) return;
+    if (client.sessionId !== this.state.hostSessionId) return;
+    client.send(CatanMsg.SAVE_DATA, this.buildSave());
+  }
+
+  /** Current game -> save blob. Public for white-box tests. */
+  public buildSave(): object {
+    const seats: SaveSeat[] = this.seatOrder.map((sessionId, i) => {
+      const player = sessionId ? this.state.players.get(sessionId) : undefined;
+      return {
+        nickname: this.state.seats[i]?.nickname ?? `Seat ${i + 1}`,
+        isBot: player?.isBot === true,
+        gone: !player,
+      };
+    });
+    return serializeSave({
+      engine: this.engine,
+      seats,
+      config: { useTwoPlayerVariant: this.state.useTwoPlayerVariant, robberBounty: this.state.robberBounty },
+      turnCount: this.state.turnCount,
+    });
+  }
+
+  /**
+   * Host stages a saved game in the lobby (or clears it with a null payload).
+   * Saved bots are re-seated; the game can then only start once the present
+   * humans match the save's human lineup (canStartGame).
+   */
+  private handleLoad(client: Client, payload: unknown): void {
+    if (this.state.phase !== Phase.LOBBY) return;
+    if (client.sessionId !== this.state.hostSessionId) return;
+    if (payload === null || payload === undefined) {
+      this.pendingLoad = undefined;
+      this.state.loadedSave = "";
+      this.removeBots();
+      return;
+    }
+    const parsed = parseSave(payload);
+    if (!parsed) return; // corrupt or tampered: ignore silently
+
+    this.pendingLoad = parsed;
+    this.state.useTwoPlayerVariant = parsed.config.useTwoPlayerVariant;
+    this.state.robberBounty = parsed.config.robberBounty;
+    this.removeBots();
+    for (const seat of parsed.seats) {
+      if (!seat.isBot || seat.gone) continue;
+      if (this.state.players.size >= this.maxPlayers) break;
+      this.seatBot(seat.nickname);
+    }
+    const humans = parsed.seats.filter((s) => !s.isBot && !s.gone).map((s) => s.nickname);
+    this.state.loadedSave = `Resuming a saved game (turn ${parsed.turnCount + 1}). Players needed: ${humans.join(", ")}`;
+  }
+
+  /** While a save is staged, only the exact saved lineup may start. */
+  protected override canStartGame(): boolean {
+    if (!this.pendingLoad) return true;
+    const required = new Set(
+      this.pendingLoad.seats.filter((s) => !s.isBot && !s.gone).map((s) => s.nickname.toLowerCase()),
+    );
+    const humans = [...this.state.players.values()].filter((p) => !p.isBot);
+    if (humans.length !== required.size) return false;
+    if (!humans.every((p) => required.has(p.nickname.toLowerCase()))) return false;
+    const requiredBots = this.pendingLoad.seats.filter((s) => s.isBot && !s.gone).length;
+    const presentBots = this.state.players.size - humans.length;
+    return presentBots === requiredBots;
+  }
+
+  private removeBots(): void {
+    for (const player of [...this.state.players.values()]) {
+      if (player.isBot) this.state.players.delete(player.sessionId);
+    }
   }
 
   /** Any player picks their piece color in the lobby ("" clears it). */
@@ -164,24 +244,49 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
   }
 
   protected onGameStart(): void {
-    // Full re-init - this also runs on rematch.
+    // Full re-init - this also runs on rematch. A staged saved game is
+    // consumed here (and cleared, so a later rematch starts fresh).
     const players = [...this.state.players.values()].sort((a, b) => a.seat - b.seat);
-    this.seatOrder = players.map((p) => p.sessionId);
-    this.frameworkSeatByEngineSeat = players.map((p) => p.seat);
+    const load = this.pendingLoad;
+    this.pendingLoad = undefined;
+    this.state.loadedSave = "";
     const seed = this.seedOption ?? Math.floor(Math.random() * 0xffffffff) >>> 0;
-    const twoPlayerVariant = players.length === 2 && this.state.useTwoPlayerVariant;
-    const totalSeats = twoPlayerVariant ? 4 : players.length;
-    this.engine = createInitialGameState(geo, {
-      numPlayers: players.length,
-      seed,
-      numbers: "spiral",
-      // The official "highest roll starts", played out for real: the game
-      // opens in the rollForOrder phase and everyone rolls on their tablet.
-      rollForOrder: true,
-      twoPlayerVariant,
-      robberBounty: this.state.robberBounty,
-      colors: this.buildColors(players as CatanPlayer[], totalSeats),
-    });
+
+    // Resolve the engine + the human seat lineup (sessionId/nickname/gone per
+    // engine seat) for either a fresh game or a resumed save.
+    let humanSeats: { sessionId: string; nickname: string; gone: boolean }[];
+    if (load) {
+      this.state.useTwoPlayerVariant = load.config.useTwoPlayerVariant;
+      this.state.robberBounty = load.config.robberBounty;
+      this.engine = load.engine;
+      humanSeats = load.seats.map((s) => {
+        if (s.gone) return { sessionId: "", nickname: s.nickname, gone: true };
+        const match = players.find((p) => p.isBot === s.isBot && p.nickname.toLowerCase() === s.nickname.toLowerCase());
+        return { sessionId: match?.sessionId ?? "", nickname: s.nickname, gone: !match };
+      });
+    } else {
+      const twoPlayerVariant = players.length === 2 && this.state.useTwoPlayerVariant;
+      const totalSeats = twoPlayerVariant ? 4 : players.length;
+      this.engine = createInitialGameState(geo, {
+        numPlayers: players.length,
+        seed,
+        numbers: "spiral",
+        // The official "highest roll starts", played out for real: the game
+        // opens in the rollForOrder phase and everyone rolls on their tablet.
+        rollForOrder: true,
+        twoPlayerVariant,
+        robberBounty: this.state.robberBounty,
+        colors: this.buildColors(players as CatanPlayer[], totalSeats),
+      });
+      humanSeats = players.map((p) => ({ sessionId: p.sessionId, nickname: p.nickname, gone: false }));
+    }
+    this.seatOrder = humanSeats.map((h) => h.sessionId);
+    this.frameworkSeatByEngineSeat = humanSeats.map((h) =>
+      h.sessionId ? players.find((p) => p.sessionId === h.sessionId)?.seat ?? -1 : -1,
+    );
+    const numHumans = humanSeats.length;
+    const twoPlayerVariant = this.engine.twoPlayerVariant;
+
     this.ghost = new RandomPolicy((seed ^ 0x9e3779b9) >>> 0);
     this.botBrains.clear();
     players.forEach((p, i) => {
@@ -193,17 +298,18 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     this.state.seats.clear();
     this.engine.players.forEach((ep, i) => {
       const seat = new CatanSeat();
-      const human = players[i];
-      if (human) {
-        seat.sessionId = human.sessionId;
-        seat.nickname = human.nickname;
+      const h = humanSeats[i];
+      if (h) {
+        seat.sessionId = h.sessionId;
+        seat.nickname = h.nickname;
+        seat.gone = h.gone;
+        if (h.sessionId) this.regrantPrivate(h.sessionId, seat);
       } else {
         seat.neutral = true;
         seat.nickname = `Neutral ${i === 2 ? "A" : "B"}`;
       }
       seat.color = ep.color;
       this.state.seats.push(seat);
-      if (human) this.regrantPrivate(human.sessionId, seat);
     });
 
     // Board arrays are sized once per game, then mutated by index.
@@ -216,24 +322,28 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     fillArray(this.state.portVertices, this.engine.board.ports.length * 2, 0);
 
     this.state.log.clear();
-    if (twoPlayerVariant) {
-      const colorOf = (i: number) => this.engine.players[i]?.color ?? "";
-      this.pushLog("Two players — official CATAN-for-Two rules: trade tokens are in play.");
-      this.pushLog(
-        `Neutral A (${colorOf(2)}) and Neutral B (${colorOf(3)}) start with one settlement each and never play a turn — but every road or settlement you build also places a free piece for a neutral of your choice.`,
-      );
-    } else if (players.length === 2) {
-      this.pushLog("Two players — plain standard rules (no neutral players or trade tokens).");
+    if (load) {
+      this.pushLog(`Game resumed (turn ${load.turnCount + 1}).`);
     } else {
-      this.pushLog("Game started.");
-    }
-    if (this.state.robberBounty) {
-      this.pushLog("House rule on: the robber's mover may take the tile's resource from the bank instead of stealing.");
-    }
-    if (this.engine.phase === "rollForOrder") {
-      this.pushLog("Everyone rolls for turn order — highest goes first.");
-    } else {
-      this.pushLog(`${this.nickname(this.engine.currentPlayer)} places first.`);
+      if (twoPlayerVariant) {
+        const colorOf = (i: number) => this.engine.players[i]?.color ?? "";
+        this.pushLog("Two players — official CATAN-for-Two rules: trade tokens are in play.");
+        this.pushLog(
+          `Neutral A (${colorOf(2)}) and Neutral B (${colorOf(3)}) start with one settlement each and never play a turn — but every road or settlement you build also places a free piece for a neutral of your choice.`,
+        );
+      } else if (numHumans === 2) {
+        this.pushLog("Two players — plain standard rules (no neutral players or trade tokens).");
+      } else {
+        this.pushLog("Game started.");
+      }
+      if (this.state.robberBounty) {
+        this.pushLog("House rule on: the robber's mover may take the tile's resource from the bank instead of stealing.");
+      }
+      if (this.engine.phase === "rollForOrder") {
+        this.pushLog("Everyone rolls for turn order — highest goes first.");
+      } else {
+        this.pushLog(`${this.nickname(this.engine.currentPlayer)} places first.`);
+      }
     }
     this.project();
     this.maybeScheduleBot(); // a bot can hold the first setup placement

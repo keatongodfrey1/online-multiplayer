@@ -1216,3 +1216,46 @@ button.spl-gem.selected {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* Catan save UI */
+.catan-topbar {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 0;
+}
+
+.catan-topbar button {
+  padding: 4px 10px;
+  font-size: 0.85rem;
+}
+
+.catan-saves {
+  margin: 10px 0;
+}
+
+.catan-saves summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.catan-save-slot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #2a2e40;
+}
+
+.catan-save-slot button {
+  padding: 4px 8px;
+  font-size: 0.8rem;
+}
+
+.catan-loaded-save {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}

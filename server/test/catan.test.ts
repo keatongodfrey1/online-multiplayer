@@ -822,6 +822,141 @@ describe("catan", () => {
     assert.ok([...room.state.log].some((l) => l.includes("from the bank with the robber")));
   });
 
+  it("saves a game and resumes it exactly in a fresh room, then play continues", async () => {
+    const { room, clients } = await startedGame(70, 3);
+    await driveSetup(room, clients);
+    await toMain(room, clients); // natural mid-game state (production conserves the bank)
+    const snapshot = JSON.parse(JSON.stringify(room.buildSave()));
+    const before = room.engine;
+
+    // resume in a brand-new room with the same human lineup
+    const room2 = (await colyseus.createRoom(CATAN, { seed: 999 })) as unknown as CatanRoom;
+    const c2 = [];
+    for (let i = 0; i < 3; i++) c2.push(await colyseus.connectTo(room2, { nickname: `Player${i}` }));
+    c2[0]!.send(CatanMsg.LOAD, snapshot);
+    await until(() => room2.state.loadedSave !== "");
+    c2[0]!.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+
+    // exact-state resume (not a fresh rollForOrder)
+    assert.equal(room2.engine.phase, before.phase);
+    assert.equal(room2.engine.currentPlayer, before.currentPlayer);
+    assert.deepEqual(room2.engine.bank, before.bank);
+    assert.deepEqual(room2.engine.players[0]!.hand, before.players[0]!.hand);
+    assert.deepEqual(room2.engine.devDeck, before.devDeck);
+    assert.equal(room2.engine.rngState, before.rngState);
+    assert.equal(room2.engine.robberBounty, before.robberBounty);
+    assert.deepEqual(
+      room2.engine.board.vertices.map((v) => v.building),
+      before.board.vertices.map((v) => v.building),
+    );
+
+    // and it is live: the current player (in main) can end their turn
+    const prev = room2.engine;
+    clientFor(room2, c2, room2.engine.currentPlayer)!.send(CatanMsg.ACTION, { type: "endTurn" });
+    await until(() => room2.engine !== prev);
+  });
+
+  it("gates the start until the saved lineup returns; rematch afterward is a fresh game", async () => {
+    const { room, clients } = await startedGame(71, 3);
+    await driveSetup(room, clients);
+    const snapshot = JSON.parse(JSON.stringify(room.buildSave()));
+
+    const room2 = (await colyseus.createRoom(CATAN, { seed: 998 })) as unknown as CatanRoom;
+    const host = await colyseus.connectTo(room2, { nickname: "Player0" });
+    host.send(CatanMsg.LOAD, snapshot);
+    await until(() => room2.state.loadedSave !== "");
+
+    // only 1 of 3 saved humans present -> start is vetoed
+    host.send(LobbyMsg.START, {});
+    await sleep(120);
+    assert.equal(room2.state.phase, Phase.LOBBY, "start blocked until the lineup is back");
+
+    const p1 = await colyseus.connectTo(room2, { nickname: "Player1" });
+    const p2 = await colyseus.connectTo(room2, { nickname: "Player2" });
+    host.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+    assert.equal(room2.engine.phase, "preRoll", "resumed where it was saved, not a fresh roll");
+
+    // end the loaded game, then rematch -> a FRESH game (opening roll again)
+    room2.engine.winner = 0;
+    room2.engine.phase = "gameOver";
+    (room2 as any).endGame((room2 as any).winBySeat(room2.frameworkSeatByEngineSeat[0]));
+    await until(() => room2.state.phase === Phase.ENDED);
+    [host, p1, p2].forEach((c) => c.send(LobbyMsg.REMATCH, {}));
+    await until(() => room2.state.phase === Phase.PLAYING);
+    assert.equal(room2.state.phaseDetail, "rollForOrder", "rematch is a fresh game");
+  });
+
+  it("ignores corrupt or tampered saves", async () => {
+    const { room, clients } = await startedGame(72, 3);
+    await driveSetup(room, clients);
+    await toMain(room, clients);
+    const good = JSON.parse(JSON.stringify(room.buildSave())) as any;
+
+    const room2 = (await colyseus.createRoom(CATAN, { seed: 997 })) as unknown as CatanRoom;
+    const host = await colyseus.connectTo(room2, { nickname: "Player0" });
+    await colyseus.connectTo(room2, { nickname: "Player1" });
+    await colyseus.connectTo(room2, { nickname: "Player2" });
+
+    const tampered: any[] = [
+      null,
+      "garbage",
+      { ...good, v: 2 },
+      { ...good, game: "splendor" },
+      (() => { const b = structuredClone(good); b.engine.bank.ore += 5; return b; })(), // breaks conservation
+      (() => { const b = structuredClone(good); b.engine.players[0].piecesLeft.roads = 99; return b; })(), // piece arithmetic
+      (() => { const b = structuredClone(good); b.engine.phase = "gameOver"; return b; })(), // finished game
+      (() => { const b = structuredClone(good); b.engine.devDeck.push("knight", "knight", "knight"); return b; })(), // dev composition
+      (() => { const b = structuredClone(good); b.engine.board.vertices[0].building = { owner: 9, type: "city" }; return b; })(), // owner range
+    ];
+    for (const bad of tampered) {
+      host.send(CatanMsg.LOAD, bad);
+      await sleep(40);
+      assert.equal(room2.state.loadedSave, "", `rejected: ${JSON.stringify(bad).slice(0, 40)}`);
+    }
+    // the good one is still accepted
+    host.send(CatanMsg.LOAD, good);
+    await until(() => room2.state.loadedSave !== "");
+  });
+
+  it("restores saved bots and ghost-plays departed seats on resume", async () => {
+    // a 3p game where one human left and a bot is seated
+    const room = (await colyseus.createRoom(CATAN, { seed: 73 })) as unknown as CatanRoom;
+    const a = await colyseus.connectTo(room, { nickname: "Ann" });
+    const b = await colyseus.connectTo(room, { nickname: "Ben" });
+    a.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 3);
+    room.botDelayMs = 1;
+    a.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    // finish the opening roll: humans roll, the bot rolls on its own
+    let g = 0;
+    while (room.engine.phase === "rollForOrder" && g++ < 60) {
+      const seat = room.engine.orderContenders.find((s) => room.engine.orderRolls[s] === null);
+      const c = seat === undefined ? undefined : [a, b].find((cl) => cl.sessionId === room.seatOrder[seat]);
+      if (c) c.send(CatanMsg.ACTION, { type: "rollForOrder" });
+      await sleep(40);
+    }
+    // Ben leaves for good -> his seat goes to autopilot
+    await b.leave(true);
+    await until(() => [...room.state.seats].some((s) => s.gone));
+    const snapshot = JSON.parse(JSON.stringify(room.buildSave()));
+
+    const room2 = (await colyseus.createRoom(CATAN, { seed: 996 })) as unknown as CatanRoom;
+    const a2 = await colyseus.connectTo(room2, { nickname: "Ann" });
+    room2.botDelayMs = 1;
+    a2.send(CatanMsg.LOAD, snapshot);
+    await until(() => room2.state.loadedSave !== "");
+    assert.ok([...room2.state.players.values()].some((p) => p.isBot), "the saved bot was re-seated");
+    a2.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+    // Ben's seat is gone (no session) and never waited on
+    const goneIdx = [...room2.state.seats].findIndex((s) => s.gone);
+    assert.ok(goneIdx >= 0, "the departed seat resumed as gone");
+    assert.equal(room2.seatOrder[goneIdx], "");
+  });
+
   it("sanitize: forges and junk shapes are rejected, player fields are forced", () => {
     const limits = { hexes: 19, vertices: 54, edges: 72, seats: 4 };
     assert.equal(sanitizeAction(null, 0, limits), null);
