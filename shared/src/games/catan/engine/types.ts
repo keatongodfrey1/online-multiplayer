@@ -102,6 +102,7 @@ export interface PlayerState {
 
 /** Turn / flow phases. Transition graph lives in stateMachine.ts. */
 export type Phase =
+  | "rollForOrder" // opt-in visible opening roll: highest leads the setup snake
   | "setupSettlement"
   | "setupRoad"
   | "preRoll" // may play ONE dev card, then must roll
@@ -147,6 +148,9 @@ export interface GameState {
   setupSequence: PlayerId[]; // e.g. [0,1,2,3,3,2,1,0]; empty once setup is done
   setupStep: number;
   lastSettlementVertex: number | null;
+  // opening roll for turn order (inert [] unless options.rollForOrder)
+  orderRolls: ([number, number] | null)[]; // by player id; null = not rolled this round
+  orderContenders: PlayerId[]; // human seats still in contention (tied seats re-roll)
 
   // transient turn flags
   freeRoads: number; // >0 while resolving Road Building

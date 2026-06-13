@@ -147,6 +147,8 @@ export class RandomPolicy implements Policy {
   act(geo: BoardGeometry, state: GameState, seat: PlayerId): Action {
     const me = state.players[seat]!;
     switch (state.phase) {
+      case "rollForOrder":
+        return { type: "rollForOrder", player: seat };
       case "setupSettlement":
         return { type: "placeSetupSettlement", vertex: this.pick(getValidInitialSettlements(geo, state.board)) };
       case "setupRoad":
@@ -203,6 +205,8 @@ export class GreedyPolicy implements Policy {
   act(geo: BoardGeometry, state: GameState, seat: PlayerId): Action {
     const me = state.players[seat]!;
     switch (state.phase) {
+      case "rollForOrder":
+        return { type: "rollForOrder", player: seat };
       case "setupSettlement": {
         const best = this.bestBy(getValidInitialSettlements(geo, state.board), (v) =>
           vertexPips(geo, state, v) + 0.4 * vertexResourceKinds(geo, state, v),
