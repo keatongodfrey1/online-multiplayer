@@ -1274,6 +1274,522 @@ button.spl-gem.selected {
   gap: 6px;
 }
 
+/* ---- Space Chase ------------------------------------------------------- */
+.sc {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sc-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-height: 1.6em;
+  font-weight: 600;
+}
+.sc-banner {
+  font-size: 1.05rem;
+}
+.sc-timer {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.sc-timer.warn {
+  color: var(--warn);
+  font-weight: 700;
+}
+.sc-icon-btn {
+  padding: 2px 8px;
+}
+.sc-main {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+/* Board */
+.sc-board-wrap {
+  position: relative;
+  flex: 1 1 560px;
+  min-width: 300px;
+  background: radial-gradient(circle at 30% 20%, #1a1f3a, #0a0a18 70%);
+  border-radius: 14px;
+  padding: 10px;
+  overflow: hidden;
+}
+.sc-stars {
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(1px 1px at 20% 30%, #fff, transparent),
+    radial-gradient(1px 1px at 70% 60%, #cfe, transparent),
+    radial-gradient(1px 1px at 40% 80%, #fff, transparent),
+    radial-gradient(2px 2px at 85% 25%, #fff, transparent),
+    radial-gradient(1px 1px at 55% 15%, #adf, transparent);
+  opacity: 0.5;
+  pointer-events: none;
+}
+.sc-board {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  grid-template-rows: repeat(7, 1fr);
+  gap: 4px;
+  aspect-ratio: 10 / 7;
+  z-index: 1;
+}
+.sc-cell {
+  position: relative;
+  border-radius: 6px;
+  background: rgba(120, 130, 180, 0.13);
+  border: 1px solid rgba(150, 160, 210, 0.18);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  color: var(--muted);
+  overflow: hidden;
+}
+.sc-num {
+  font-weight: 700;
+  color: var(--text);
+  opacity: 0.75;
+  font-size: 0.72rem;
+}
+.sc-label {
+  font-size: 0.5rem;
+  line-height: 1.05;
+  text-align: center;
+  color: var(--accent);
+}
+.sc-landmark {
+  background: rgba(91, 140, 255, 0.18);
+  border-color: var(--accent);
+}
+.sc-finish {
+  background: radial-gradient(circle, rgba(227, 179, 65, 0.4), rgba(227, 179, 65, 0.12));
+  border-color: var(--warn);
+}
+.sc-finish .sc-label {
+  color: var(--warn);
+  font-weight: 800;
+  font-size: 0.6rem;
+}
+.sc-portal {
+  border-color: var(--portal-color, #f4f);
+  box-shadow: inset 0 0 8px var(--portal-color, #f4f);
+}
+.sc-board.sc-picking .sc-cell {
+  cursor: pointer;
+}
+.sc-board.sc-picking .sc-cell:hover {
+  background: rgba(91, 140, 255, 0.35);
+}
+.sc-start-bar {
+  position: relative;
+  z-index: 1;
+  margin-top: 6px;
+  height: 40px;
+  border-radius: 8px;
+  background: rgba(91, 140, 255, 0.14);
+  border: 1px dashed var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted);
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+.sc-portals {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+.sc-portal-path {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-dasharray: 7 4;
+  opacity: 0.65;
+}
+.sc-rockets {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+.sc-rocket {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border-radius: 50%;
+  background: var(--color, #f55);
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: left 0.13s linear, top 0.13s linear;
+}
+.sc-rocket.no-transition {
+  transition: none;
+}
+.sc-rocket-icon {
+  font-size: 13px;
+}
+.sc-rocket-initial {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  font-size: 9px;
+  font-weight: 800;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  border-radius: 50%;
+  width: 12px;
+  height: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sc-rocket.teleporting {
+  animation: sc-flash 0.4s ease;
+}
+.sc-rocket.bump {
+  animation: sc-bump 0.45s ease;
+}
+@keyframes sc-flash {
+  0% { transform: scale(1); filter: brightness(1); }
+  50% { transform: scale(1.6); filter: brightness(2.2); }
+  100% { transform: scale(1); filter: brightness(1); }
+}
+@keyframes sc-bump {
+  0%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-8px) rotate(-12deg); }
+}
+
+/* Side panel */
+.sc-side {
+  flex: 1 1 240px;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sc-piles {
+  display: flex;
+  gap: 12px;
+}
+.sc-deck,
+.sc-discard {
+  position: relative;
+  flex: 1;
+  text-align: center;
+}
+.sc-card-art {
+  width: 100%;
+  max-width: 110px;
+  border-radius: 8px;
+  display: block;
+  margin: 0 auto;
+}
+.sc-card-empty {
+  height: 90px;
+  border: 1px dashed var(--muted);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+.sc-deck-count {
+  position: absolute;
+  bottom: 4px;
+  right: 8px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  border-radius: 10px;
+  padding: 0 7px;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+.sc-actions {
+  display: flex;
+  gap: 8px;
+}
+.sc-act {
+  flex: 1;
+  padding: 12px 6px;
+  font-weight: 700;
+}
+.sc-seats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sc-seat-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 7px;
+  border-radius: 7px;
+  background: rgba(120, 130, 180, 0.08);
+  font-size: 0.85rem;
+}
+.sc-seat-row.active {
+  background: rgba(91, 140, 255, 0.22);
+  outline: 1px solid var(--accent);
+}
+.sc-seat-row.gone {
+  opacity: 0.45;
+}
+.sc-seat-dot {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--color, #f55);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  flex: none;
+}
+.sc-seat-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-seat-pos {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.sc-seat-icons {
+  font-size: 0.78rem;
+}
+.sc-log {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 8px;
+  max-height: 160px;
+  overflow-y: auto;
+  font-size: 0.8rem;
+}
+.sc-log-entry {
+  padding: 2px 0;
+  color: var(--muted);
+  border-bottom: 1px solid rgba(150, 160, 210, 0.08);
+}
+.sc-log-entry:first-child {
+  color: var(--text);
+}
+
+/* Reveal + dice overlays */
+.sc-reveal,
+.sc-dice {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.sc-reveal.show,
+.sc-dice.show {
+  display: flex;
+}
+.sc-reveal {
+  background: rgba(0, 0, 0, 0.55);
+}
+.sc-reveal-card {
+  background: var(--card);
+  border-radius: 14px;
+  padding: 14px;
+  text-align: center;
+  max-width: 220px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+  animation: sc-pop 0.25s ease;
+}
+.sc-reveal-card img {
+  width: 170px;
+  border-radius: 10px;
+}
+.sc-reveal-name {
+  font-weight: 800;
+  margin-top: 8px;
+}
+.sc-reveal-desc {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.sc-dice {
+  font-size: 5rem;
+  color: #fff;
+  text-shadow: 0 0 18px var(--accent);
+}
+.sc-dice.landed {
+  animation: sc-pop 0.5s ease;
+}
+@keyframes sc-pop {
+  0% { transform: scale(0.6); opacity: 0; }
+  60% { transform: scale(1.12); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* Prompt modal - a centered, click-through floating panel near the bottom
+   (click-through so the SPACE prompt's click-a-cell still reaches the board). */
+.sc-modal-layer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 18px;
+  display: flex;
+  justify-content: center;
+  padding: 0 12px;
+  pointer-events: none;
+  z-index: 40;
+}
+.sc-passive,
+.sc-prompt {
+  pointer-events: auto;
+  max-width: 520px;
+  width: 100%;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.55);
+}
+.sc-passive {
+  text-align: center;
+  color: var(--muted);
+  padding: 10px 14px;
+  background: var(--card);
+  border: 1px solid rgba(150, 160, 210, 0.3);
+  border-radius: 12px;
+}
+.sc-prompt {
+  background: var(--card);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  padding: 12px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.sc-prompt-title {
+  font-weight: 700;
+  margin-bottom: 8px;
+  text-align: center;
+}
+.sc-target-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+.sc-target-btn,
+.sc-choice-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(150, 160, 210, 0.4);
+  background: rgba(120, 130, 180, 0.12);
+  color: var(--text);
+  cursor: pointer;
+}
+.sc-target-btn.selected {
+  background: var(--accent);
+  color: #fff;
+}
+.sc-choice-row {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.sc-space-row {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+.sc-space-input {
+  width: 90px;
+  padding: 8px;
+  border-radius: 8px;
+}
+.sc-hint {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-top: 6px;
+}
+.sc-sat-strip {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.sc-sat-card {
+  position: relative;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+}
+.sc-sat-card img {
+  width: 70px;
+  border-radius: 6px;
+  display: block;
+}
+.sc-sat-card.picked {
+  border-color: var(--accent);
+}
+.sc-sat-badge {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 0.8rem;
+}
+
+/* Summary */
+.sc-summary {
+  width: 100%;
+  border-collapse: collapse;
+}
+.sc-summary th,
+.sc-summary td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid rgba(150, 160, 210, 0.15);
+}
+.sc-summary tr.winner {
+  background: rgba(227, 179, 65, 0.16);
+  font-weight: 700;
+}
+.sc-summary tr.gone {
+  opacity: 0.5;
+}
+.sc-sum-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
 /* Framework save slots (shared by every game with supportsSaves) */
 .fw-saves {
   margin: 10px 0;

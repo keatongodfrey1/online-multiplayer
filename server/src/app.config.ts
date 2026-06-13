@@ -2,9 +2,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { defineRoom, defineServer, monitor, playground, WebSocketTransport } from "colyseus";
-import { ARENA, CATAN, SPLENDOR, TICTACTOE } from "@backbone/shared";
+import { ARENA, CATAN, SPACE_CHASE, SPLENDOR, TICTACTOE } from "@backbone/shared";
 import { ArenaRoom } from "./games/arena/ArenaRoom.js";
 import { CatanRoom } from "./games/catan/CatanRoom.js";
+import { SpaceChaseRoom } from "./games/spacechase/SpaceChaseRoom.js";
 import { SplendorRoom } from "./games/splendor/SplendorRoom.js";
 import { TicTacToeRoom } from "./games/tictactoe/TicTacToeRoom.js";
 
@@ -41,6 +42,7 @@ const server = defineServer({
     [ARENA]: defineRoom(ArenaRoom),
     [SPLENDOR]: defineRoom(SplendorRoom),
     [CATAN]: defineRoom(CatanRoom),
+    [SPACE_CHASE]: defineRoom(SpaceChaseRoom),
   },
 
   express: (app) => {
