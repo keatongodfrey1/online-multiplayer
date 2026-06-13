@@ -57,6 +57,9 @@ describe("catan", () => {
     beforeStart?.(room);
     clients[0]!.send(LobbyMsg.START, {});
     await until(() => room.state.phase === Phase.PLAYING);
+    // Games now open with the visible turn-order roll; clear it so the rest
+    // of each test starts in the setup draft exactly as before.
+    if (room.engine?.phase === "rollForOrder") await driveOrderRoll(room, clients);
     return { room, clients };
   }
 
@@ -64,6 +67,17 @@ describe("catan", () => {
   function clientFor(room: CatanRoom, clients: any[], engineSeat: number): any {
     const sessionId = room.seatOrder[engineSeat];
     return clients.find((c) => c.sessionId === sessionId);
+  }
+
+  /** Drive the opening turn-order roll to completion. */
+  async function driveOrderRoll(room: CatanRoom, clients: Array<any>): Promise<void> {
+    let guard = 0;
+    while (room.engine.phase === "rollForOrder" && guard++ < 30) {
+      const prev = room.engine;
+      const seat = prev.orderContenders.find((s) => prev.orderRolls[s] === null)!;
+      clientFor(room, clients, seat)!.send(CatanMsg.ACTION, { type: "rollForOrder" });
+      await until(() => room.engine !== prev);
+    }
   }
 
   /** Drive the snake draft to completion with first-legal placements. */
@@ -129,6 +143,79 @@ describe("catan", () => {
     }
     assert.equal(room.engine.phase, "main");
   }
+
+  it("opens with a visible turn-order roll that decides the snake", async () => {
+    const room = (await colyseus.createRoom(CATAN, { seed: 91 })) as unknown as CatanRoom;
+    const clients = [];
+    for (let i = 0; i < 3; i++) clients.push(await colyseus.connectTo(room, { nickname: `Player${i}` }));
+    clients[0]!.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+
+    assert.equal(room.state.phaseDetail, "rollForOrder");
+    assert.deepEqual([...room.state.orderRolls], [-1, -1, -1], "no rolls yet");
+    assert.deepEqual([...room.state.awaitingSeats].sort(), [0, 1, 2], "everyone owes a roll");
+    assert.equal(room.state.currentTurn, "", "no single actor during the multi-roll");
+    assert.ok([...room.state.log].some((l) => l.includes("Everyone rolls for turn order")));
+
+    // each contender rolls; rolls mirror into state and the round resolves
+    await driveOrderRoll(room, clients);
+    assert.equal(room.engine.phase, "setupSettlement");
+    assert.ok([...room.state.orderRolls].every((v) => v >= 2 && v <= 12), "all sums shown");
+    assert.ok([...room.state.log].some((l) => /rolled \d\+\d = \d+ for turn order/.test(l)));
+    assert.ok([...room.state.log].some((l) => l.includes("goes first")));
+    // the highest roller leads the snake
+    const sums = [...room.state.orderRolls];
+    const winner = sums.indexOf(Math.max(...sums));
+    assert.equal(room.engine.currentPlayer, winner);
+  });
+
+  it("narrates a tie and re-rolls among the tied players", async () => {
+    const room = (await colyseus.createRoom(CATAN, { seed: 92 })) as unknown as CatanRoom;
+    const clients = [];
+    for (let i = 0; i < 3; i++) clients.push(await colyseus.connectTo(room, { nickname: `Player${i}` }));
+    clients[0]!.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+
+    // white-box: seats 1 and 2 already maxed; seat 0 cannot beat 12, so the
+    // round resolves to a tie no matter what seat 0 rolls.
+    room.engine.orderRolls[1] = [6, 6];
+    room.engine.orderRolls[2] = [6, 6];
+    const prev = room.engine;
+    clientFor(room, clients, 0)!.send(CatanMsg.ACTION, { type: "rollForOrder" });
+    await until(() => room.engine !== prev);
+
+    assert.equal(room.engine.phase, "rollForOrder", "a tie keeps the phase open");
+    assert.ok(room.engine.orderContenders.length >= 2, "tied seats re-roll");
+    assert.ok([...room.state.log].some((l) => l.startsWith("Tie —")));
+  });
+
+  it("ghost-rolls for a seat that quit during the opening roll, and bots roll on their own", async () => {
+    const room = (await colyseus.createRoom(CATAN, { seed: 93 })) as unknown as CatanRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Host" });
+    const guest = await colyseus.connectTo(room, { nickname: "Guest" });
+    host.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 3);
+    room.botDelayMs = 1;
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING && room.engine.phase === "rollForOrder");
+
+    // the bot rolls unprompted; the two humans still owe
+    await until(() => room.engine.orderContenders.some((s) => room.engine.orderRolls[s] !== null), 3000);
+
+    // guest quits mid-roll; the ghost must roll for them so the phase resolves.
+    // Host rolls its own seat (re-rolling if a tie puts it back in contention);
+    // the bot (clock) and the quitter's ghost (settleEngine) resolve themselves.
+    await guest.leave(true);
+    let guard = 0;
+    while (room.engine.phase === "rollForOrder" && guard++ < 80) {
+      if (room.engine.orderContenders.includes(0) && room.engine.orderRolls[0] === null) {
+        host.send(CatanMsg.ACTION, { type: "rollForOrder" });
+      }
+      await sleep(40);
+    }
+    assert.equal(room.engine.phase, "setupSettlement", "the opening roll completed without the quitter");
+    assert.equal(room.state.phase, Phase.PLAYING);
+  });
 
   it("mirrors the board and runs the setup draft into a 3p game", async () => {
     const { room, clients } = await startedGame(7, 3);
@@ -234,17 +321,22 @@ describe("catan", () => {
     const a = clients.find((c) => c.sessionId === room.seatOrder[0])!;
     const b = clients.find((c) => c.sessionId === room.seatOrder[1])!;
 
-    // white-box a known hand + a hidden dev card, flushed by the first roll
-    room.engine.players[0]!.hand = { lumber: 0, brick: 0, wool: 1, grain: 0, ore: 3 };
+    // white-box a hidden dev card, then reach main (production may add cards)
     room.engine.players[0]!.devCards.push({ type: "victoryPoint", boughtThisTurn: false, played: false });
     await toMain(room, clients);
+    // the owner's hand is whatever the rolls produced; both sides agree on it
+    const myOre = room.engine.players[0]!.hand.ore;
+    const myCount = ["lumber", "brick", "wool", "grain", "ore"].reduce(
+      (t, r) => t + (room.engine.players[0]!.hand as any)[r],
+      0,
+    );
 
     const aState = () => a.state as any;
     const bState = () => b.state as any;
-    await until(() => aState()?.seats?.at(0)?.handCount >= 4);
-    assert.equal(aState().seats.at(0).hand?.ore, 3, "owner sees the hand detail");
+    await until(() => aState()?.seats?.at(0)?.handCount === myCount);
+    assert.equal(aState().seats.at(0).hand?.ore, myOre, "owner sees the hand detail");
     assert.equal(aState().seats.at(0).devCards?.at(0)?.kind, "victoryPoint", "owner sees the card identity");
-    assert.ok(bState().seats.at(0).handCount >= 4, "opponent sees the count");
+    assert.equal(bState().seats.at(0).handCount, myCount, "opponent sees the count");
     assert.equal(bState().seats.at(0).hand?.ore ?? 0, 0, "opponent sees no hand detail");
     assert.equal(bState().seats.at(0).devCards?.length ?? 0, 0, "opponent sees no card identities");
     assert.equal(bState().seats.at(0).devCardCount, 1);
@@ -256,7 +348,7 @@ describe("catan", () => {
     await until(() => room.state.players.get(aSessionId)?.connected === false);
     const a2 = await colyseus.sdk.reconnect(token);
     const a2State = () => a2.state as any;
-    await until(() => (a2State()?.seats?.at(0)?.hand?.ore ?? 0) === 3, 5000);
+    await until(() => (a2State()?.seats?.at(0)?.hand?.ore ?? -1) === myOre, 5000);
     assert.equal(a2State().seats.at(0).devCards?.at(0)?.kind, "victoryPoint", "still visible after refresh");
     assert.equal(bState().seats.at(0).hand?.ore ?? 0, 0, "opponent still blind after the refresh");
   });
@@ -465,6 +557,7 @@ describe("catan", () => {
     assert.equal(room.state.phase, Phase.ENDED, "one vote is not enough");
     b.send(LobbyMsg.REMATCH, {});
     await until(() => room.state.phase === Phase.PLAYING);
+    await driveOrderRoll(room, clients); // the rematch opens with a fresh turn-order roll
 
     assert.notStrictEqual(room.engine, oldEngine, "fresh engine");
     assert.equal(room.state.phaseDetail, "setupSettlement");

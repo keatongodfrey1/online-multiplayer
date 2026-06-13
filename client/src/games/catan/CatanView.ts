@@ -331,6 +331,9 @@ export class CatanView implements GameView {
     const who = (i: number) => (i === me ? "<strong>You</strong>" : `<strong>${this.nickname(i)}</strong>`);
     let line = "";
     switch (s.phaseDetail) {
+      case "rollForOrder":
+        line = "Roll for turn order — highest goes first";
+        break;
       case "setupSettlement":
         line = `${who(s.currentSeat)} place${s.currentSeat === me ? "" : "s"} a starting settlement`;
         break;
@@ -465,6 +468,27 @@ export class CatanView implements GameView {
   private renderModal(s: CatanState, me: number, mine: boolean): void {
     const el = this.root!.querySelector<HTMLElement>("#catan-modal")!;
     const meOwes = s.phaseDetail === "discard" && [...s.awaitingSeats].includes(me);
+
+    if (s.phaseDetail === "rollForOrder") {
+      const rolls = [...s.seats]
+        .map((seat, i) => ({ seat, i }))
+        .filter(({ seat }) => !seat.neutral)
+        .map(({ seat, i }) => {
+          const v = s.orderRolls[i] ?? -1;
+          const you = i === me ? " (you)" : "";
+          return `<div class="catan-picker-row"><span>${escapeHtml(seat.nickname)}${you}</span><span>${
+            v >= 0 ? `🎲 ${v}` : "…"
+          }</span></div>`;
+        })
+        .join("");
+      const myRolled = me >= 0 && (s.orderRolls[me] ?? -1) >= 0;
+      const button =
+        mine && !myRolled
+          ? `<button class="primary" data-action="roll-order">🎲 Roll the dice</button>`
+          : `<p class="muted">${myRolled ? "Waiting for the others…" : "Waiting…"}</p>`;
+      el.innerHTML = `<div class="catan-panel"><h3>Roll for turn order</h3>${rolls}${button}</div>`;
+      return;
+    }
 
     if (meOwes) {
       const idx = [...s.awaitingSeats].indexOf(me);
@@ -816,6 +840,9 @@ export class CatanView implements GameView {
       // action bar
       case "roll":
         this.send({ type: "rollDice" });
+        return;
+      case "roll-order":
+        this.send({ type: "rollForOrder" });
         return;
       case "end-turn":
         this.send({ type: "endTurn" });

@@ -50,7 +50,6 @@ const {
   publicVictoryPoints,
   robberBountyResource,
   tryReduce,
-  mulberry32,
   GreedyPolicy,
   RandomPolicy,
 } = CatanEngine;
@@ -127,13 +126,13 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     this.frameworkSeatByEngineSeat = players.map((p) => p.seat);
     const seed = this.seedOption ?? Math.floor(Math.random() * 0xffffffff) >>> 0;
     const twoPlayerVariant = players.length === 2 && this.state.useTwoPlayerVariant;
-    // The official "highest roll starts": a seeded-random starting seat.
-    const startingPlayer = Math.floor(mulberry32(seed ^ 0x5eed1e55)() * players.length);
     this.engine = createInitialGameState(geo, {
       numPlayers: players.length,
       seed,
       numbers: "spiral",
-      startingPlayer,
+      // The official "highest roll starts", played out for real: the game
+      // opens in the rollForOrder phase and everyone rolls on their tablet.
+      rollForOrder: true,
       twoPlayerVariant,
       robberBounty: this.state.robberBounty,
     });
@@ -185,7 +184,11 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     if (this.state.robberBounty) {
       this.pushLog("House rule on: the robber's mover may take the tile's resource from the bank instead of stealing.");
     }
-    this.pushLog(`${this.nickname(this.engine.currentPlayer)} places first.`);
+    if (this.engine.phase === "rollForOrder") {
+      this.pushLog("Everyone rolls for turn order — highest goes first.");
+    } else {
+      this.pushLog(`${this.nickname(this.engine.currentPlayer)} places first.`);
+    }
     this.project();
     this.maybeScheduleBot(); // a bot can hold the first setup placement
   }
@@ -221,6 +224,9 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     //  - everything else: only the current actor.
     if (action.type === "discard") {
       if (this.engine.pendingDiscards[senderSeat] === undefined) return;
+    } else if (action.type === "rollForOrder") {
+      // multi-actor like discard; sanitize pinned the player to the sender
+      // and the engine validates contender + once-per-round.
     } else if (action.type !== "respondDomesticTrade") {
       if (senderSeat !== this.engine.currentPlayer) return;
     }
@@ -279,9 +285,13 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     return !!sessionId && this.state.players.get(sessionId)?.isBot === true;
   }
 
-  /** Seats that must act right now (everyone who owes during a discard). */
+  /** Seats that must act right now (everyone who owes during a discard,
+   *  every contender who has not rolled during the opening roll). */
   private awaitingEngineSeats(): number[] {
     if (this.engine.winner !== null) return [];
+    if (this.engine.phase === "rollForOrder") {
+      return this.engine.orderContenders.filter((s) => this.engine.orderRolls[s] === null).sort((a, b) => a - b);
+    }
     if (this.engine.phase === "discard") {
       return Object.keys(this.engine.pendingDiscards)
         .map(Number)
@@ -408,6 +418,10 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
     );
     s.currentTurn = !over && awaiting.length === 1 ? this.seatOrder[awaiting[0]!] ?? "" : "";
     s.lastSettlementVertex = e.lastSettlementVertex ?? -1;
+    rewriteNumbers(
+      s.orderRolls,
+      e.orderRolls.map((r) => (r ? r[0] + r[1] : -1)),
+    );
     s.dice1 = e.dice?.[0] ?? 0;
     s.dice2 = e.dice?.[1] ?? 0;
     s.firstDice1 = e.firstDice?.[0] ?? 0;
@@ -480,9 +494,22 @@ export class CatanRoom extends BaseGameRoom<CatanState> {
    * monopoly / Year of Plenty announce theirs like the physical cards do.
    */
   private narrate(action: Action, prev: GameState, next: GameState): void {
-    const actorSeat = action.type === "discard" ? action.player : prev.currentPlayer;
+    const actorSeat = action.type === "discard" || action.type === "rollForOrder" ? action.player : prev.currentPlayer;
     const who = this.nickname(actorSeat);
     switch (action.type) {
+      case "rollForOrder": {
+        const roll = next.orderRolls[actorSeat];
+        if (roll) this.pushLog(`${who} rolled ${roll[0]}+${roll[1]} = ${roll[0] + roll[1]} for turn order.`);
+        if (next.phase === "setupSettlement" && prev.phase === "rollForOrder") {
+          // the round just resolved to a unique winner
+          this.pushLog(`${this.nickname(next.currentPlayer)} goes first.`);
+        } else if (next.phase === "rollForOrder" && prev.orderContenders.filter((s) => prev.orderRolls[s] === null).length === 1) {
+          // the round just completed but tied — re-roll among next.orderContenders
+          const tied = next.orderContenders.map((s) => this.nickname(s)).join(" and ");
+          this.pushLog(`Tie — ${tied} roll again.`);
+        }
+        break;
+      }
       case "placeSetupSettlement":
         this.pushLog(`${who} placed a starting settlement.`);
         break;

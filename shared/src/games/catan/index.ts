@@ -120,6 +120,9 @@ export class CatanState extends BaseState {
   @type(["uint8"]) discardOwed = new ArraySchema<number>();
   /** During setupRoad: the settlement just placed (the road must touch it). */
   @type("int8") lastSettlementVertex = -1;
+  /** rollForOrder phase: each seat's opening-roll sum (-1 = not rolled /
+   *  re-rolling a tie / neutral). Losers' rolls stay visible. */
+  @type(["int8"]) orderRolls = new ArraySchema<number>();
   /** Latest roll (0,0 = none yet this turn). */
   @type("uint8") dice1 = 0;
   @type("uint8") dice2 = 0;
