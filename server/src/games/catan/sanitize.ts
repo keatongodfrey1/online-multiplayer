@@ -61,6 +61,8 @@ export function sanitizeAction(raw: unknown, senderSeat: number, limits: BoardLi
     }
     case "rollDice":
       return { type: "rollDice" }; // client dice are dropped on the floor
+    case "rollForOrder":
+      return { type: "rollForOrder", player: senderSeat }; // dice dropped, player pinned
     case "discard": {
       const cards = parseBag(a.cards);
       return cards === null ? null : { type: "discard", player: senderSeat, cards };

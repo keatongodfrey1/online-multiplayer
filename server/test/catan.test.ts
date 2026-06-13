@@ -57,6 +57,9 @@ describe("catan", () => {
     beforeStart?.(room);
     clients[0]!.send(LobbyMsg.START, {});
     await until(() => room.state.phase === Phase.PLAYING);
+    // Games now open with the visible turn-order roll; clear it so the rest
+    // of each test starts in the setup draft exactly as before.
+    if (room.engine?.phase === "rollForOrder") await driveOrderRoll(room, clients);
     return { room, clients };
   }
 
@@ -64,6 +67,17 @@ describe("catan", () => {
   function clientFor(room: CatanRoom, clients: any[], engineSeat: number): any {
     const sessionId = room.seatOrder[engineSeat];
     return clients.find((c) => c.sessionId === sessionId);
+  }
+
+  /** Drive the opening turn-order roll to completion. */
+  async function driveOrderRoll(room: CatanRoom, clients: Array<any>): Promise<void> {
+    let guard = 0;
+    while (room.engine.phase === "rollForOrder" && guard++ < 30) {
+      const prev = room.engine;
+      const seat = prev.orderContenders.find((s) => prev.orderRolls[s] === null)!;
+      clientFor(room, clients, seat)!.send(CatanMsg.ACTION, { type: "rollForOrder" });
+      await until(() => room.engine !== prev);
+    }
   }
 
   /** Drive the snake draft to completion with first-legal placements. */
@@ -129,6 +143,79 @@ describe("catan", () => {
     }
     assert.equal(room.engine.phase, "main");
   }
+
+  it("opens with a visible turn-order roll that decides the snake", async () => {
+    const room = (await colyseus.createRoom(CATAN, { seed: 91 })) as unknown as CatanRoom;
+    const clients = [];
+    for (let i = 0; i < 3; i++) clients.push(await colyseus.connectTo(room, { nickname: `Player${i}` }));
+    clients[0]!.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+
+    assert.equal(room.state.phaseDetail, "rollForOrder");
+    assert.deepEqual([...room.state.orderRolls], [-1, -1, -1], "no rolls yet");
+    assert.deepEqual([...room.state.awaitingSeats].sort(), [0, 1, 2], "everyone owes a roll");
+    assert.equal(room.state.currentTurn, "", "no single actor during the multi-roll");
+    assert.ok([...room.state.log].some((l) => l.includes("Everyone rolls for turn order")));
+
+    // each contender rolls; rolls mirror into state and the round resolves
+    await driveOrderRoll(room, clients);
+    assert.equal(room.engine.phase, "setupSettlement");
+    assert.ok([...room.state.orderRolls].every((v) => v >= 2 && v <= 12), "all sums shown");
+    assert.ok([...room.state.log].some((l) => /rolled \d\+\d = \d+ for turn order/.test(l)));
+    assert.ok([...room.state.log].some((l) => l.includes("goes first")));
+    // the highest roller leads the snake
+    const sums = [...room.state.orderRolls];
+    const winner = sums.indexOf(Math.max(...sums));
+    assert.equal(room.engine.currentPlayer, winner);
+  });
+
+  it("narrates a tie and re-rolls among the tied players", async () => {
+    const room = (await colyseus.createRoom(CATAN, { seed: 92 })) as unknown as CatanRoom;
+    const clients = [];
+    for (let i = 0; i < 3; i++) clients.push(await colyseus.connectTo(room, { nickname: `Player${i}` }));
+    clients[0]!.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+
+    // white-box: seats 1 and 2 already maxed; seat 0 cannot beat 12, so the
+    // round resolves to a tie no matter what seat 0 rolls.
+    room.engine.orderRolls[1] = [6, 6];
+    room.engine.orderRolls[2] = [6, 6];
+    const prev = room.engine;
+    clientFor(room, clients, 0)!.send(CatanMsg.ACTION, { type: "rollForOrder" });
+    await until(() => room.engine !== prev);
+
+    assert.equal(room.engine.phase, "rollForOrder", "a tie keeps the phase open");
+    assert.ok(room.engine.orderContenders.length >= 2, "tied seats re-roll");
+    assert.ok([...room.state.log].some((l) => l.startsWith("Tie —")));
+  });
+
+  it("ghost-rolls for a seat that quit during the opening roll, and bots roll on their own", async () => {
+    const room = (await colyseus.createRoom(CATAN, { seed: 93 })) as unknown as CatanRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Host" });
+    const guest = await colyseus.connectTo(room, { nickname: "Guest" });
+    host.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 3);
+    room.botDelayMs = 1;
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING && room.engine.phase === "rollForOrder");
+
+    // the bot rolls unprompted; the two humans still owe
+    await until(() => room.engine.orderContenders.some((s) => room.engine.orderRolls[s] !== null), 3000);
+
+    // guest quits mid-roll; the ghost must roll for them so the phase resolves.
+    // Host rolls its own seat (re-rolling if a tie puts it back in contention);
+    // the bot (clock) and the quitter's ghost (settleEngine) resolve themselves.
+    await guest.leave(true);
+    let guard = 0;
+    while (room.engine.phase === "rollForOrder" && guard++ < 80) {
+      if (room.engine.orderContenders.includes(0) && room.engine.orderRolls[0] === null) {
+        host.send(CatanMsg.ACTION, { type: "rollForOrder" });
+      }
+      await sleep(40);
+    }
+    assert.equal(room.engine.phase, "setupSettlement", "the opening roll completed without the quitter");
+    assert.equal(room.state.phase, Phase.PLAYING);
+  });
 
   it("mirrors the board and runs the setup draft into a 3p game", async () => {
     const { room, clients } = await startedGame(7, 3);
@@ -234,17 +321,22 @@ describe("catan", () => {
     const a = clients.find((c) => c.sessionId === room.seatOrder[0])!;
     const b = clients.find((c) => c.sessionId === room.seatOrder[1])!;
 
-    // white-box a known hand + a hidden dev card, flushed by the first roll
-    room.engine.players[0]!.hand = { lumber: 0, brick: 0, wool: 1, grain: 0, ore: 3 };
+    // white-box a hidden dev card, then reach main (production may add cards)
     room.engine.players[0]!.devCards.push({ type: "victoryPoint", boughtThisTurn: false, played: false });
     await toMain(room, clients);
+    // the owner's hand is whatever the rolls produced; both sides agree on it
+    const myOre = room.engine.players[0]!.hand.ore;
+    const myCount = ["lumber", "brick", "wool", "grain", "ore"].reduce(
+      (t, r) => t + (room.engine.players[0]!.hand as any)[r],
+      0,
+    );
 
     const aState = () => a.state as any;
     const bState = () => b.state as any;
-    await until(() => aState()?.seats?.at(0)?.handCount >= 4);
-    assert.equal(aState().seats.at(0).hand?.ore, 3, "owner sees the hand detail");
+    await until(() => aState()?.seats?.at(0)?.handCount === myCount);
+    assert.equal(aState().seats.at(0).hand?.ore, myOre, "owner sees the hand detail");
     assert.equal(aState().seats.at(0).devCards?.at(0)?.kind, "victoryPoint", "owner sees the card identity");
-    assert.ok(bState().seats.at(0).handCount >= 4, "opponent sees the count");
+    assert.equal(bState().seats.at(0).handCount, myCount, "opponent sees the count");
     assert.equal(bState().seats.at(0).hand?.ore ?? 0, 0, "opponent sees no hand detail");
     assert.equal(bState().seats.at(0).devCards?.length ?? 0, 0, "opponent sees no card identities");
     assert.equal(bState().seats.at(0).devCardCount, 1);
@@ -256,7 +348,7 @@ describe("catan", () => {
     await until(() => room.state.players.get(aSessionId)?.connected === false);
     const a2 = await colyseus.sdk.reconnect(token);
     const a2State = () => a2.state as any;
-    await until(() => (a2State()?.seats?.at(0)?.hand?.ore ?? 0) === 3, 5000);
+    await until(() => (a2State()?.seats?.at(0)?.hand?.ore ?? -1) === myOre, 5000);
     assert.equal(a2State().seats.at(0).devCards?.at(0)?.kind, "victoryPoint", "still visible after refresh");
     assert.equal(bState().seats.at(0).hand?.ore ?? 0, 0, "opponent still blind after the refresh");
   });
@@ -338,6 +430,49 @@ describe("catan", () => {
     assert.ok([...room.state.log].some((l) => l.includes("traded with")), "the trade is narrated");
   });
 
+  it("shows declines to the proposer and lets a candidate change their mind", async () => {
+    const { room, clients } = await startedGame(67, 3);
+    await driveSetup(room, clients);
+    await toMain(room, clients);
+
+    const proposerSeat = room.engine.currentPlayer;
+    const others = [0, 1, 2].filter((s) => s !== proposerSeat);
+    const proposer = clientFor(room, clients, proposerSeat)!;
+    const partner = clientFor(room, clients, others[0]!)!;
+
+    room.engine.players[proposerSeat]!.hand = { lumber: 0, brick: 0, wool: 0, grain: 0, ore: 2 };
+    proposer.send(CatanMsg.ACTION, { type: "proposeDomesticTrade", give: { ore: 1 }, receive: { wool: 1 } });
+    await until(() => room.state.tradeOpen === true);
+
+    // declining WITHOUT first accepting (the playtest bug) is now mirrored
+    partner.send(CatanMsg.ACTION, { type: "respondDomesticTrade", accept: false });
+    await until(() => room.state.tradeDeclines.length === 1);
+    assert.equal(room.state.tradeDeclines[0], others[0], "the proposer can see the decline");
+    assert.equal(room.state.tradeAcceptances.length, 0);
+
+    // change of mind: decline -> accept moves between the mirrored lists
+    partner.send(CatanMsg.ACTION, { type: "respondDomesticTrade", accept: true });
+    await until(() => room.state.tradeAcceptances.length === 1);
+    assert.equal(room.state.tradeDeclines.length, 0, "no longer declined");
+    assert.equal(room.state.tradeAcceptances[0], others[0]);
+  });
+
+  it("a leaver's seat auto-declines an open trade so the proposer isn't stuck", async () => {
+    const { room, clients } = await startedGame(68, 3);
+    await driveSetup(room, clients);
+    await toMain(room, clients);
+
+    const proposerSeat = room.engine.currentPlayer;
+    const others = [0, 1, 2].filter((s) => s !== proposerSeat);
+    const proposer = clientFor(room, clients, proposerSeat)!;
+    room.engine.players[proposerSeat]!.hand = { lumber: 0, brick: 0, wool: 0, grain: 0, ore: 2 };
+    proposer.send(CatanMsg.ACTION, { type: "proposeDomesticTrade", give: { ore: 1 }, receive: { wool: 1 } });
+    await until(() => room.state.tradeOpen === true);
+
+    await clientFor(room, clients, others[0]!)!.leave(true);
+    await until(() => [...room.state.tradeDeclines].includes(others[0]!), 3000);
+  });
+
   it("lets the ghost play out a quitter's seat in a 3p game (including a pending discard)", async () => {
     const { room, clients } = await startedGame(31, 3);
     await driveSetup(room, clients);
@@ -383,6 +518,50 @@ describe("catan", () => {
     await until(() => room.state.phase === Phase.ENDED);
     assert.equal(room.state.endReason, EndReason.ABANDONED);
     assert.equal(room.state.currentTurn, "");
+  });
+
+  it("lets a newcomer reclaim an autopilot seat mid-game (rejoin from any device)", async () => {
+    const { room, clients } = await startedGame(38, 3);
+    await driveSetup(room, clients);
+
+    // seat 1's human leaves for good -> the seat falls to autopilot
+    const goneSeat = 1;
+    const leaver = clientFor(room, clients, goneSeat)!;
+    await leaver.leave(true);
+    await until(() => room.state.seats[goneSeat]!.gone === true);
+    assert.equal(room.state.seats[goneSeat]!.sessionId, "");
+
+    // a brand-new client joins with the code and a fresh nickname
+    const newcomer = await colyseus.connectTo(room, { nickname: "Latecomer" });
+    await until(() => room.state.seats[goneSeat]!.gone === false, 3000);
+    assert.equal(room.seatOrder[goneSeat], newcomer.sessionId, "seatOrder rebound");
+    assert.equal(room.state.seats[goneSeat]!.sessionId, newcomer.sessionId);
+    assert.equal(room.state.seats[goneSeat]!.nickname, "Latecomer");
+    assert.ok([...room.state.log].some((l) => l.includes("takes over")));
+
+    // the reclaimed seat is live: it can act and sees its private hand
+    room.engine.players[goneSeat]!.hand = { lumber: 0, brick: 0, wool: 0, grain: 0, ore: 5 };
+    // nudge a projection by advancing to this seat's turn is unnecessary - force one
+    const prev = room.engine;
+    room.engine = CatanEngine.cloneGameState(room.engine); // identity bump so project runs
+    (room as any).project();
+    const nState = () => newcomer.state as any;
+    await until(() => nState()?.seats?.at(goneSeat)?.hand?.ore === 5, 3000);
+    assert.equal(prev !== room.engine, true);
+  });
+
+  it("rejects a mid-game joiner when no seat is open", async () => {
+    const { room } = await startedGame(39, 3);
+    // all three humans are present -> nothing to reclaim
+    let rejected = false;
+    try {
+      await colyseus.connectTo(room, { nickname: "Crasher" });
+    } catch {
+      rejected = true;
+    }
+    assert.ok(rejected, "the join was refused");
+    assert.equal(room.state.players.size, 3, "roster unchanged");
+    assert.equal(room.state.phase, Phase.PLAYING, "game undisturbed");
   });
 
   it("starts the official 2-player variant for two humans", async () => {
@@ -465,6 +644,7 @@ describe("catan", () => {
     assert.equal(room.state.phase, Phase.ENDED, "one vote is not enough");
     b.send(LobbyMsg.REMATCH, {});
     await until(() => room.state.phase === Phase.PLAYING);
+    await driveOrderRoll(room, clients); // the rematch opens with a fresh turn-order roll
 
     assert.notStrictEqual(room.engine, oldEngine, "fresh engine");
     assert.equal(room.state.phaseDetail, "setupSettlement");
@@ -529,6 +709,40 @@ describe("catan", () => {
       room.state.endReason,
       `${EndReason.WIN_PREFIX}${room.frameworkSeatByEngineSeat[winnerSeat]}`,
     );
+  });
+
+  it("lets each player pick a piece color; conflicts rejected; colors flow to seats", async () => {
+    const room = (await colyseus.createRoom(CATAN, { seed: 54 })) as unknown as CatanRoom;
+    const a = await colyseus.connectTo(room, { nickname: "Ann" });
+    const b = await colyseus.connectTo(room, { nickname: "Ben" });
+    const colorOf = (sid: string) => (room.state.players.get(sid) as any).colorChoice;
+
+    a.send(CatanMsg.PICK_COLOR, { color: "orange" });
+    await until(() => colorOf(a.sessionId) === "orange");
+    b.send(CatanMsg.PICK_COLOR, { color: "orange" }); // taken by Ann
+    b.send(CatanMsg.PICK_COLOR, { color: "lime" }); // not a playable color
+    await sleep(100);
+    assert.equal(colorOf(b.sessionId), "", "conflicting / invalid picks ignored");
+
+    b.send(CatanMsg.PICK_COLOR, { color: "blue" });
+    await until(() => colorOf(b.sessionId) === "blue");
+    a.send(CatanMsg.PICK_COLOR, { color: "" }); // clear
+    await until(() => colorOf(a.sessionId) === "");
+
+    a.send(CatanMsg.PICK_COLOR, { color: "white" });
+    await until(() => colorOf(a.sessionId) === "white");
+    a.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    // 2 humans -> official variant -> 4 seats; humans wear their picks, neutrals the rest
+    assert.equal(room.state.seats[0]!.color, "white", "Ann's pick honored");
+    assert.equal(room.state.seats[1]!.color, "blue", "Ben's pick honored");
+    const neutralColors = [room.state.seats[2]!.color, room.state.seats[3]!.color];
+    assert.deepEqual(neutralColors.sort(), ["orange", "red"], "neutrals take the leftover palette");
+
+    // mid-game picks are ignored
+    a.send(CatanMsg.PICK_COLOR, { color: "blue" });
+    await sleep(100);
+    assert.equal(room.state.seats[0]!.color, "white");
   });
 
   it("rule toggles are host-only and lobby-only", async () => {
@@ -606,6 +820,141 @@ describe("catan", () => {
     await until(() => room.state.phaseDetail === "main");
     assert.equal(room.engine.players[0]!.hand[res], before + 1, "took the tile's resource");
     assert.ok([...room.state.log].some((l) => l.includes("from the bank with the robber")));
+  });
+
+  it("saves a game and resumes it exactly in a fresh room, then play continues", async () => {
+    const { room, clients } = await startedGame(70, 3);
+    await driveSetup(room, clients);
+    await toMain(room, clients); // natural mid-game state (production conserves the bank)
+    const snapshot = JSON.parse(JSON.stringify(room.buildSave()));
+    const before = room.engine;
+
+    // resume in a brand-new room with the same human lineup
+    const room2 = (await colyseus.createRoom(CATAN, { seed: 999 })) as unknown as CatanRoom;
+    const c2 = [];
+    for (let i = 0; i < 3; i++) c2.push(await colyseus.connectTo(room2, { nickname: `Player${i}` }));
+    c2[0]!.send(CatanMsg.LOAD, snapshot);
+    await until(() => room2.state.loadedSave !== "");
+    c2[0]!.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+
+    // exact-state resume (not a fresh rollForOrder)
+    assert.equal(room2.engine.phase, before.phase);
+    assert.equal(room2.engine.currentPlayer, before.currentPlayer);
+    assert.deepEqual(room2.engine.bank, before.bank);
+    assert.deepEqual(room2.engine.players[0]!.hand, before.players[0]!.hand);
+    assert.deepEqual(room2.engine.devDeck, before.devDeck);
+    assert.equal(room2.engine.rngState, before.rngState);
+    assert.equal(room2.engine.robberBounty, before.robberBounty);
+    assert.deepEqual(
+      room2.engine.board.vertices.map((v) => v.building),
+      before.board.vertices.map((v) => v.building),
+    );
+
+    // and it is live: the current player (in main) can end their turn
+    const prev = room2.engine;
+    clientFor(room2, c2, room2.engine.currentPlayer)!.send(CatanMsg.ACTION, { type: "endTurn" });
+    await until(() => room2.engine !== prev);
+  });
+
+  it("gates the start until the saved lineup returns; rematch afterward is a fresh game", async () => {
+    const { room, clients } = await startedGame(71, 3);
+    await driveSetup(room, clients);
+    const snapshot = JSON.parse(JSON.stringify(room.buildSave()));
+
+    const room2 = (await colyseus.createRoom(CATAN, { seed: 998 })) as unknown as CatanRoom;
+    const host = await colyseus.connectTo(room2, { nickname: "Player0" });
+    host.send(CatanMsg.LOAD, snapshot);
+    await until(() => room2.state.loadedSave !== "");
+
+    // only 1 of 3 saved humans present -> start is vetoed
+    host.send(LobbyMsg.START, {});
+    await sleep(120);
+    assert.equal(room2.state.phase, Phase.LOBBY, "start blocked until the lineup is back");
+
+    const p1 = await colyseus.connectTo(room2, { nickname: "Player1" });
+    const p2 = await colyseus.connectTo(room2, { nickname: "Player2" });
+    host.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+    assert.equal(room2.engine.phase, "preRoll", "resumed where it was saved, not a fresh roll");
+
+    // end the loaded game, then rematch -> a FRESH game (opening roll again)
+    room2.engine.winner = 0;
+    room2.engine.phase = "gameOver";
+    (room2 as any).endGame((room2 as any).winBySeat(room2.frameworkSeatByEngineSeat[0]));
+    await until(() => room2.state.phase === Phase.ENDED);
+    [host, p1, p2].forEach((c) => c.send(LobbyMsg.REMATCH, {}));
+    await until(() => room2.state.phase === Phase.PLAYING);
+    assert.equal(room2.state.phaseDetail, "rollForOrder", "rematch is a fresh game");
+  });
+
+  it("ignores corrupt or tampered saves", async () => {
+    const { room, clients } = await startedGame(72, 3);
+    await driveSetup(room, clients);
+    await toMain(room, clients);
+    const good = JSON.parse(JSON.stringify(room.buildSave())) as any;
+
+    const room2 = (await colyseus.createRoom(CATAN, { seed: 997 })) as unknown as CatanRoom;
+    const host = await colyseus.connectTo(room2, { nickname: "Player0" });
+    await colyseus.connectTo(room2, { nickname: "Player1" });
+    await colyseus.connectTo(room2, { nickname: "Player2" });
+
+    const tampered: any[] = [
+      null,
+      "garbage",
+      { ...good, v: 2 },
+      { ...good, game: "splendor" },
+      (() => { const b = structuredClone(good); b.engine.bank.ore += 5; return b; })(), // breaks conservation
+      (() => { const b = structuredClone(good); b.engine.players[0].piecesLeft.roads = 99; return b; })(), // piece arithmetic
+      (() => { const b = structuredClone(good); b.engine.phase = "gameOver"; return b; })(), // finished game
+      (() => { const b = structuredClone(good); b.engine.devDeck.push("knight", "knight", "knight"); return b; })(), // dev composition
+      (() => { const b = structuredClone(good); b.engine.board.vertices[0].building = { owner: 9, type: "city" }; return b; })(), // owner range
+    ];
+    for (const bad of tampered) {
+      host.send(CatanMsg.LOAD, bad);
+      await sleep(40);
+      assert.equal(room2.state.loadedSave, "", `rejected: ${JSON.stringify(bad).slice(0, 40)}`);
+    }
+    // the good one is still accepted
+    host.send(CatanMsg.LOAD, good);
+    await until(() => room2.state.loadedSave !== "");
+  });
+
+  it("restores saved bots and ghost-plays departed seats on resume", async () => {
+    // a 3p game where one human left and a bot is seated
+    const room = (await colyseus.createRoom(CATAN, { seed: 73 })) as unknown as CatanRoom;
+    const a = await colyseus.connectTo(room, { nickname: "Ann" });
+    const b = await colyseus.connectTo(room, { nickname: "Ben" });
+    a.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 3);
+    room.botDelayMs = 1;
+    a.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    // finish the opening roll: humans roll, the bot rolls on its own
+    let g = 0;
+    while (room.engine.phase === "rollForOrder" && g++ < 60) {
+      const seat = room.engine.orderContenders.find((s) => room.engine.orderRolls[s] === null);
+      const c = seat === undefined ? undefined : [a, b].find((cl) => cl.sessionId === room.seatOrder[seat]);
+      if (c) c.send(CatanMsg.ACTION, { type: "rollForOrder" });
+      await sleep(40);
+    }
+    // Ben leaves for good -> his seat goes to autopilot
+    await b.leave(true);
+    await until(() => [...room.state.seats].some((s) => s.gone));
+    const snapshot = JSON.parse(JSON.stringify(room.buildSave()));
+
+    const room2 = (await colyseus.createRoom(CATAN, { seed: 996 })) as unknown as CatanRoom;
+    const a2 = await colyseus.connectTo(room2, { nickname: "Ann" });
+    room2.botDelayMs = 1;
+    a2.send(CatanMsg.LOAD, snapshot);
+    await until(() => room2.state.loadedSave !== "");
+    assert.ok([...room2.state.players.values()].some((p) => p.isBot), "the saved bot was re-seated");
+    a2.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+    // Ben's seat is gone (no session) and never waited on
+    const goneIdx = [...room2.state.seats].findIndex((s) => s.gone);
+    assert.ok(goneIdx >= 0, "the departed seat resumed as gone");
+    assert.equal(room2.seatOrder[goneIdx], "");
   });
 
   it("sanitize: forges and junk shapes are rejected, player fields are forced", () => {

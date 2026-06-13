@@ -204,9 +204,13 @@ export interface NewGameOptions {
    *  (6/8) tokens adjacent; "random" = fully random. Default "balanced". */
   numbers?: "balanced" | "random" | "spiral";
   /** Which seat takes the first turn (and leads the setup snake). Defaults to
-   *  seat 0; the caller should roll this randomly to honour the official
-   *  "highest roll starts" rule. */
+   *  seat 0. When provided it always wins (rollForOrder is skipped) — handy
+   *  for deterministic tests and white-box staging. */
   startingPlayer?: PlayerId;
+  /** Official visible opening roll: start in the "rollForOrder" phase where
+   *  every human rolls 2d6, the highest leads the setup snake, and ties
+   *  re-roll among the tied. Ignored when startingPlayer is provided. */
+  rollForOrder?: boolean;
   colors?: string[];
   variablePorts?: boolean; // shuffle the 9 harbour chips (positions stay fixed)
   /** default: true when numPlayers >= 5 (the 5-6 player extension rule). */
@@ -300,15 +304,18 @@ export function createInitialGameState(geo: BoardGeometry, opts: NewGameOptions)
   }
 
   // Seat `start` leads; the snake runs the HUMAN seats start, start+1, ... then back.
+  // With rollForOrder (and no explicit startingPlayer) the snake is built later,
+  // once the opening rolls have decided who leads.
+  const rolling = (opts.rollForOrder ?? false) && opts.startingPlayer === undefined;
   const forward: PlayerId[] = [];
   for (let i = 0; i < numPlayers; i++) forward.push((start + i) % numPlayers);
-  const setupSequence = [...forward, ...forward.slice().reverse()];
+  const setupSequence = rolling ? [] : [...forward, ...forward.slice().reverse()];
   const bankAmt = opts.bankPerResource ?? 19;
 
   return {
-    phase: "setupSettlement",
+    phase: rolling ? "rollForOrder" : "setupSettlement",
     players,
-    currentPlayer: setupSequence[0]!,
+    currentPlayer: rolling ? 0 : setupSequence[0]!,
     board,
     bank: { lumber: bankAmt, brick: bankAmt, wool: bankAmt, grain: bankAmt, ore: bankAmt },
     devDeck: buildDevDeck(opts.devDeck ?? STANDARD_DEV_DECK, rng),
@@ -319,6 +326,8 @@ export function createInitialGameState(geo: BoardGeometry, opts: NewGameOptions)
     setupSequence,
     setupStep: 0,
     lastSettlementVertex: null,
+    orderRolls: rolling ? players.map(() => null) : [],
+    orderContenders: rolling ? players.map((p) => p.id).filter((id) => !neutralPlayerIds.includes(id)) : [],
     freeRoads: 0,
     devCardPlayedThisTurn: false,
     pendingDiscards: {},
@@ -346,6 +355,7 @@ export function createInitialGameState(geo: BoardGeometry, opts: NewGameOptions)
 // ----------------------------------------------------------------------------
 
 export type Action =
+  | { type: "rollForOrder"; player: PlayerId; dice?: [number, number] }
   | { type: "placeSetupSettlement"; vertex: VertexId }
   | { type: "placeSetupRoad"; edge: EdgeId }
   | { type: "rollDice"; dice?: [number, number] }
@@ -423,6 +433,8 @@ export function cloneGameState(s: GameState): GameState {
     setupSequence: s.setupSequence.slice(),
     setupStep: s.setupStep,
     lastSettlementVertex: s.lastSettlementVertex,
+    orderRolls: s.orderRolls.map((r) => (r ? [r[0], r[1]] : null)),
+    orderContenders: s.orderContenders.slice(),
     freeRoads: s.freeRoads,
     devCardPlayedThisTurn: s.devCardPlayedThisTurn,
     pendingDiscards: { ...s.pendingDiscards },
@@ -434,6 +446,7 @@ export function cloneGameState(s: GameState): GameState {
           receive: { ...s.pendingTrade.receive },
           candidates: s.pendingTrade.candidates.slice(),
           acceptances: s.pendingTrade.acceptances.slice(),
+          declines: s.pendingTrade.declines.slice(),
         }
       : null,
     rngState: s.rngState,
@@ -753,6 +766,40 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
   const me = state.players[actingId(state)]!;
 
   switch (action.type) {
+    // ---- Opening roll for turn order (opt-in; see NewGameOptions.rollForOrder) ----
+    case "rollForOrder": {
+      require(state.phase === "rollForOrder", "the opening roll is over");
+      const pid = action.player;
+      require(state.orderContenders.includes(pid), "not in contention this round");
+      require(state.orderRolls[pid] === null, "you already rolled this round");
+      const scripted = action.dice && opts.trustClientRandomness;
+      const d1 = scripted ? action.dice![0] : 1 + Math.floor(advanceRng(state) * 6);
+      const d2 = scripted ? action.dice![1] : 1 + Math.floor(advanceRng(state) * 6);
+      state.orderRolls[pid] = [d1, d2];
+      // Wait until every contender has rolled this round.
+      if (state.orderContenders.some((p) => state.orderRolls[p] === null)) return state;
+      const sums = state.orderContenders.map((p) => ({ p, sum: state.orderRolls[p]![0] + state.orderRolls[p]![1] }));
+      const max = Math.max(...sums.map((x) => x.sum));
+      const winners = sums.filter((x) => x.sum === max).map((x) => x.p);
+      if (winners.length > 1) {
+        // Official rule: tied players roll again (losers' rolls stay visible).
+        state.orderContenders = winners;
+        for (const p of winners) state.orderRolls[p] = null;
+        return state;
+      }
+      // Highest roll leads the setup snake and takes the first turn.
+      const winner = winners[0]!;
+      const numHumans = state.players.length - state.neutralPlayerIds.length;
+      const forward: PlayerId[] = [];
+      for (let i = 0; i < numHumans; i++) forward.push((winner + i) % numHumans);
+      state.setupSequence = [...forward, ...forward.slice().reverse()];
+      state.setupStep = 0;
+      state.currentPlayer = winner;
+      state.orderContenders = [winner];
+      state.phase = "setupSettlement";
+      return state;
+    }
+
     // ---- Setup ----
     case "placeSetupSettlement": {
       require(state.phase === "setupSettlement", "not in setupSettlement phase");
@@ -1023,7 +1070,7 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
         (p) => Number.isInteger(p) && p >= 0 && p < state.players.length && p !== me.id && !isNeutral(state, p),
       );
       require(candidates.length > 0, "no trade partners specified");
-      state.pendingTrade = { proposer: me.id, give: { ...action.give }, receive: { ...action.receive }, candidates, acceptances: [] };
+      state.pendingTrade = { proposer: me.id, give: { ...action.give }, receive: { ...action.receive }, candidates, acceptances: [], declines: [] };
       return state;
     }
 
@@ -1032,8 +1079,15 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
       const t = state.pendingTrade;
       require(t !== null, "there is no open trade");
       require(action.player !== t.proposer && t.candidates.includes(action.player), "you are not a candidate for this trade");
-      if (action.accept) { if (!t.acceptances.includes(action.player)) t.acceptances.push(action.player); }
-      else t.acceptances = t.acceptances.filter((p) => p !== action.player);
+      // Symmetric and idempotent: a candidate may switch their answer freely
+      // until the proposer confirms or withdraws.
+      if (action.accept) {
+        t.declines = t.declines.filter((p) => p !== action.player);
+        if (!t.acceptances.includes(action.player)) t.acceptances.push(action.player);
+      } else {
+        t.acceptances = t.acceptances.filter((p) => p !== action.player);
+        if (!t.declines.includes(action.player)) t.declines.push(action.player);
+      }
       return state;
     }
 
@@ -1236,6 +1290,8 @@ export interface GameView {
   winner: PlayerId | null;
   pendingTrade: PendingTrade | null;
   pendingDiscards: Record<PlayerId, number>;
+  orderRolls: ([number, number] | null)[];
+  orderContenders: PlayerId[];
   robberBounty: boolean;
   // "CATAN for Two" variant (inert defaults outside it)
   twoPlayerVariant: boolean;
@@ -1292,6 +1348,8 @@ export function viewForPlayer(state: GameState, viewer: PlayerId): GameView {
     winner: s.winner,
     pendingTrade: s.pendingTrade,
     pendingDiscards: s.pendingDiscards,
+    orderRolls: s.orderRolls,
+    orderContenders: s.orderContenders,
     robberBounty: s.robberBounty,
     twoPlayerVariant: s.twoPlayerVariant,
     neutralPlayerIds: s.neutralPlayerIds,

@@ -10,7 +10,7 @@
  * geometry via CatanEngine.buildBoardGeometry(), and the flat arrays below are
  * indexed by its hex/vertex/edge ids.
  */
-import { ArraySchema, entity, Schema, type, view } from "@colyseus/schema";
+import { ArraySchema, Schema, type, view } from "@colyseus/schema";
 import { BasePlayer, BaseState } from "../../state.js";
 
 export * as CatanEngine from "./engine/index.js";
@@ -27,7 +27,19 @@ export const CatanMsg = {
   /** Host-only, lobby-only. Payload: { useTwoPlayerVariant?: boolean;
    *  robberBounty?: boolean } - the pre-game rule toggles. */
   CONFIG: "catan/config",
+  /** Any player, lobby-only. Payload: { color?: string } - pick your piece
+   *  color ("" clears). Rejected if another player already chose it. */
+  PICK_COLOR: "catan/pickColor",
+  /** Host, mid-game. Asks the server for a save snapshot. */
+  SAVE: "catan/save",
+  /** Server -> host. The save blob to store in the host's browser. */
+  SAVE_DATA: "catan/saveData",
+  /** Host, lobby-only. Stage a save blob to resume (or null to clear). */
+  LOAD: "catan/load",
 } as const;
+
+/** The piece colors players may pick (the board palette has exactly these). */
+export const CATAN_PLAYABLE_COLORS = ["red", "blue", "white", "orange"] as const;
 
 /** Sentinel for "nobody holds this award" in the holder fields below. */
 export const CATAN_NO_HOLDER = 255;
@@ -81,8 +93,10 @@ export class CatanSeat extends Schema {
   @view() @type([CatanDevCard]) devCards = new ArraySchema<CatanDevCard>();
 }
 
-@entity
-export class CatanPlayer extends BasePlayer {}
+export class CatanPlayer extends BasePlayer {
+  /** Lobby color pick ("" = none yet); honored at game start if still free. */
+  @type("string") colorChoice = "";
+}
 
 export class CatanState extends BaseState {
   @type([CatanSeat]) seats = new ArraySchema<CatanSeat>();
@@ -120,6 +134,9 @@ export class CatanState extends BaseState {
   @type(["uint8"]) discardOwed = new ArraySchema<number>();
   /** During setupRoad: the settlement just placed (the road must touch it). */
   @type("int8") lastSettlementVertex = -1;
+  /** rollForOrder phase: each seat's opening-roll sum (-1 = not rolled /
+   *  re-rolling a tie / neutral). Losers' rolls stay visible. */
+  @type(["int8"]) orderRolls = new ArraySchema<number>();
   /** Latest roll (0,0 = none yet this turn). */
   @type("uint8") dice1 = 0;
   @type("uint8") dice2 = 0;
@@ -153,6 +170,7 @@ export class CatanState extends BaseState {
   @type(CatanResources) tradeReceive = new CatanResources();
   @type(["uint8"]) tradeCandidates = new ArraySchema<number>();
   @type(["uint8"]) tradeAcceptances = new ArraySchema<number>();
+  @type(["uint8"]) tradeDeclines = new ArraySchema<number>();
 
   // ---- awards & log ----
   /** Holding seat or CATAN_NO_HOLDER (255). */
@@ -162,4 +180,6 @@ export class CatanState extends BaseState {
   @type(["string"]) log = new ArraySchema<string>();
   /** Completed turns (for the HUD). */
   @type("uint16") turnCount = 0;
+  /** Lobby: a human-readable "resuming a saved game" banner ("" = none). */
+  @type("string") loadedSave = "";
 }
