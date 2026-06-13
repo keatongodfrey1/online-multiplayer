@@ -1,0 +1,104 @@
+/* Palette: medieval palace — warm cream + regal purple + gold accents */
+:root {
+  --bg: #faf6ef;
+  --bg-panel: #ffffff;
+  --ink: #2a1f3d;
+  --ink-soft: #5a4e6f;
+  --ink-muted: #8a7ea0;
+  --gold: #c9a140;
+  --gold-soft: #e8d79a;
+  --purple: #5c3d8a;
+  --purple-soft: #b49ed8;
+  --red: #b74545;
+  --green: #3e8b5a;
+  --blue: #4a7ab8;
+  --stone: #e3dbcc;
+  --stone-dark: #b5a994;
+  --shadow: 0 2px 6px rgba(42, 31, 61, 0.12);
+  --radius: 10px;
+  --font-sans: 'Inter', 'Helvetica Neue', system-ui, -apple-system, sans-serif;
+  --font-display: 'Cinzel', 'Palatino', 'Georgia', serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display);
+  color: var(--purple);
+  letter-spacing: 0.02em;
+  margin: 0 0 0.5em;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--stone-dark);
+  background: var(--bg-panel);
+  color: var(--ink);
+  padding: 0.5em 1em;
+  border-radius: var(--radius);
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+  min-height: 44px;
+}
+
+button:hover:not(:disabled) {
+  background: var(--gold-soft);
+  border-color: var(--gold);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--purple);
+  color: #fff;
+  border-color: var(--purple);
+}
+
+button.primary:hover:not(:disabled) {
+  background: #4a2f6e;
+  border-color: #4a2f6e;
+}
+
+button.gold {
+  background: var(--gold);
+  color: #fff;
+  border-color: var(--gold);
+}
+
+button.gold:hover:not(:disabled) {
+  background: #b08d30;
+  border-color: #b08d30;
+}
+
+.panel {
+  background: var(--bg-panel);
+  border-radius: var(--radius);
+  border: 1px solid var(--stone);
+  box-shadow: var(--shadow);
+  padding: 1em;
+}
