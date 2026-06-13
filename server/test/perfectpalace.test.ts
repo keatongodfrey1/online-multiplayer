@@ -509,4 +509,34 @@ describe("perfect palace", () => {
       "difficulty restored on resume",
     );
   });
+
+  // ---- turn timer ----------------------------------------------------------
+
+  it("arms a turn deadline for a human turn and the AI finishes a timed-out turn", async () => {
+    const room = (await colyseus.createRoom(PERFECT_PALACE, { seed: 50 })) as unknown as PerfectPalaceRoom;
+    room.botDelayMs = 1;
+    const a = await colyseus.connectTo(room, { nickname: "P0" });
+    const b = await colyseus.connectTo(room, { nickname: "P1" });
+    await until(() => room.state.players.size === 2);
+    a.send(PerfectPalaceMsg.CONFIG, { turnSeconds: 30 });
+    await until(() => room.state.turnSeconds === 30);
+    a.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    await completeMapping(room, [a, b]);
+
+    // A connected human's single-actor turn → a deadline is armed.
+    assert.ok(room.state.turnDeadline > 0, "deadline armed for the human turn");
+    const before = room.engine.currentPlayerId;
+    // Simulate the clock running out: the AI finishes the turn and it advances.
+    (room as any).onTurnTimeout();
+    await until(() => room.engine.currentPlayerId !== before, 4000);
+    assert.notEqual(room.engine.currentPlayerId, before, "the timed-out turn was auto-finished and advanced");
+  });
+
+  it("does not arm a turn timer when it is off (default)", async () => {
+    const { room, clients } = await startedGame(51, 2);
+    await completeMapping(room, clients);
+    assert.equal(room.state.turnSeconds, 0);
+    assert.equal(room.state.turnDeadline, 0, "no deadline when the timer is off");
+  });
 });

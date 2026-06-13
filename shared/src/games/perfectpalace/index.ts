@@ -32,7 +32,21 @@ export const PerfectPalaceMsg = {
   /** Any player, lobby-only. Payload: { color: number } — a palette index 0-5,
    *  or -1 to clear. Rejected if another player already chose that color. */
   PICK_COLOR: "perfectpalace/pickColor",
+  /** Host-only, lobby-only. Payload: { turnSeconds: number } — 0 = off, else a
+   *  30-multiple in [30,300]. The per-turn time limit. */
+  CONFIG: "perfectpalace/config",
 } as const;
+
+/** Turn-timer options: 0 = off, otherwise 30s steps up to 5 minutes. */
+export const PP_TURN_STEP_SECONDS = 30;
+export const PP_TURN_MAX_SECONDS = 300;
+export function isValidPerfectPalaceTurnSeconds(v: unknown): v is number {
+  return (
+    typeof v === "number" &&
+    Number.isInteger(v) &&
+    (v === 0 || (v >= PP_TURN_STEP_SECONDS && v <= PP_TURN_MAX_SECONDS && v % PP_TURN_STEP_SECONDS === 0))
+  );
+}
 
 /** Per-player palette (indexed by seat order). Kid-friendly, distinct hues. */
 export const PERFECT_PALACE_COLORS = [
@@ -199,6 +213,12 @@ export class PerfectPalaceState extends BaseState {
   @type("uint8") lastRollValue = 0;
   /** Engine id of whoever rolled lastRollValue. */
   @type("string") lastRollBy = "";
+
+  // ---- turn timer (host-set in the lobby) ----
+  /** Per-turn time limit in seconds; 0 = off. */
+  @type("uint16") turnSeconds = 0;
+  /** Epoch ms when the current turn expires; 0 when untimed, paused, or over. */
+  @type("float64") turnDeadline = 0;
 
   // ---- outcome ----
   /** Engine id of the winner (set at game-over), or "". */

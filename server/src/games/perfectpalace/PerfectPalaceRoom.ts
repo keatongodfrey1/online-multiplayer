@@ -24,6 +24,7 @@ import { type Client } from "colyseus";
 import {
   type BasePlayer,
   EndReason,
+  isValidPerfectPalaceTurnSeconds,
   PERFECT_PALACE,
   PERFECT_PALACE_COLORS,
   PerfectPalaceEngine,
@@ -83,6 +84,11 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
   private seatColorIndex: number[] = [];
   /** Difficulty per bot sessionId, chosen when the host seats it. */
   private botDifficulty = new Map<string, Difficulty>();
+  /** Turn timer: the armed timeout, a paused-mid-turn remainder, and the seat
+   *  currently being auto-finished because its human ran out of time (-1 = none). */
+  private turnTimer?: Delayed;
+  private pausedTurnRemainingMs?: number;
+  private timedOutTurnSeat = -1;
   /** Pace of an AI / vacated-seat decision (~a second reads as "it took a turn"). */
   public botDelayMs = 850;
   private autoTimer?: Delayed;
@@ -97,6 +103,16 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
     if (typeof seed === "number" && Number.isFinite(seed)) this.seedOption = seed >>> 0;
     this.onMessage(PerfectPalaceMsg.ACTION, (client, payload) => this.handleAction(client, payload));
     this.onMessage(PerfectPalaceMsg.PICK_COLOR, (client, payload) => this.handlePickColor(client, payload));
+    this.onMessage(PerfectPalaceMsg.CONFIG, (client, payload) => this.handleConfig(client, payload));
+  }
+
+  /** Host sets the per-turn time limit in the lobby (0 = off). */
+  private handleConfig(client: Client, payload: unknown): void {
+    if (this.state.phase !== Phase.LOBBY) return;
+    if (client.sessionId !== this.state.hostSessionId) return;
+    const turnSeconds = (payload as { turnSeconds?: unknown } | null)?.turnSeconds;
+    if (!isValidPerfectPalaceTurnSeconds(turnSeconds)) return;
+    this.state.turnSeconds = turnSeconds;
   }
 
   /** Any player picks their palace colour in the lobby (-1 clears). Mirrors Catan. */
@@ -232,7 +248,10 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
       this.state.seats.push(seat);
     });
 
+    this.timedOutTurnSeat = -1;
+    this.pausedTurnRemainingMs = undefined;
     this.syncFromEngine();
+    this.armTurnTimer(); // start the per-turn clock if the host enabled one
     this.maybeScheduleAuto(); // bots (and any resumed-gone seats) start playing
   }
 
@@ -313,15 +332,18 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
       this.finishGame();
       return;
     }
+    this.armTurnTimer();
     this.maybeScheduleAuto();
   }
 
   // ---- AI / vacated-seat auto-play -----------------------------------------
 
-  /** A seat played by the server: an AI bot, or a human who left for good. A
-   *  merely-disconnected human (within the 180s grace) is NOT auto-played — the
-   *  table waits for them, then their seat vacates and a bot takes over. */
+  /** A seat played by the server: an AI bot, a human who left for good, or a
+   *  human whose turn ran out (timedOutTurnSeat). A merely-disconnected human
+   *  (within the 180s grace) is NOT auto-played — the table waits for them, then
+   *  their seat vacates and a bot takes over. */
   private isAutoSeat(i: number): boolean {
+    if (i === this.timedOutTurnSeat) return true;
     const sid = this.seatOrder[i];
     if (!sid) return true; // vacated (left for good)
     return this.state.players.get(sid)?.isBot === true;
@@ -382,6 +404,81 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
     // Safety net: the policy emitted something illegal (shouldn't happen) — end
     // the turn so the table never stalls; if even that is illegal, re-schedule.
     if (!this.dispatch({ type: "turn/endTurn" })) this.maybeScheduleAuto();
+  }
+
+  // ---- turn timer ----------------------------------------------------------
+
+  /** Engine seat of the current player, or -1. */
+  private currentSeatIndex(): number {
+    return this.engine ? this.engine.players.findIndex((p) => p.id === this.engine.currentPlayerId) : -1;
+  }
+
+  /** (Re)arm the per-turn deadline. Runs at the end of afterApply + onGameStart.
+   *  Arms ONLY for a connected human's single-actor turn — bot/vacated/timed-out
+   *  seats auto-play with no clock, and the simultaneous mapping/duel phases are
+   *  not individually timed. A disconnected human's turn is parked (paused). */
+  private armTurnTimer(): void {
+    this.clearTurnTimer();
+    this.state.turnDeadline = 0;
+    if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.phase === "game-over") return;
+    const seat = this.currentSeatIndex();
+    // A turn that advanced away from the timed-out seat is finished — clear it.
+    if (seat !== this.timedOutTurnSeat) this.timedOutTurnSeat = -1;
+    if (this.state.turnSeconds === 0) return;
+    if (this.engine.phase === "initial-mapping" || this.engine.turn.phase === "duel") return; // multi-actor
+    if (seat < 0 || this.isAutoSeat(seat)) return; // bot / vacated / mid-timeout — no clock
+    this.startTurnTimer(this.state.turnSeconds * 1000);
+  }
+
+  private startTurnTimer(ms: number): void {
+    this.clearTurnTimer();
+    const sid = this.seatOrder[this.currentSeatIndex()] ?? "";
+    const connected = sid !== "" && this.state.players.get(sid)?.connected !== false;
+    if (!connected) {
+      // Human is mid-grace disconnected — pause; resume on reconnect.
+      this.pausedTurnRemainingMs = ms;
+      this.state.turnDeadline = 0;
+      return;
+    }
+    this.state.turnDeadline = Date.now() + ms;
+    this.turnTimer = this.clock.setTimeout(() => this.onTurnTimeout(), ms);
+  }
+
+  private clearTurnTimer(): void {
+    this.turnTimer?.clear();
+    this.turnTimer = undefined;
+  }
+
+  /** Pause/resume the deadline as the player on the clock drops/returns. */
+  private syncTurnClock(): void {
+    if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.phase === "game-over") return;
+    if (this.state.turnSeconds === 0) return;
+    const sid = this.seatOrder[this.currentSeatIndex()] ?? "";
+    const connected = sid !== "" && this.state.players.get(sid)?.connected !== false;
+    if (!connected && this.state.turnDeadline > 0) {
+      this.pausedTurnRemainingMs = Math.max(0, this.state.turnDeadline - Date.now());
+      this.state.turnDeadline = 0;
+      this.clearTurnTimer();
+    } else if (connected && this.state.turnDeadline === 0 && this.pausedTurnRemainingMs !== undefined) {
+      const ms = this.pausedTurnRemainingMs;
+      this.pausedTurnRemainingMs = undefined;
+      this.startTurnTimer(ms);
+    }
+  }
+
+  /** The current human's turn ran out: hand it to the AI (Normal), which finishes
+   *  it one beat at a time via the existing auto-play. */
+  private onTurnTimeout(): void {
+    this.turnTimer = undefined;
+    if (this.state.phase !== Phase.PLAYING || !this.engine || this.engine.phase === "game-over") return;
+    if (this.engine.phase === "initial-mapping" || this.engine.turn.phase === "duel") return;
+    const seat = this.currentSeatIndex();
+    if (seat < 0 || this.isAutoSeat(seat)) return; // already auto / not a human turn
+    this.timedOutTurnSeat = seat;
+    this.engine = { ...this.engine, log: [...this.engine.log, `${this.engine.players[seat]!.name}'s turn ran out — the AI is finishing it.`] };
+    this.state.turnDeadline = 0;
+    this.syncFromEngine();
+    this.maybeScheduleAuto();
   }
 
   /**
@@ -610,9 +707,21 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
     this.botDifficulty.delete(sessionId);
   }
 
+  /** Pause/resume the turn clock as the player on it drops/returns. */
+  protected override onPlayerDropped(): void {
+    this.syncTurnClock();
+  }
+  protected override onPlayerReconnected(): void {
+    this.syncTurnClock();
+  }
+
   protected override onGameEnded(): void {
     this.autoTimer?.clear();
     this.autoTimer = undefined;
+    this.clearTurnTimer();
+    this.pausedTurnRemainingMs = undefined;
+    this.timedOutTurnSeat = -1;
+    this.state.turnDeadline = 0;
     this.state.currentTurn = "";
     this.state.duelActive = false;
   }

@@ -2071,3 +2071,8 @@ button.spl-gem.selected {
 /* Perfect Palace — lobby controls (difficulty + turn timer) */
 .pp-lobby-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
 .pp-mini-select { padding: 8px 10px; border-radius: 8px; }
+
+/* Perfect Palace — turn-timer countdown in the header */
+.pp-timer { font-weight: 700; font-variant-numeric: tabular-nums; opacity: 0.95; }
+.pp-timer.warn { color: #ffd23f; animation: pp-timer-pulse 1s ease-in-out infinite; }
+@keyframes pp-timer-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }

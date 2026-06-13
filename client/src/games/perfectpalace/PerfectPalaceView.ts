@@ -21,13 +21,21 @@ import { LobbyMsg } from "@backbone/shared";
 import type { GameView, GameViewContext, LobbySettingsContext } from "../../framework/GameView.js";
 import { escapeHtml } from "../../framework/dom.js";
 import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
-import { flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
+import { clockChime, flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
 
 const { BOARD, getSquare, RESOURCE_OPTIONS, PRICE, RECIPE, totalPoints, staffWeight } = PerfectPalaceEngine;
 const PP_SAVES_KEY = "perfectpalace-saves";
 
 type Outcome = PerfectPalaceEngine.ResourceOutcome;
 const BAILIFF_ITEMS = ["bricks", "sticks", "wall", "roof", "dollars"] as const;
+
+/** "30s", "1 min", "1m30", "2 min" … for the turn-timer dropdown + countdown. */
+function fmtSecs(s: number): string {
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return r === 0 ? `${m} min` : `${m}m${String(r).padStart(2, "0")}`;
+}
 
 /** Kid-friendly label for one resource-card face. */
 function outcomeLabel(o: Outcome): string {
@@ -67,6 +75,9 @@ export class PerfectPalaceView implements GameView {
   private diceLayer?: HTMLElement;
   private diceTimers = new Set<ReturnType<typeof setTimeout>>();
   private lastSeenRollSeq = 0;
+  /** Turn-timer countdown ticker + once-per-deadline chime guard. */
+  private ticker?: ReturnType<typeof setInterval>;
+  private clockChimedFor = 0;
 
   mount(root: HTMLElement, room: Room<any, BaseState>, ctx: GameViewContext): void {
     this.root = root;
@@ -84,6 +95,7 @@ export class PerfectPalaceView implements GameView {
     hookSaveData(this.room, PP_SAVES_KEY, (blob) => (blob?.turnCount ?? 0) + 1, () =>
       flashToast(this.root!, "Game saved ✓"),
     );
+    this.ticker = setInterval(() => this.updateTimer(), 500);
     this.room.onStateChange(this.onState);
     this.render();
   }
@@ -97,8 +109,34 @@ export class PerfectPalaceView implements GameView {
     this.diceTimers.clear();
     this.diceLayer?.remove();
     this.diceLayer = undefined;
+    if (this.ticker) clearInterval(this.ticker);
+    this.ticker = undefined;
     this.root = undefined;
     this.room = undefined;
+  }
+
+  /** Refresh the header countdown (cheap; runs every 500ms). */
+  private updateTimer(): void {
+    const el = this.root?.querySelector<HTMLElement>(".pp-timer");
+    const state = this.room?.state;
+    if (!el || !state) return;
+    if (!state.turnSeconds || state.enginePhase === "game-over") {
+      el.textContent = "";
+      el.classList.remove("warn");
+      return;
+    }
+    if (state.turnDeadline === 0) {
+      el.textContent = "⏱ paused";
+      el.classList.remove("warn");
+      return;
+    }
+    const left = Math.max(0, Math.ceil((state.turnDeadline - Date.now()) / 1000));
+    el.textContent = `⏱ ${fmtSecs(left)}`;
+    el.classList.toggle("warn", left <= 15);
+    if (left <= 15 && left > 0 && state.currentTurn === this.ctx?.mySessionId && this.clockChimedFor !== state.turnDeadline) {
+      this.clockChimedFor = state.turnDeadline;
+      clockChime();
+    }
   }
 
   private after(ms: number, fn: () => void): void {
@@ -189,7 +227,7 @@ export class PerfectPalaceView implements GameView {
     this.root.innerHTML = `
       <div class="pp-top">
         <div class="pp-title">The Perfect Palace</div>
-        <div class="pp-phasebar">${escapeHtml(this.phaseHeadline())}</div>
+        <div class="pp-phasebar">${escapeHtml(this.phaseHeadline())} <span class="pp-timer"></span></div>
         <div class="pp-toptools">
           <button class="pp-icon" data-action="rules" title="Rules & help">❓</button>
           <button class="pp-icon" data-action="mute" title="${isMuted() ? "Sounds off" : "Sounds on"}">${isMuted() ? "🔕" : "🔔"}</button>
@@ -762,12 +800,27 @@ export function renderPerfectPalaceLobbySettings(
   }).join("");
   const colorRow = `<div class="pp-color-setting"><span class="muted">Your colour</span><div class="pp-color-row">${swatches}</div></div>`;
 
+  // Host-only turn-timer dropdown (Off, then 30s steps to 5 min). When a turn
+  // runs out the AI finishes it (handled server-side).
+  const curTurn = (room.state as unknown as PerfectPalaceState).turnSeconds ?? 0;
+  let timerOpts = `<option value="0" ${curTurn === 0 ? "selected" : ""}>Off</option>`;
+  for (let s = 30; s <= 300; s += 30) {
+    timerOpts += `<option value="${s}" ${curTurn === s ? "selected" : ""}>${fmtSecs(s)}</option>`;
+  }
+  const timerRow = ctx.isHost
+    ? `<div class="pp-lobby-row"><span class="muted">Turn timer</span><select id="pp-turn-seconds" class="pp-mini-select">${timerOpts}</select></div>`
+    : "";
+
   container.innerHTML = `
     <p class="muted">A regal, Monopoly-style race to build palaces — 2–6 players, one device each.
       Add AI players to fill out the table; if someone leaves mid-game an AI keeps their seat and anyone can take it over.</p>
     ${colorRow}
+    ${timerRow}
     ${addBot}
     <div class="pp-saves-block"></div>`;
+  container.querySelector<HTMLSelectElement>("#pp-turn-seconds")?.addEventListener("change", (ev) => {
+    room.send(PerfectPalaceMsg.CONFIG, { turnSeconds: Number((ev.target as HTMLSelectElement).value) });
+  });
   container.querySelector<HTMLButtonElement>("#pp-add-bot")?.addEventListener("click", () => {
     const difficulty = container.querySelector<HTMLSelectElement>("#pp-bot-difficulty")?.value ?? "normal";
     room.send(LobbyMsg.ADD_BOT, { difficulty });
