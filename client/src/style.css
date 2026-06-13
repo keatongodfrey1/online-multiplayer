@@ -1259,3 +1259,17 @@ button.spl-gem.selected {
   gap: 8px;
   margin: 10px 0;
 }
+
+/* Catan hand-total chip + discard warning */
+.catan-chip-total {
+  font-weight: 600;
+}
+
+.catan-chip-warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.catan-topbar {
+  gap: 6px;
+}

@@ -20,6 +20,7 @@ import {
   LobbyMsg,
 } from "@backbone/shared";
 import type { GameView, GameViewContext, LobbySettingsContext } from "../../framework/GameView.js";
+import { flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
 import { escapeHtml } from "../../lobby/HomeScreen.js";
 import { PLAYER_COLOR, renderBoardSvg, resourceIcon, type BoardUi } from "./board.js";
 
@@ -281,11 +282,11 @@ export function renderCatanGameSummary(
           (seat.hasLargestArmy ? 2 : 0),
       );
       const bits: string[] = [];
-      if (settlements[i]) bits.push(`🏠×${settlements[i]}`);
-      if (cities[i]) bits.push(`🏛×${cities[i]}`);
-      if (seat.hasLongestRoad) bits.push("🛤 Longest Road +2");
-      if (seat.hasLargestArmy) bits.push("♞ Largest Army +2");
-      if (devVP > 0) bits.push(`⭐ VP cards ×${devVP}`);
+      if (settlements[i]) bits.push(`${settlements[i]} settlements`);
+      if (cities[i]) bits.push(`${cities[i]} cities`);
+      if (seat.hasLongestRoad) bits.push("Longest Road +2");
+      if (seat.hasLargestArmy) bits.push("Largest Army +2");
+      if (devVP > 0) bits.push(`${devVP} VP cards`);
       const you = seat.sessionId && seat.sessionId === ctx.mySessionId ? " (you)" : "";
       return `
         <div class="catan-summary-row ${i === winnerSeat ? "catan-summary-winner" : ""}">
@@ -324,6 +325,8 @@ export class CatanView implements GameView {
   private bankGive: Res | null = null;
   /** Shows "Saved ✓" on the Save button for a beat after a snapshot stores. */
   private saveFlashUntil = 0;
+  /** Rising-edge tracker for the "it's my decision" chime + toast. */
+  private wasMyDecision = false;
 
   mount(root: HTMLElement, room: Room<any, BaseState>, ctx: GameViewContext): void {
     this.root = root;
@@ -448,6 +451,15 @@ export class CatanView implements GameView {
     }
     if (s.tradeOpen) this.tradeComposing = false;
 
+    // Chime + toast on the rising edge of "I must act now" (turn, discard,
+    // steal, neutral build, the opening roll - anything in awaitingSeats).
+    const myDecisionNow = mine && s.phaseDetail !== "gameOver";
+    if (myDecisionNow && !this.wasMyDecision) {
+      turnChime();
+      flashToast(this.root, "Your turn!");
+    }
+    this.wasMyDecision = myDecisionNow;
+
     this.renderTopbar(s);
     this.renderStatus(s, me);
     this.renderBoard(s, me, mine);
@@ -458,14 +470,16 @@ export class CatanView implements GameView {
     this.renderLog(s);
   }
 
-  /** Host-only Save snapshot button (the host's browser stores the blob). */
+  /** Mute toggle (everyone) + host-only Save snapshot button. */
   private renderTopbar(s: CatanState): void {
     const el = this.root!.querySelector<HTMLElement>("#catan-topbar")!;
     const amHost = this.st().players.get(this.ctx!.mySessionId)?.isHost === true;
     const saved = Date.now() < this.saveFlashUntil;
-    el.innerHTML = amHost
-      ? `<button class="subtle" data-action="save-game">${saved ? "Saved ✓" : "💾 Save"}</button>`
-      : "";
+    const mute = `<button class="subtle" data-action="toggle-mute" title="${
+      isMuted() ? "Sounds off" : "Sounds on"
+    }">${isMuted() ? "🔕" : "🔔"}</button>`;
+    const save = amHost ? `<button class="subtle" data-action="save-game">${saved ? "Saved ✓" : "💾 Save"}</button>` : "";
+    el.innerHTML = mute + save;
   }
 
   private renderStatus(s: CatanState, me: number): void {
@@ -879,7 +893,12 @@ export class CatanView implements GameView {
       return;
     }
     const hand = this.myHand();
+    const total = bagTotal(hand);
     const chips = RESOURCES.map((r) => `<span class="catan-chip">${resourceIcon(r)} ${hand[r]}</span>`).join("");
+    // Total cards matters because a rolled 7 makes you discard half when > 7.
+    const totalChip = `<span class="catan-chip catan-chip-total ${total > 7 ? "catan-chip-warn" : ""}" title="${
+      total > 7 ? "Rolling a 7 would cost you half" : "Your total resource cards"
+    }">${total} cards${total > 7 ? " ⚠" : ""}</span>`;
     const playableNow = (kind: string, c: { boughtThisTurn: boolean; played: boolean }) =>
       !c.played &&
       !c.boughtThisTurn &&
@@ -899,15 +918,15 @@ export class CatanView implements GameView {
         }</span>`;
       })
       .join("");
-    const tokens = s.twoPlayerVariant ? `<span class="catan-chip">⬡ ${seat.tradeTokens}</span>` : "";
+    const tokens = s.twoPlayerVariant ? `<span class="catan-chip">⬡ ${seat.tradeTokens} tokens</span>` : "";
     el.innerHTML = `
       <div class="catan-mine">
         <span class="catan-color" style="background:${PLAYER_COLOR[seat.color] ?? "#999"}"></span>
         <strong>You</strong> · ${seat.publicVP} VP
-        ${seat.hasLongestRoad ? "🛤🏆" : ""}${seat.hasLargestArmy ? "♞🏆" : ""}
-        <span class="muted">pieces: ${seat.roadsLeft}🛤 ${seat.settlementsLeft}🏠 ${seat.citiesLeft}🏛</span>
+        ${seat.hasLongestRoad ? '<span title="Longest Road (+2)">🛤🏆</span>' : ""}${seat.hasLargestArmy ? '<span title="Largest Army (+2)">♞🏆</span>' : ""}
+        <span class="muted">${seat.roadsLeft} roads · ${seat.settlementsLeft} settlements · ${seat.citiesLeft} cities left</span>
       </div>
-      <div class="catan-hand">${chips}${tokens}</div>
+      <div class="catan-hand">${chips}${totalChip}${tokens}</div>
       ${cards ? `<div class="catan-devs">${cards}</div>` : ""}`;
   }
 
@@ -924,16 +943,16 @@ export class CatanView implements GameView {
         else if (player && !player.connected) badges.push('<span class="catan-badge catan-badge-warn">reconnecting…</span>');
         if (s.currentSeat === i && s.phaseDetail !== "gameOver") badges.push('<span class="catan-badge catan-badge-turn">turn</span>');
         const stats = seat.neutral
-          ? `<span class="muted">roads ${15 - seat.roadsLeft} · settlements ${5 - seat.settlementsLeft}</span>`
-          : `<span class="muted">✋${seat.handCount} 🃏${seat.devCardCount} ♞${seat.knightsPlayed}${
-              s.twoPlayerVariant ? ` ⬡${seat.tradeTokens}` : ""
+          ? `<span class="muted">${15 - seat.roadsLeft} roads · ${5 - seat.settlementsLeft} settlements</span>`
+          : `<span class="muted">${seat.handCount} cards · ${seat.devCardCount} dev · ${seat.knightsPlayed} knights${
+              s.twoPlayerVariant ? ` · ${seat.tradeTokens} tokens` : ""
             }</span>`;
         return `
           <div class="catan-opp">
             <span class="catan-color" style="background:${PLAYER_COLOR[seat.color] ?? "#999"}"></span>
             <strong>${escapeHtml(seat.nickname)}</strong>
             ${seat.neutral ? "" : `<span class="catan-vp">${seat.publicVP} VP</span>`}
-            ${seat.hasLongestRoad ? "🛤🏆" : ""}${seat.hasLargestArmy ? "♞🏆" : ""}
+            ${seat.hasLongestRoad ? '<span title="Longest Road (+2)">🛤🏆</span>' : ""}${seat.hasLargestArmy ? '<span title="Largest Army (+2)">♞🏆</span>' : ""}
             ${stats}
             ${badges.join("")}
           </div>`;
@@ -993,6 +1012,10 @@ export class CatanView implements GameView {
       // action bar
       case "save-game":
         this.room.send(CatanMsg.SAVE, {});
+        return;
+      case "toggle-mute":
+        setMuted(!isMuted());
+        this.render();
         return;
       case "roll":
         this.send({ type: "rollDice" });
