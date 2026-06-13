@@ -747,6 +747,40 @@ describe("catan engine: domestic trade", () => {
     assert.equal(s.pendingTrade, null);
   });
 
+  it("tracks declines symmetrically and lets candidates change their answer", () => {
+    let s = toMain(setupGame(4, 26));
+    s.players[0]!.hand = { ...emptyBag(), ore: 1 };
+    s.players[1]!.hand = { ...emptyBag(), wool: 1 };
+    s = reduce(geo, s, { type: "proposeDomesticTrade", give: { ore: 1 }, receive: { wool: 1 } });
+    assert.deepEqual(s.pendingTrade!.declines, [], "a fresh offer has no declines");
+
+    // decline without ever accepting (the playtest bug path)
+    s = reduce(geo, s, { type: "respondDomesticTrade", player: 1, accept: false });
+    assert.deepEqual(s.pendingTrade!.declines, [1]);
+    assert.deepEqual(s.pendingTrade!.acceptances, []);
+
+    // idempotent re-decline
+    s = reduce(geo, s, { type: "respondDomesticTrade", player: 1, accept: false });
+    assert.deepEqual(s.pendingTrade!.declines, [1], "no duplicates");
+
+    // change of mind: decline -> accept moves between the lists
+    s = reduce(geo, s, { type: "respondDomesticTrade", player: 1, accept: true });
+    assert.deepEqual(s.pendingTrade!.declines, []);
+    assert.deepEqual(s.pendingTrade!.acceptances, [1]);
+
+    // ...and back again
+    s = reduce(geo, s, { type: "respondDomesticTrade", player: 1, accept: false });
+    assert.deepEqual(s.pendingTrade!.declines, [1]);
+    assert.deepEqual(s.pendingTrade!.acceptances, []);
+
+    // a declined candidate has NOT accepted: confirm is still rejected
+    assert.equal(tryReduce(geo, s, { type: "confirmDomesticTrade", partner: 1 }).ok, false);
+
+    // declines survive the per-action clone (a second candidate responds)
+    s = reduce(geo, s, { type: "respondDomesticTrade", player: 2, accept: true });
+    assert.deepEqual(s.pendingTrade!.declines, [1], "clone preserved the declines list");
+  });
+
   it("guards: no unaccepted confirm, no gifts, partner must cover", () => {
     let s2 = toMain(setupGame(4, 23));
     s2.players[0]!.hand = { ...emptyBag(), ore: 1 };

@@ -434,6 +434,7 @@ export function cloneGameState(s: GameState): GameState {
           receive: { ...s.pendingTrade.receive },
           candidates: s.pendingTrade.candidates.slice(),
           acceptances: s.pendingTrade.acceptances.slice(),
+          declines: s.pendingTrade.declines.slice(),
         }
       : null,
     rngState: s.rngState,
@@ -1023,7 +1024,7 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
         (p) => Number.isInteger(p) && p >= 0 && p < state.players.length && p !== me.id && !isNeutral(state, p),
       );
       require(candidates.length > 0, "no trade partners specified");
-      state.pendingTrade = { proposer: me.id, give: { ...action.give }, receive: { ...action.receive }, candidates, acceptances: [] };
+      state.pendingTrade = { proposer: me.id, give: { ...action.give }, receive: { ...action.receive }, candidates, acceptances: [], declines: [] };
       return state;
     }
 
@@ -1032,8 +1033,15 @@ export function reduce(geo: BoardGeometry, prev: GameState, action: Action, opts
       const t = state.pendingTrade;
       require(t !== null, "there is no open trade");
       require(action.player !== t.proposer && t.candidates.includes(action.player), "you are not a candidate for this trade");
-      if (action.accept) { if (!t.acceptances.includes(action.player)) t.acceptances.push(action.player); }
-      else t.acceptances = t.acceptances.filter((p) => p !== action.player);
+      // Symmetric and idempotent: a candidate may switch their answer freely
+      // until the proposer confirms or withdraws.
+      if (action.accept) {
+        t.declines = t.declines.filter((p) => p !== action.player);
+        if (!t.acceptances.includes(action.player)) t.acceptances.push(action.player);
+      } else {
+        t.acceptances = t.acceptances.filter((p) => p !== action.player);
+        if (!t.declines.includes(action.player)) t.declines.push(action.player);
+      }
       return state;
     }
 

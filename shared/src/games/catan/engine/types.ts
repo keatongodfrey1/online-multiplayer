@@ -122,6 +122,7 @@ export interface PendingTrade {
   receive: Partial<ResourceBag>; // what the proposer receives (and the partner gives)
   candidates: PlayerId[]; // who may accept
   acceptances: PlayerId[]; // who has accepted so far
+  declines: PlayerId[]; // who has declined (visible to the proposer; changeable)
 }
 
 export interface GameEvent {
