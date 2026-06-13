@@ -1590,7 +1590,6 @@ button.spl-gem.selected {
 }
 
 /* Reveal + dice overlays */
-.sc-reveal,
 .sc-dice {
   position: absolute;
   inset: 0;
@@ -1600,12 +1599,28 @@ button.spl-gem.selected {
   justify-content: center;
   pointer-events: none;
 }
-.sc-reveal.show,
 .sc-dice.show {
   display: flex;
 }
+/* Card reveal: a full-screen overlay ABOVE the prompt (z-40). For the player who
+   drew it, `.blocking` dims the board and captures the OK tap (so they acknowledge
+   the card before answering a prompt the draw opened); watchers get a click-through
+   reveal that auto-closes, leaving their board usable. */
 .sc-reveal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.sc-reveal.show {
+  display: flex;
+}
+.sc-reveal.blocking {
   background: rgba(0, 0, 0, 0.55);
+  pointer-events: auto;
 }
 .sc-reveal-card {
   background: var(--card);
@@ -1627,6 +1642,12 @@ button.spl-gem.selected {
 .sc-reveal-desc {
   color: var(--muted);
   font-size: 0.85rem;
+}
+.sc-reveal-ok {
+  margin-top: 12px;
+  padding: 10px 28px;
+  font-weight: 800;
+  font-size: 1rem;
 }
 .sc-dice {
   font-size: 5rem;
