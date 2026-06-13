@@ -54,8 +54,9 @@ const DICE_FACES = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"];
 const STEP_MS = 110;
 const PORTAL_MS = 260;
 const TELEPORT_MS = 420;
-const DICE_MS = 750;
-const REVEAL_MS = 1300;
+const DICE_MS = 1750; // spin (~560ms) + ~1.2s holding the landed face so the roll is readable
+const REVEAL_OTHERS_MS = 2600; // a card you did NOT draw auto-closes after a couple seconds
+const REVEAL_SAFETY_MS = 12000; // drawer fallback: the local queue can't stall if they walk away
 const BURST_SKIP = 8; // > this many new events at once (reconnect catch-up) -> snap, don't animate
 
 interface PortalPath {
@@ -101,7 +102,11 @@ export class SpaceChaseView implements GameView {
   private animating = false;
   private animTimers = new Set<ReturnType<typeof setTimeout>>();
   private lastSeq = 0;
-  private cold = true;
+
+  // Card-reveal dismissal: the queue's done() callback waits here until the
+  // drawer taps OK (or the auto-close timer fires for watchers).
+  private revealDone?: () => void;
+  private revealTimer?: ReturnType<typeof setTimeout>;
 
   // prompt scratch (reset whenever the matching prompt isn't open for me)
   private multiPick: number[] = [];
@@ -122,7 +127,6 @@ export class SpaceChaseView implements GameView {
             <div id="sc-start" class="sc-start-bar"></div>
             <svg id="sc-portals" class="sc-portals"></svg>
             <div id="sc-rockets" class="sc-rockets"></div>
-            <div id="sc-reveal" class="sc-reveal"></div>
             <div id="sc-dice" class="sc-dice"></div>
           </div>
           <aside class="sc-side">
@@ -132,6 +136,7 @@ export class SpaceChaseView implements GameView {
             <ul id="sc-log" class="sc-log"></ul>
           </aside>
         </div>
+        <div id="sc-reveal" class="sc-reveal"></div>
         <div id="sc-modal" class="sc-modal-layer"></div>
       </div>`;
 
@@ -168,6 +173,8 @@ export class SpaceChaseView implements GameView {
     this.resizeObs?.disconnect();
     for (const t of this.animTimers) clearTimeout(t);
     this.animTimers.clear();
+    this.revealTimer = undefined;
+    this.revealDone = undefined;
     this.animQueue.length = 0;
     this.room?.onStateChange.remove(this.onState);
     this.root?.removeEventListener("click", this.onClick);
@@ -201,7 +208,11 @@ export class SpaceChaseView implements GameView {
     }
     if (fresh.length > 0) {
       this.lastSeq = fresh[fresh.length - 1]!.seq;
-      if (this.cold || fresh.length > BURST_SKIP) {
+      // Snap (don't animate) only for a genuine burst - e.g. a reconnect
+      // catch-up. A fresh mount/refresh never replays history because lastSeq
+      // is primed to the newest event in mount(); so the FIRST live action
+      // after mount still animates (the old `cold` flag wrongly skipped it).
+      if (fresh.length > BURST_SKIP) {
         this.displayPos.clear();
         this.animQueue.length = 0;
         this.positionAllRockets();
@@ -210,7 +221,6 @@ export class SpaceChaseView implements GameView {
         this.pump();
       }
     }
-    this.cold = false;
     this.render();
   }
 
@@ -488,11 +498,8 @@ export class SpaceChaseView implements GameView {
         this.after(TELEPORT_MS, done);
         return;
       case ScEvent.DRAW:
-        this.showReveal(e.b);
-        this.after(REVEAL_MS, () => {
-          this.hideReveal();
-          done();
-        });
+        // The drawer taps OK to continue; everyone else's reveal auto-closes.
+        this.showReveal(e.b, e.seat === this.mySeatIndex(), done);
         return;
       case ScEvent.COLLISION:
         this.pulseSeat(-1);
@@ -551,22 +558,45 @@ export class SpaceChaseView implements GameView {
     this.q("sc-dice").classList.remove("show");
   }
 
-  private showReveal(cardId: number): void {
+  /**
+   * Show the drawn card. `dismissable` = this client drew it: a backdrop + "OK"
+   * button gate the animation queue until the player taps it (with a safety
+   * auto-close so the queue can never permanently stall). Watchers get a
+   * click-through reveal that auto-closes after a couple seconds. Either way
+   * `done()` runs exactly once, when the reveal closes.
+   */
+  private showReveal(cardId: number, dismissable: boolean, done: () => void): void {
     const def = getCard(cardId);
     const el = this.q("sc-reveal");
     if (!def) {
-      el.classList.remove("show");
+      el.classList.remove("show", "blocking");
+      done();
       return;
     }
+    el.classList.toggle("blocking", dismissable);
     el.innerHTML = `<div class="sc-reveal-card">
         <img src="${CARD_ART}${def.image}" alt="${escapeHtml(def.name)}" />
         <div class="sc-reveal-name">${escapeHtml(def.name)}</div>
         <div class="sc-reveal-desc">${escapeHtml(def.desc)}</div>
+        ${dismissable ? `<button class="sc-reveal-ok" data-action="dismiss-reveal">OK</button>` : ""}
       </div>`;
     el.classList.add("show");
+    this.revealDone = done;
+    this.revealTimer = setTimeout(() => this.dismissReveal(), dismissable ? REVEAL_SAFETY_MS : REVEAL_OTHERS_MS);
+    this.animTimers.add(this.revealTimer);
   }
-  private hideReveal(): void {
-    this.q("sc-reveal").classList.remove("show");
+
+  private dismissReveal(): void {
+    if (!this.revealDone) return; // idempotent (click + auto-close race)
+    if (this.revealTimer) {
+      clearTimeout(this.revealTimer);
+      this.animTimers.delete(this.revealTimer);
+      this.revealTimer = undefined;
+    }
+    this.q("sc-reveal").classList.remove("show", "blocking");
+    const done = this.revealDone;
+    this.revealDone = undefined;
+    done();
   }
 
   // ── region renderers ───────────────────────────────────────────────────
@@ -841,6 +871,9 @@ export class SpaceChaseView implements GameView {
     if (!target || !this.room || target.hasAttribute("disabled")) return;
     const d = target.dataset;
     switch (d.action) {
+      case "dismiss-reveal":
+        this.dismissReveal();
+        return;
       case "toggle-mute":
         setMuted(!isMuted());
         this.renderStatus();
