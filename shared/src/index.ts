@@ -6,3 +6,4 @@ export * from "./games/splendor/index.js";
 export * from "./games/spacechase/index.js";
 export * from "./games/catan/index.js";
 export * from "./games/perfectpalace/index.js";
+export * from "./games/paperio/index.js";

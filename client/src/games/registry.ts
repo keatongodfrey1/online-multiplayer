@@ -2,9 +2,10 @@
  * Every game registers itself here with one entry.
  * The home screen's "create a game" menu is generated from this list.
  */
-import { ARENA, CATAN, PERFECT_PALACE, SPACE_CHASE, SPLENDOR, TICTACTOE } from "@backbone/shared";
+import { ARENA, CATAN, PAPERIO, PERFECT_PALACE, SPACE_CHASE, SPLENDOR, TICTACTOE } from "@backbone/shared";
 import type { GameDefinition } from "../framework/GameView.js";
 import { ArenaView } from "./arena/ArenaView.js";
+import { PaperIoView, renderPaperIoGameSummary, renderPaperIoLobbySettings } from "./paperio/PaperIoView.js";
 import { CatanView, renderCatanGameSummary, renderCatanLobbySettings } from "./catan/CatanView.js";
 import {
   PerfectPalaceView,
@@ -67,6 +68,14 @@ export const games: GameDefinition[] = [
     createView: () => new PerfectPalaceView(),
     renderLobbySettings: renderPerfectPalaceLobbySettings,
     renderGameSummary: renderPerfectPalaceGameSummary,
+  },
+  {
+    gameType: PAPERIO,
+    displayName: "Paper.io",
+    description: "2–8 players, real-time — grab territory, cut off rivals.",
+    createView: () => new PaperIoView(),
+    renderLobbySettings: renderPaperIoLobbySettings,
+    renderGameSummary: renderPaperIoGameSummary,
   },
 ];
 

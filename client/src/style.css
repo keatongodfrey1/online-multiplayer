@@ -2079,3 +2079,87 @@ button.spl-gem.selected {
 
 /* Perfect Palace — share-results button on the end screen */
 #pp-share { display: block; margin: 10px auto 0; }
+
+/* Paper.io */
+
+/* The board can be wide; let the app shell grow past the mobile-first width. */
+#app:has(.pio-wrap) {
+  max-width: 1100px;
+}
+
+.pio-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+#pio-canvas {
+  max-width: 100%;
+  height: auto;
+  border-radius: 12px;
+  display: block;
+  touch-action: none;
+  background: #161b29;
+  cursor: crosshair;
+}
+.pio-hint {
+  margin: 2px 0 0;
+  font-size: 0.85rem;
+}
+
+.pio-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0;
+}
+.pio-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 4px 0;
+}
+.pio-row > span:first-child {
+  color: var(--muted, #9aa0b4);
+}
+.pio-select {
+  min-width: 120px;
+}
+.pio-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.pio-stepper button {
+  min-width: 40px;
+  padding: 4px 10px;
+}
+.pio-stepper .pio-val {
+  min-width: 56px;
+  text-align: center;
+}
+
+.pio-summary {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 4px 0;
+}
+.pio-summary th,
+.pio-summary td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+}
+.pio-summary .pio-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.pio-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  margin-right: 8px;
+  vertical-align: middle;
+}
