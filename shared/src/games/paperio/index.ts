@@ -5,10 +5,12 @@
  * is the public mirror the server syncs to clients. There is no hidden
  * information - everyone sees the whole board - so no @view() private state.
  */
-import { ArraySchema, Schema, type } from "@colyseus/schema";
+import { ArraySchema, MapSchema, Schema, type } from "@colyseus/schema";
 import { BasePlayer, BaseState } from "../../state.js";
 import {
   BOARD_SIZE_ORDER,
+  BOT_COUNT_MAX,
+  BOT_COUNT_MIN,
   DIFFICULTY_ORDER,
   LIVES_MAX,
   LIVES_MIN,
@@ -27,11 +29,16 @@ export * as PaperIoEngine from "./engine/index.js";
 export {
   BOARD_SIZES,
   BOARD_SIZE_ORDER,
+  BOT_COUNT_DEFAULT,
+  BOT_COUNT_MAX,
+  BOT_COUNT_MIN,
+  BOT_DIFFICULTY_DEFAULT,
   DIFFICULTIES,
   DIFFICULTY_ORDER,
   LIVES_DEFAULT,
   LIVES_MAX,
   LIVES_MIN,
+  MAX_BOTS,
   SPEEDS,
   SPEED_ORDER,
   TARGET_PCT_DEFAULT,
@@ -54,7 +61,8 @@ export const PaperIoMsg = {
   STEER: "paperio/steer",
   /**
    * Host-only, lobby-only lobby settings. Partial payload, any of:
-   * { boardSize, speed, winMode, targetPercent, timedSeconds, lives }.
+   * { boardSize, speed, winMode, targetPercent, timedSeconds, lives,
+   *   botCount, botDifficulty }.
    */
   CONFIG: "paperio/config",
 } as const;
@@ -80,6 +88,9 @@ export function isBotDifficulty(v: unknown): v is BotDifficulty {
 export function isValidLives(v: unknown): v is number {
   return typeof v === "number" && Number.isInteger(v) && v >= LIVES_MIN && v <= LIVES_MAX;
 }
+export function isValidBotCount(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v >= BOT_COUNT_MIN && v <= BOT_COUNT_MAX;
+}
 export function isValidTargetPercent(v: unknown): v is number {
   return (
     typeof v === "number" &&
@@ -101,6 +112,7 @@ export function isValidTimedSeconds(v: unknown): v is number {
 
 // ---- synced schema ----------------------------------------------------------
 
+/** A human player. Grid id = seat + 1. */
 export class PaperIoPlayer extends BasePlayer {
   /** Smooth head position, in cell units (matches the engine's float pos). */
   @type("float32") x = 0;
@@ -119,11 +131,27 @@ export class PaperIoPlayer extends BasePlayer {
   @type(["uint16"]) trail = new ArraySchema<number>();
 }
 
+/** An engine-owned bot. Dynamic: added on spawn, removed on elimination. */
+export class PaperIoBot extends Schema {
+  /** Grid owner id (above the human range). */
+  @type("uint8") id = 0;
+  /** Hue source (each spawn gets a fresh seed). */
+  @type("uint16") colorSeed = 0;
+  @type("float32") x = 0;
+  @type("float32") y = 0;
+  @type("float32") heading = 0;
+  @type("boolean") dead = false;
+  @type("uint16") cellsOwned = 0;
+  @type(["uint16"]) trail = new ArraySchema<number>();
+}
+
 export class PaperIoState extends BaseState {
   @type("uint16") cols = 0;
   @type("uint16") rows = 0;
-  /** Territory owner per cell: actor.id (seat + 1), or 0 for empty. Row-major. */
+  /** Territory owner per cell: actor id, or 0 for empty. Row-major. */
   @type(["uint8"]) grid = new ArraySchema<number>();
+  /** Live bots, keyed by their grid id (as a string). */
+  @type({ map: PaperIoBot }) bots = new MapSchema<PaperIoBot>();
 
   // ---- lobby settings (mirrored for the lobby UI; host-set) ----
   @type("string") boardSize = "medium";
@@ -131,7 +159,12 @@ export class PaperIoState extends BaseState {
   @type("string") winMode = "target";
   @type("uint8") targetPercent = 0;
   @type("uint16") timedSeconds = 0;
+  /** HUMAN players' starting lives (bots always have 1). */
   @type("uint8") startLives = 0;
+  @type("uint8") botCount = 0;
+  @type("string") botDifficulty = "normal";
   /** Epoch ms the round ends in timed mode (0 otherwise); clients show a countdown. */
   @type("float64") endsAt = 0;
+  /** How the round ended (engine Outcome), for the game-over summary. */
+  @type("string") outcome = "";
 }

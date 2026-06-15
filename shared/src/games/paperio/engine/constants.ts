@@ -15,6 +15,15 @@ export const SELF_GRACE = 3;
 export const TURN_RATE = 13;
 /** How long an actor stays "dead" before respawn / elimination. */
 export const DEATH_MS = 750;
+/** Human framework seats occupy ids 1..8; bot ids start above them. */
+export const MAX_HUMAN_SEATS = 8;
+export const BOT_ID_BASE = MAX_HUMAN_SEATS + 1; // 9
+/** Hard cap on simultaneous bots (sizes the id pool and the bot-count dial). */
+export const MAX_BOTS = 16;
+/** ms between topping the bot population back up to the chosen count. */
+export const SPAWN_INTERVAL_MS = 7000;
+/** Stop spawning bots once a leader already owns this share of the board. */
+export const SPAWN_CAP_SHARE = 0.8;
 
 export interface BoardDef {
   cols: number;
@@ -22,14 +31,14 @@ export interface BoardDef {
   label: string;
 }
 /**
- * Board dimensions, capped conservatively below the source game's sizes so the
- * whole board fits a tablet screen and the synced grid stays small even for
- * 8 players over the internet.
+ * Board dimensions. With the follow camera the whole board no longer has to fit
+ * one screen, so these are larger than a single viewport; kept within a range
+ * that keeps the synced grid reasonable over the internet.
  */
 export const BOARD_SIZES: Record<BoardSizeKey, BoardDef> = {
-  small: { cols: 40, rows: 26, label: "Small" },
-  medium: { cols: 52, rows: 34, label: "Medium" },
-  large: { cols: 64, rows: 40, label: "Large" },
+  small: { cols: 48, rows: 30, label: "Small" },
+  medium: { cols: 72, rows: 46, label: "Medium" },
+  large: { cols: 100, rows: 64, label: "Large" },
 };
 export const BOARD_SIZE_ORDER: BoardSizeKey[] = ["small", "medium", "large"];
 
@@ -70,6 +79,11 @@ export const DIFFICULTY_ORDER: BotDifficulty[] = ["easy", "normal", "hard", "ext
 export const LIVES_MIN = 1;
 export const LIVES_MAX = 10;
 export const LIVES_DEFAULT = 3;
+
+export const BOT_COUNT_MIN = 0;
+export const BOT_COUNT_MAX = MAX_BOTS;
+export const BOT_COUNT_DEFAULT = 6;
+export const BOT_DIFFICULTY_DEFAULT: BotDifficulty = "normal";
 
 export const TARGET_PCT_MIN = 10;
 export const TARGET_PCT_MAX = 90;

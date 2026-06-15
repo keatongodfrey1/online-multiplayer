@@ -7,21 +7,26 @@
  * dependencies: time is advanced by step(dt) and randomness comes from a
  * seeded RNG, so it is fully deterministic and unit-testable on its own.
  *
- * Differences from the source (deliberate, agreed with the owner):
- *  - Free-angle continuous movement for humans; bots grid-step but at the
- *    SAME cell speed as humans (a movement budget), so difficulty changes how
- *    bots play, never how fast they move ("smarter, not faster").
- *  - Uniform death model: a kill (self-cut, a rival cutting your trail, or
- *    being squeezed to zero land) costs a life and clears your trail. With
- *    lives left you respawn keeping your territory; at zero lives you are
- *    eliminated and your land is freed. No territory is transferred on a kill.
- *  - Lives + elimination apply to bots too; the round ends on the target
- *    share, the timed limit, a last survivor, or all humans being out.
+ * Actor model:
+ *  - HUMANS are framework players (seats 0..7, grid id = seat+1) with a
+ *    configurable number of lives. On death they respawn keeping their land;
+ *    at zero lives they're eliminated and their land freed.
+ *  - BOTS are engine-owned and dynamic: ids come from a pool above the human
+ *    range, each has ONE life, and a fresh colour seed. The engine keeps the
+ *    population topped up to `botCount` throughout the round (spawning a new
+ *    bot at a random open patch on a timer), capped once a leader dominates.
+ *
+ * Movement: free-angle continuous for humans; bots grid-step but at the SAME
+ * cell speed (a movement budget) - difficulty changes how bots play, never how
+ * fast they move ("smarter, not faster").
  */
 import {
+  BOT_ID_BASE,
   DEATH_MS,
   DIFFICULTIES,
   SELF_GRACE,
+  SPAWN_CAP_SHARE,
+  SPAWN_INTERVAL_MS,
   START_BLOCK,
   TURN_RATE,
 } from "./constants.js";
@@ -29,9 +34,10 @@ import { mulberry32 } from "./rng.js";
 import type {
   Actor,
   BotAI,
+  BotDifficulty,
   EndResult,
   GameEvent,
-  SeatConfig,
+  Outcome,
   WorldOptions,
 } from "./types.js";
 
@@ -45,7 +51,10 @@ export class PaperIoWorld {
   readonly winMode: WorldOptions["winMode"];
   readonly targetThreshold: number;
   readonly timedLimitMs: number;
-  readonly startLives: number;
+  readonly humanLives: number;
+  readonly botCount: number;
+  readonly botDifficulty: BotDifficulty;
+  readonly maxBots: number;
 
   /** Owner value per cell (actor.id, or 0). Flat, row-major (y * cols + x). */
   readonly grid: Int16Array;
@@ -56,12 +65,19 @@ export class PaperIoWorld {
   /** Trail ownership across the whole board: packed cell index -> actor.id. */
   private readonly trailOwner = new Map<number, number>();
 
-  /** Actors in seat order. */
-  readonly actorList: Actor[] = [];
-  /** Sparse, indexed by seat. */
+  /** Human actors (stable for the round; eliminated ones stay flagged). */
+  readonly humans: Actor[] = [];
+  /** Live bots (added on spawn, removed on elimination). */
+  readonly bots: Actor[] = [];
+  /** Sparse, indexed by human seat. */
   private readonly bySeatArr: (Actor | undefined)[] = [];
-  /** Sparse, indexed by id (= seat + 1). */
+  /** Sparse, indexed by id. */
   private readonly byIdArr: (Actor | undefined)[] = [];
+
+  /** Available bot ids (a pool above the human range). */
+  private readonly freeBotIds: number[] = [];
+  private nextColorSeed = 0;
+  private spawnAccumMs = 0;
 
   elapsedMs = 0;
   ended = false;
@@ -80,17 +96,21 @@ export class PaperIoWorld {
     this.winMode = opts.winMode;
     this.targetThreshold = opts.targetThreshold;
     this.timedLimitMs = opts.timedLimitMs;
-    this.startLives = opts.lives;
+    this.humanLives = opts.humanLives;
+    this.botCount = Math.max(0, Math.min(opts.botCount, opts.maxBots));
+    this.botDifficulty = opts.botDifficulty;
+    this.maxBots = opts.maxBots;
     this.rng = mulberry32(seed >>> 0);
 
     this.grid = new Int16Array(this.totalCells);
     this.outside = new Uint8Array(this.totalCells);
     this.comp = new Int32Array(this.totalCells);
 
-    const maxId = opts.seats.reduce((m, s) => Math.max(m, s.seat + 1), 0);
-    this.counts = new Int32Array(maxId + 1);
+    // ids: humans 1..8, bots [BOT_ID_BASE, BOT_ID_BASE + maxBots).
+    this.counts = new Int32Array(BOT_ID_BASE + this.maxBots);
+    for (let id = BOT_ID_BASE + this.maxBots - 1; id >= BOT_ID_BASE; id--) this.freeBotIds.push(id);
 
-    this.build(opts.seats);
+    this.build(opts);
   }
 
   // ---- geometry helpers ---------------------------------------------------
@@ -107,8 +127,15 @@ export class PaperIoWorld {
   private byId(id: number): Actor | undefined {
     return this.byIdArr[id];
   }
+  /** Every live actor (humans + live bots). Allocates - not for the hot path. */
+  private allActors(): Actor[] {
+    return this.humans.concat(this.bots);
+  }
   territoryOf(seat: number): number {
     return this.counts[seat + 1] ?? 0;
+  }
+  territoryOfId(id: number): number {
+    return this.counts[id] ?? 0;
   }
 
   /** Write a cell, keeping per-id counts and the dirty set in sync. */
@@ -127,7 +154,7 @@ export class PaperIoWorld {
   clearBoard(): void {
     for (let i = 0; i < this.totalCells; i++) this.setCell(i, EMPTY);
     this.trailOwner.clear();
-    for (const a of this.actorList) {
+    for (const a of this.allActors()) {
       a.trail = [];
       a.trailSet.clear();
       a.recent = [];
@@ -161,29 +188,43 @@ export class PaperIoWorld {
 
   // ---- world setup --------------------------------------------------------
 
-  private build(seats: SeatConfig[]): void {
-    const homes = this.regionHomes(seats.length);
-    seats.forEach((cfg, i) => {
+  private build(opts: WorldOptions): void {
+    const initialBots = Math.min(this.botCount, this.maxBots);
+    const homes = this.regionHomes(opts.humans.length + initialBots);
+    opts.humans.forEach((cfg, i) => {
       const home = homes[i]!;
-      const a = this.makeActor(cfg, home.x, home.y);
-      this.actorList.push(a);
+      const a = this.makeActor(cfg.seat + 1, cfg.seat, false, "normal", this.humanLives, cfg.seat, home.x, home.y);
+      this.humans.push(a);
       this.bySeatArr[a.seat] = a;
       this.byIdArr[a.id] = a;
       this.stampHome(a);
     });
+    for (let i = 0; i < initialBots; i++) {
+      this.spawnBot(homes[opts.humans.length + i]);
+    }
   }
 
-  private makeActor(cfg: SeatConfig, hx: number, hy: number): Actor {
+  private makeActor(
+    id: number,
+    seat: number,
+    isBot: boolean,
+    difficulty: BotDifficulty,
+    lives: number,
+    colorSeed: number,
+    hx: number,
+    hy: number
+  ): Actor {
     return {
-      seat: cfg.seat,
-      id: cfg.seat + 1,
-      isBot: cfg.isBot,
-      difficulty: cfg.difficulty,
+      seat,
+      id,
+      isBot,
+      difficulty,
+      colorSeed,
       alive: true,
       dead: false,
       eliminated: false,
       deadUntilMs: 0,
-      lives: this.startLives,
+      lives,
       frozen: false,
       x: hx,
       y: hy,
@@ -202,6 +243,21 @@ export class PaperIoWorld {
       recent: [],
       ai: { mode: "rest" },
     };
+  }
+
+  /** Spawn one bot (1 life, fresh colour) at a given or random open home. */
+  private spawnBot(home?: { x: number; y: number }): Actor | null {
+    if (this.freeBotIds.length === 0) return null;
+    const spot = home ?? this.findFreeHome();
+    if (!spot) return null;
+    const id = this.freeBotIds.pop()!;
+    const colorSeed = this.nextColorSeed++ & 0xffff;
+    const a = this.makeActor(id, -1, true, this.botDifficulty, 1, colorSeed, spot.x, spot.y);
+    this.bots.push(a);
+    this.byIdArr[id] = a;
+    this.stampHome(a);
+    this.emit({ type: "spawn", id });
+    return a;
   }
 
   /** Spread starting homes across a shuffled grid of regions so nobody clumps. */
@@ -288,7 +344,7 @@ export class PaperIoWorld {
         return false;
       }
       const victim = this.byId(owner);
-      if (victim) this.killActor(victim, a.seat); // cut a rival's trail
+      if (victim) this.killActor(victim, a); // cut a rival's trail
       if (this.ended) return false;
     }
     if (this.grid[k] === a.id) {
@@ -410,7 +466,7 @@ export class PaperIoWorld {
         captured.push(idx);
       }
     }
-    this.emit({ type: "claim", seat: a.seat });
+    this.emit({ type: "claim", id: a.id });
     if (a.isBot) {
       a.homeCx = a.x;
       a.homeCy = a.y;
@@ -421,15 +477,15 @@ export class PaperIoWorld {
     a.recent = [];
     // Anyone whose head we just enclosed is cut off from their land - caught.
     const capSet = new Set(captured);
-    for (const o of this.actorList) {
+    for (const o of this.allActors()) {
       if (o === a || !o.alive || o.dead || o.eliminated) continue;
-      if (capSet.has(this.key(o.x, o.y))) this.killActor(o, a.seat);
+      if (capSet.has(this.key(o.x, o.y))) this.killActor(o, a);
     }
     for (const oid of affected) {
       const o = this.byId(oid);
       if (o && o.alive && !o.eliminated) this.pruneTerritory(o);
     }
-    this.checkEnd(a.seat);
+    this.checkEnd(a);
   }
 
   /** Keep only ONE connected blob of an actor's land (under its head, else the largest). */
@@ -487,7 +543,7 @@ export class PaperIoWorld {
   // ---- death / respawn / elimination --------------------------------------
 
   /** A kill costs a life and clears the trail; resolution waits for the pause. */
-  killActor(victim: Actor, killerSeat: number | null): void {
+  killActor(victim: Actor, killer: Actor | null): void {
     if (!victim.alive || victim.dead || victim.eliminated) return;
     for (const idx of victim.trail) this.trailOwner.delete(idx);
     victim.trail = [];
@@ -497,10 +553,11 @@ export class PaperIoWorld {
     victim.dead = true;
     victim.moving = false;
     victim.deadUntilMs = this.elapsedMs + DEATH_MS;
-    this.emit({ type: "death", seat: victim.seat, killerSeat });
+    this.emit({ type: "death", id: victim.id });
+    void killer;
   }
 
-  /** Lost a life but lives remain: keep territory, drop back on a safe owned cell. */
+  /** Lost a life but lives remain (humans only): keep territory, drop home. */
   private respawn(a: Actor): void {
     a.trail = [];
     a.trailSet.clear();
@@ -536,10 +593,10 @@ export class PaperIoWorld {
     a.targetHeading = 0;
     a.moving = false;
     a.ai = { mode: "rest" };
-    this.emit({ type: "respawn", seat: a.seat });
+    this.emit({ type: "respawn", id: a.id });
   }
 
-  /** Out of lives: free all land + trail and remove from play. */
+  /** Out of lives: free all land + trail. Bots are removed (id recycled). */
   private eliminate(a: Actor): void {
     for (let idx = 0; idx < this.totalCells; idx++) if (this.grid[idx] === a.id) this.setCell(idx, EMPTY);
     for (const idx of a.trail) this.trailOwner.delete(idx);
@@ -550,10 +607,16 @@ export class PaperIoWorld {
     a.dead = false;
     a.eliminated = true;
     a.moving = false;
-    this.emit({ type: "eliminated", seat: a.seat });
+    this.emit({ type: "eliminated", id: a.id });
+    if (a.isBot) {
+      const i = this.bots.indexOf(a);
+      if (i >= 0) this.bots.splice(i, 1);
+      this.byIdArr[a.id] = undefined;
+      this.freeBotIds.push(a.id);
+    }
   }
 
-  /** Remove a seat that left the game for good (frees its land, ends if no humans left). */
+  /** Remove a human seat that left the game for good (frees its land). */
   forceEliminate(seat: number): void {
     const a = this.bySeatArr[seat];
     if (!a || a.eliminated) return;
@@ -564,15 +627,24 @@ export class PaperIoWorld {
 
   // ---- endgame ------------------------------------------------------------
 
-  private leader(): { seat: number; tie: boolean } {
+  /** Largest single actor's share of the board (0..1). */
+  private topShare(): number {
+    let m = 0;
+    for (let id = 1; id < this.counts.length; id++) if (this.counts[id]! > m) m = this.counts[id]!;
+    return m / this.totalCells;
+  }
+
+  /** The human with the most territory (among those still in the round). */
+  private topHuman(): { seat: number; tie: boolean } {
     let bestSeat = -1;
     let best = -1;
     let tie = false;
-    for (const a of this.actorList) {
-      const n = this.counts[a.id] ?? 0;
+    for (const h of this.humans) {
+      if (h.eliminated) continue;
+      const n = this.counts[h.id] ?? 0;
       if (n > best) {
         best = n;
-        bestSeat = a.seat;
+        bestSeat = h.seat;
         tie = false;
       } else if (n === best) {
         tie = true;
@@ -581,45 +653,48 @@ export class PaperIoWorld {
     return { seat: bestSeat, tie };
   }
 
-  private endGame(reason: EndResult["reason"], winnerSeat: number | null): void {
+  private endGame(winnerSeat: number | null, outcome: Outcome): void {
     if (this.ended) return;
     this.ended = true;
-    this.endResult = { reason, winnerSeat };
-    this.emit({ type: "endgame", seat: winnerSeat ?? -1, reason, winnerSeat });
+    this.endResult = { winnerSeat, outcome };
+    this.emit({ type: "endgame", id: -1 });
   }
 
-  /** Check squeeze-to-zero, last-survivor / all-humans-out, then target share. */
-  checkEnd(claimerSeat: number | null): void {
+  /**
+   * Resolve end conditions: squeeze-to-zero deaths, human survival
+   * (last-human / wipeout), then the target share (a human wins, a bot ends
+   * the round as a takeover). `claimer` is the actor that just claimed (or null).
+   */
+  checkEnd(claimer: Actor | null): void {
     if (this.ended) return;
     // Any alive actor squeezed to zero land loses a life like any other death.
-    for (const a of this.actorList) {
+    for (const a of this.allActors()) {
       if (!a.alive || a.dead || a.eliminated) continue;
       if ((this.counts[a.id] ?? 0) === 0) this.killActor(a, null);
     }
-    if (this.actorList.length > 1) {
-      const contenders = this.actorList.filter((a) => !a.eliminated);
-      if (contenders.length <= 1) {
-        this.endGame("survivor", contenders[0]?.seat ?? null);
-        return;
-      }
-      const humansLeft = contenders.some((a) => !a.isBot);
-      if (!humansLeft) {
-        const ld = this.leader();
-        this.endGame("allout", ld.tie ? null : ld.seat);
-        return;
-      }
+    // Human survival.
+    const startedHumans = this.humans.length;
+    const humanContenders = this.humans.filter((h) => !h.eliminated);
+    if (humanContenders.length === 0) {
+      this.endGame(null, "wipeout");
+      return;
     }
-    if (this.winMode === "target" && claimerSeat !== null) {
-      const claimer = this.bySeatArr[claimerSeat];
-      if (claimer && (this.counts[claimer.id] ?? 0) >= this.totalCells * this.targetThreshold) {
-        this.endGame("target", claimer.seat);
+    if (startedHumans >= 2 && humanContenders.length === 1) {
+      this.endGame(humanContenders[0]!.seat, "last_human");
+      return;
+    }
+    // Target share.
+    if (this.winMode === "target" && claimer) {
+      if ((this.counts[claimer.id] ?? 0) >= this.totalCells * this.targetThreshold) {
+        if (claimer.isBot) this.endGame(null, "bot_takeover");
+        else this.endGame(claimer.seat, "target");
       }
     }
   }
 
   private finishTimed(): void {
-    const ld = this.leader();
-    this.endGame("timed", ld.tie ? null : ld.seat);
+    const ld = this.topHuman();
+    this.endGame(ld.seat < 0 || ld.tie ? null : ld.seat, ld.tie ? "draw" : "timed");
   }
 
   // ---- bot AI -------------------------------------------------------------
@@ -712,7 +787,7 @@ export class PaperIoWorld {
   private nearestRivalHead(a: Actor): { x: number; y: number } | null {
     let best: Actor | null = null;
     let bestD = Infinity;
-    for (const o of this.actorList) {
+    for (const o of this.allActors()) {
       if (o === a || !o.alive || o.dead || o.eliminated) continue;
       const d = Math.abs(o.x - a.x) + Math.abs(o.y - a.y);
       if (d < bestD) {
@@ -757,6 +832,13 @@ export class PaperIoWorld {
     return [a.dx || 1, a.dy || 0];
   }
 
+  /** Live bots that are currently on the board (not in their death pause). */
+  private aliveBotCount(): number {
+    let n = 0;
+    for (const b of this.bots) if (b.alive && !b.dead) n++;
+    return n;
+  }
+
   // ---- the tick -----------------------------------------------------------
 
   /** Advance the whole world by dt seconds. */
@@ -764,8 +846,8 @@ export class PaperIoWorld {
     if (this.ended) return;
     this.elapsedMs += dt * 1000;
 
-    // Resolve finished death pauses.
-    for (const a of this.actorList) {
+    // Resolve finished death pauses (snapshot: eliminate() mutates this.bots).
+    for (const a of this.allActors()) {
       if (a.dead && this.elapsedMs >= a.deadUntilMs) {
         if (a.lives > 0) this.respawn(a);
         else this.eliminate(a);
@@ -775,15 +857,15 @@ export class PaperIoWorld {
     if (this.ended) return;
 
     // Humans move continuously every tick.
-    for (const a of this.actorList) {
-      if (a.isBot || !a.alive || a.dead || a.frozen) continue;
+    for (const a of this.humans) {
+      if (!a.alive || a.dead || a.frozen) continue;
       this.moveContinuous(a, dt);
       if (this.ended) return;
     }
 
     // Bots step whole cells, paced to the same cell speed as humans.
-    for (const a of this.actorList) {
-      if (!a.isBot || !a.alive || a.dead) continue;
+    for (const a of this.bots) {
+      if (!a.alive || a.dead) continue;
       a.botBudget += this.speedCellsPerSec * dt;
       let guard = 0;
       while (a.botBudget >= 1 && a.alive && !a.dead && !this.ended && guard++ < 8) {
@@ -797,6 +879,15 @@ export class PaperIoWorld {
     }
 
     this.checkEnd(null);
-    if (!this.ended && this.winMode === "timed" && this.elapsedMs >= this.timedLimitMs) this.finishTimed();
+    if (this.ended) return;
+
+    // Top the bot population back up over time, until a leader dominates.
+    this.spawnAccumMs += dt * 1000;
+    while (this.spawnAccumMs >= SPAWN_INTERVAL_MS) {
+      this.spawnAccumMs -= SPAWN_INTERVAL_MS;
+      if (this.aliveBotCount() < this.botCount && this.topShare() < SPAWN_CAP_SHARE) this.spawnBot();
+    }
+
+    if (this.winMode === "timed" && this.elapsedMs >= this.timedLimitMs) this.finishTimed();
   }
 }
