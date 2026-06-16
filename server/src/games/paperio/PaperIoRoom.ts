@@ -1,31 +1,35 @@
 /**
  * Paper.io room - drives the pure rules engine (shared/games/paperio/engine)
- * and mirrors it into the synced schema, exactly like the engine-backed games
- * but real-time: a TickLoop (fixed-step) advances the world every tick and
- * pushes the changes into the schema.
+ * and mirrors it into the synced schema, real-time: a TickLoop (fixed-step)
+ * advances the world every tick and pushes the changes into the schema.
  *
  * Authority model: `world` is the server-only source of truth. Humans send
  * tiny STEER messages (a heading); the loop keeps only the latest per player
- * and feeds it to the engine each tick. Bots are played entirely by the
- * engine (their brains run inside world.step). Disconnected humans are frozen
- * in place (seat held by the framework's grace period), not removed.
+ * and feeds it to the engine each tick. Bots are engine-owned and dynamic -
+ * the engine spawns/eliminates them and keeps the population topped up; the
+ * room just mirrors the live bots into state.bots. Disconnected humans are
+ * frozen in place (seat held by the framework's grace period), not removed.
  */
 import {
   BOARD_SIZES,
   type BasePlayer,
+  BOT_COUNT_DEFAULT,
+  BOT_DIFFICULTY_DEFAULT,
   type BotDifficulty,
-  DIFFICULTIES,
   EndReason,
   isBoardSize,
   isBotDifficulty,
   isSpeed,
+  isValidBotCount,
   isValidLives,
   isValidTargetPercent,
   isValidTimedSeconds,
   isWinMode,
   LIVES_DEFAULT,
+  MAX_BOTS,
   PAPERIO,
   PAPERIO_TICK_RATE,
+  PaperIoBot,
   PaperIoEngine,
   PaperIoMsg,
   PaperIoPlayer,
@@ -40,11 +44,11 @@ import { Encoder } from "@colyseus/schema";
 import { BaseGameRoom } from "../../framework/BaseGameRoom.js";
 import { TickLoop } from "../../framework/TickLoop.js";
 
-// Paper.io syncs a per-cell territory grid (up to ~2560 cells) plus per-player
-// trails. A big territory claim or the initial board can exceed @colyseus/
+// Paper.io syncs a per-cell territory grid (up to ~6400 cells) plus per-actor
+// trails for many bots. A big claim or the initial board can exceed @colyseus/
 // schema's 8 KB default encode buffer (which then auto-grows with a console
 // warning); raise it once, up front, to a size that fits the worst case.
-const PAPERIO_ENCODE_BUFFER = 256 * 1024;
+const PAPERIO_ENCODE_BUFFER = 1024 * 1024;
 if (Encoder.BUFFER_SIZE < PAPERIO_ENCODE_BUFFER) Encoder.BUFFER_SIZE = PAPERIO_ENCODE_BUFFER;
 
 interface SteerInput {
@@ -53,16 +57,16 @@ interface SteerInput {
 
 export class PaperIoRoom extends BaseGameRoom<PaperIoState> {
   state = new PaperIoState();
-  readonly minPlayers = 2;
-  readonly maxPlayers = 8;
-  override supportsBots = true;
+  readonly minPlayers = 1; // solo vs bots is allowed
+  readonly maxPlayers = 8; // humans; bots are engine-owned and not seated here
   // allowLateJoin stays false: players gather in the lobby, then a round runs
   // to a finish. A mid-game refresh still reconnects to its seat (framework grace).
+  // supportsBots stays false: bots are not roster players - the host sets a
+  // count + one difficulty and the engine manages them.
 
   /** Server-only truth (never synced). Public = white-box test seam. */
   public world?: PaperIoEngine.PaperIoWorld;
 
-  private botDifficulty = new Map<string, BotDifficulty>();
   private seedOption?: number;
 
   private loop = new TickLoop<SteerInput>(this, {
@@ -85,6 +89,8 @@ export class PaperIoRoom extends BaseGameRoom<PaperIoState> {
     this.state.targetPercent = TARGET_PCT_DEFAULT;
     this.state.timedSeconds = TIMED_SEC_DEFAULT;
     this.state.startLives = LIVES_DEFAULT;
+    this.state.botCount = BOT_COUNT_DEFAULT;
+    this.state.botDifficulty = BOT_DIFFICULTY_DEFAULT;
 
     this.loop.bindInput(PaperIoMsg.STEER, (raw) => {
       const h = (raw as { heading?: unknown } | null)?.heading;
@@ -92,19 +98,6 @@ export class PaperIoRoom extends BaseGameRoom<PaperIoState> {
       return { heading: h };
     });
     this.onMessage(PaperIoMsg.CONFIG, (client, payload) => this.handleConfig(client, payload));
-  }
-
-  // ---- bots ----------------------------------------------------------------
-
-  protected override onBotAdded(bot: BasePlayer, options: unknown): void {
-    const raw = (options as { difficulty?: unknown } | null)?.difficulty;
-    const diff: BotDifficulty = isBotDifficulty(raw) ? raw : "normal";
-    this.botDifficulty.set(bot.sessionId, diff);
-    bot.nickname = `${bot.nickname} (${DIFFICULTIES[diff].label})`;
-  }
-
-  protected override onBotRemoved(sessionId: string): void {
-    this.botDifficulty.delete(sessionId);
   }
 
   // ---- lobby settings ------------------------------------------------------
@@ -119,6 +112,8 @@ export class PaperIoRoom extends BaseGameRoom<PaperIoState> {
     if (isValidTargetPercent(p.targetPercent)) this.state.targetPercent = p.targetPercent;
     if (isValidTimedSeconds(p.timedSeconds)) this.state.timedSeconds = p.timedSeconds;
     if (isValidLives(p.lives)) this.state.startLives = p.lives;
+    if (isValidBotCount(p.botCount)) this.state.botCount = p.botCount;
+    if (isBotDifficulty(p.botDifficulty)) this.state.botDifficulty = p.botDifficulty;
   }
 
   // ---- lifecycle -----------------------------------------------------------
@@ -138,18 +133,18 @@ export class PaperIoRoom extends BaseGameRoom<PaperIoState> {
         winMode,
         targetThreshold: winMode === "target" ? this.state.targetPercent / 100 : 1,
         timedLimitMs: this.state.timedSeconds * 1000,
-        lives: this.state.startLives,
-        seats: players.map((p) => ({
-          seat: p.seat,
-          isBot: p.isBot,
-          difficulty: p.isBot ? this.botDifficulty.get(p.sessionId) ?? "normal" : "normal",
-        })),
+        humanLives: this.state.startLives,
+        humans: players.map((p) => ({ seat: p.seat })),
+        botCount: this.state.botCount,
+        botDifficulty: this.state.botDifficulty as BotDifficulty,
+        maxBots: MAX_BOTS,
       },
       seed
     );
 
     this.state.cols = board.cols;
     this.state.rows = board.rows;
+    this.state.outcome = "";
     this.state.endsAt = winMode === "timed" ? Date.now() + this.state.timedSeconds * 1000 : 0;
 
     // Full grid copy once; per-tick syncs apply only the dirty deltas.
@@ -162,6 +157,8 @@ export class PaperIoRoom extends BaseGameRoom<PaperIoState> {
       pl.trail.clear();
       this.syncPlayer(pl);
     }
+    this.state.bots.clear();
+    this.syncBots();
 
     this.loop.inputs.clear();
     this.loop.start();
@@ -174,7 +171,7 @@ export class PaperIoRoom extends BaseGameRoom<PaperIoState> {
     // Feed the latest steer for each connected human; freeze the disconnected.
     for (const player of this.state.players.values()) {
       const a = w.actorBySeat(player.seat);
-      if (!a || a.isBot) continue;
+      if (!a) continue;
       a.frozen = !player.connected;
       if (!a.frozen) {
         const input = this.loop.inputs.get(player.sessionId);
@@ -192,7 +189,6 @@ export class PaperIoRoom extends BaseGameRoom<PaperIoState> {
 
   protected override onPlayerLeftForGood(player: BasePlayer): void {
     this.loop.clearInput(player.sessionId);
-    this.botDifficulty.delete(player.sessionId);
     const w = this.world;
     if (this.state.phase !== Phase.PLAYING || !w) return;
     // Free the seat in the engine; this may end the round (no humans left).
@@ -210,9 +206,8 @@ export class PaperIoRoom extends BaseGameRoom<PaperIoState> {
 
   private syncFromWorld(): void {
     const w = this.world!;
-    for (const player of this.state.players.values()) {
-      this.syncPlayer(player as PaperIoPlayer);
-    }
+    for (const player of this.state.players.values()) this.syncPlayer(player as PaperIoPlayer);
+    this.syncBots();
     // Apply only the cells that changed this tick.
     for (const idx of w.dirty) this.state.grid[idx] = w.grid[idx]!;
     w.dirty.clear();
@@ -230,19 +225,48 @@ export class PaperIoRoom extends BaseGameRoom<PaperIoState> {
     pl.eliminated = a.eliminated;
     pl.lives = a.lives;
     pl.cellsOwned = w.territoryOf(a.seat);
-    // The engine trail only ever grows (append) or clears to empty.
-    if (a.trail.length === 0) {
-      if (pl.trail.length > 0) pl.trail.clear();
-    } else if (a.trail.length > pl.trail.length) {
-      for (let i = pl.trail.length; i < a.trail.length; i++) pl.trail.push(a.trail[i]!);
-    } else if (a.trail.length < pl.trail.length) {
-      pl.trail.clear();
-      for (const idx of a.trail) pl.trail.push(idx);
+    this.syncTrail(pl.trail, a.trail);
+  }
+
+  private syncBots(): void {
+    const w = this.world!;
+    const live = new Set<string>();
+    for (const b of w.bots) {
+      const key = String(b.id);
+      live.add(key);
+      let sb = this.state.bots.get(key);
+      if (!sb) {
+        sb = new PaperIoBot();
+        sb.id = b.id;
+        sb.colorSeed = b.colorSeed;
+        this.state.bots.set(key, sb);
+      }
+      sb.x = b.fx;
+      sb.y = b.fy;
+      sb.heading = b.heading;
+      sb.dead = b.dead;
+      sb.cellsOwned = w.territoryOfId(b.id);
+      this.syncTrail(sb.trail, b.trail);
+    }
+    // Drop schema bots whose engine actor was eliminated this tick.
+    for (const key of [...this.state.bots.keys()]) if (!live.has(key)) this.state.bots.delete(key);
+  }
+
+  /** Mirror an engine trail (only ever grows by append or clears to empty). */
+  private syncTrail(dst: { length: number; clear: () => void; push: (v: number) => void }, src: number[]): void {
+    if (src.length === 0) {
+      if (dst.length > 0) dst.clear();
+    } else if (src.length > dst.length) {
+      for (let i = dst.length; i < src.length; i++) dst.push(src[i]!);
+    } else if (src.length < dst.length) {
+      dst.clear();
+      for (const idx of src) dst.push(idx);
     }
   }
 
   private finishFromWorld(): void {
     const r = this.world?.endResult;
+    this.state.outcome = r?.outcome ?? "draw";
     if (!r || r.winnerSeat === null || r.winnerSeat < 0) this.endGame(EndReason.DRAW);
     else this.endGame(this.winBySeat(r.winnerSeat));
   }

@@ -8,44 +8,50 @@ export type WinMode = "target" | "timed";
 export type BoardSizeKey = "small" | "medium" | "large";
 export type SpeedKey = "slow" | "normal" | "fast";
 
-/** One player or bot in the simulation. Seat === framework seat (0..7). */
+/** How a round ended (the client summary turns this into a headline). */
+export type Outcome =
+  | "target" // a human reached the target share
+  | "timed" // time ran out; the top human is the winner
+  | "last_human" // every other human was eliminated
+  | "bot_takeover" // a bot reached the target share (humans lose)
+  | "wipeout" // every human was eliminated
+  | "draw"; // a genuine tie
+
+/**
+ * One actor in the simulation. Humans occupy framework seats 0..7 (grid id =
+ * seat + 1); bots are engine-owned, have seat = -1, an engine-assigned id from
+ * a pool, a single life, and a colour seed for a fresh hue each spawn.
+ */
 export interface Actor {
-  seat: number;
-  /** Grid owner value for this actor's cells (seat + 1; 0 = empty). */
+  seat: number; // human framework seat, or -1 for a bot
+  /** Grid owner value for this actor's cells (0 = empty). */
   id: number;
   isBot: boolean;
   difficulty: BotDifficulty;
-  /** On the board and playable. */
+  /** Hue source for rendering (bots get an ever-incrementing seed). */
+  colorSeed: number;
   alive: boolean;
-  /** In the short death pause before respawn/elimination. */
   dead: boolean;
-  /** Out for good (ran out of lives). */
   eliminated: boolean;
-  /** Engine-clock ms at which the death pause ends. */
   deadUntilMs: number;
   lives: number;
   /** Disconnected human: do not move this tick (seat held by the framework). */
   frozen: boolean;
-  /** Integer cell the head occupies. */
   x: number;
   y: number;
-  /** Float position (cells) for smooth continuous movement / rendering. */
   fx: number;
   fy: number;
   heading: number;
   targetHeading: number;
   moving: boolean;
-  /** Cardinal step for bots. */
   dx: number;
   dy: number;
-  /** Accumulated movement budget so bots step at the shared cell speed. */
   botBudget: number;
   homeCx: number;
   homeCy: number;
   /** Current trail, as packed cell indices (y * cols + x). */
   trail: number[];
   trailSet: Set<number>;
-  /** Most recently laid trail cells (SELF_GRACE window) that don't kill you. */
   recent: number[];
   ai: BotAI;
 }
@@ -56,34 +62,26 @@ export interface BotAI {
   sideDir?: [number, number];
   legSide?: number;
   stepsLeft?: number;
-  /** This excursion is an aggressive push toward a rival. */
   hunting?: boolean;
 }
 
-export type GameEventType = "claim" | "death" | "respawn" | "eliminated" | "endgame";
+export type GameEventType = "claim" | "death" | "respawn" | "spawn" | "eliminated" | "endgame";
 
 export interface GameEvent {
   type: GameEventType;
-  seat: number;
-  /** death: who caused it (or null for self/squeeze). */
-  killerSeat?: number | null;
-  /** endgame: why + winner. */
-  reason?: EndReasonKind;
-  winnerSeat?: number | null;
+  /** Actor id involved (or -1). */
+  id: number;
 }
-
-export type EndReasonKind = "target" | "timed" | "survivor" | "allout";
 
 export interface EndResult {
-  reason: EndReasonKind;
-  /** null = draw (a tie in timed mode). */
+  /** Winning human's framework seat, or null when no human won (draw/wipeout/takeover). */
   winnerSeat: number | null;
+  outcome: Outcome;
 }
 
-export interface SeatConfig {
+/** A human player at the start of a round. */
+export interface HumanConfig {
   seat: number;
-  isBot: boolean;
-  difficulty: BotDifficulty;
 }
 
 export interface WorldOptions {
@@ -95,7 +93,12 @@ export interface WorldOptions {
   /** Fraction of the board (0..1) to win in target mode. */
   targetThreshold: number;
   timedLimitMs: number;
-  /** Starting lives for every actor. */
-  lives: number;
-  seats: SeatConfig[];
+  /** Starting lives for HUMAN players (bots always have 1). */
+  humanLives: number;
+  humans: HumanConfig[];
+  /** Target bot population the engine maintains throughout the round. */
+  botCount: number;
+  botDifficulty: BotDifficulty;
+  /** Hard cap on simultaneous bots (sizes the id pool). */
+  maxBots: number;
 }

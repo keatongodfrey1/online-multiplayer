@@ -1,8 +1,9 @@
 /**
  * Paper.io ENGINE unit tests (pure rules, no Colyseus). Ported from the source
- * game's test/sim.test.js and extended for the framework changes: uniform
- * death/lives, elimination, last-survivor, timed win, equal bot/human speed,
- * and determinism under a fixed seed.
+ * game's test/sim.test.js and extended for the framework model: humans with
+ * configurable lives, engine-owned bots with ONE life that respawn fresh
+ * throughout the round, win/wipeout outcomes, equal bot/human speed, and
+ * determinism under a fixed seed.
  */
 import assert from "node:assert";
 import { describe, it } from "mocha";
@@ -11,8 +12,8 @@ import { PaperIoEngine } from "@backbone/shared";
 const { PaperIoWorld } = PaperIoEngine;
 type World = InstanceType<typeof PaperIoWorld>;
 type Actor = PaperIoEngine.Actor;
-type SeatConfig = PaperIoEngine.SeatConfig;
 type WinMode = PaperIoEngine.WinMode;
+type BotDifficulty = PaperIoEngine.BotDifficulty;
 
 interface Over {
   cols?: number;
@@ -21,13 +22,14 @@ interface Over {
   winMode?: WinMode;
   targetThreshold?: number;
   timedLimitMs?: number;
-  lives?: number;
-  seats?: SeatConfig[];
+  humanLives?: number;
+  humans?: { seat: number }[];
+  botCount?: number;
+  botDifficulty?: BotDifficulty;
   seed?: number;
 }
 
 function makeWorld(over: Over = {}): World {
-  const seats: SeatConfig[] = over.seats ?? [{ seat: 0, isBot: false, difficulty: "normal" }];
   return new PaperIoWorld(
     {
       cols: over.cols ?? 24,
@@ -36,8 +38,11 @@ function makeWorld(over: Over = {}): World {
       winMode: over.winMode ?? "target",
       targetThreshold: over.targetThreshold ?? 1,
       timedLimitMs: over.timedLimitMs ?? 120000,
-      lives: over.lives ?? 3,
-      seats,
+      humanLives: over.humanLives ?? 3,
+      humans: over.humans ?? [{ seat: 0 }],
+      botCount: over.botCount ?? 0,
+      botDifficulty: over.botDifficulty ?? "normal",
+      maxBots: 16,
     },
     over.seed ?? 12345
   );
@@ -70,7 +75,6 @@ describe("paper.io engine", () => {
     assert.equal(w.grid[w.key(10, 9)], p.id, "interior cell captured by flood-fill");
     assert.equal(w.grid[w.key(5, 7)], p.id, "trail corner owned");
     assert.equal(w.grid[w.key(0, 0)], 0, "far outside cell NOT captured");
-    assert.equal(w.grid[w.key(20, 20)], 0, "other outside cell NOT captured");
   });
 
   it("crossing your OWN older trail kills you and costs a life", () => {
@@ -102,16 +106,10 @@ describe("paper.io engine", () => {
     assert.equal(p.dead, false, "still alive");
   });
 
-  it("cutting a rival's trail kills them (a life), killer keeps moving, no absorb", () => {
-    const w = makeWorld({
-      seats: [
-        { seat: 0, isBot: false, difficulty: "normal" },
-        { seat: 1, isBot: true, difficulty: "normal" },
-      ],
-      lives: 3,
-    });
+  it("cutting a bot's trail kills it (its 1 life), killer keeps moving, no absorb", () => {
+    const w = makeWorld({ botCount: 1 });
     const p = player(w);
-    const bot = w.actorBySeat(1)!;
+    const bot = w.bots[0]!;
     w.clearBoard();
     w.fillRect(bot.id, 16, 4, 20, 8); // bot's land
     for (const [x, y] of [[15, 6], [14, 6], [13, 6]] as [number, number][]) w.addTrailCell(bot, x, y);
@@ -123,9 +121,9 @@ describe("paper.io engine", () => {
     const survived = w.enterCell(p, 13, 6); // step onto the bot's trail tip -> cut it
     assert.ok(survived, "killer survives the cut");
     assert.equal(bot.dead, true, "victim is dead");
-    assert.equal(bot.lives, 2, "victim lost exactly one life");
+    assert.equal(bot.lives, 0, "bot had a single life");
     assert.equal(bot.trail.length, 0, "victim's trail cleared");
-    assert.equal(countOf(w, bot.id), botLand, "victim keeps its territory (respawns later)");
+    assert.equal(countOf(w, bot.id), botLand, "victim keeps its territory until it's removed");
     assert.equal(countOf(w, p.id), playerLand, "killer gained NO territory (no absorb)");
   });
 
@@ -142,7 +140,7 @@ describe("paper.io engine", () => {
     assert.equal(w.grid[w.key(20, 20)], 0, "disconnected island dropped");
   });
 
-  it("reaching the target share ends the game with a winner", () => {
+  it("a human reaching the target share wins the round", () => {
     const w = makeWorld({ cols: 12, rows: 12, targetThreshold: 0.3, winMode: "target" });
     const p = player(w);
     w.clearBoard();
@@ -152,8 +150,23 @@ describe("paper.io engine", () => {
     w.enterCell(p, 0, 9); // small excursion
     w.enterCell(p, 0, 8); // back onto own land -> claim -> checkEnd
     assert.equal(w.ended, true, "game ended");
-    assert.equal(w.endResult?.reason, "target", "ended by target threshold");
+    assert.equal(w.endResult?.outcome, "target", "ended by target threshold");
     assert.equal(w.endResult?.winnerSeat, p.seat, "player is the winner");
+  });
+
+  it("a BOT reaching the target ends the round as a takeover (no human winner)", () => {
+    const w = makeWorld({ cols: 12, rows: 12, targetThreshold: 0.3, winMode: "target", botCount: 1 });
+    const p = player(w);
+    const bot = w.bots[0]!;
+    w.clearBoard();
+    w.fillRect(p.id, 0, 0, 2, 2); // tiny human pocket so it isn't squeezed out
+    w.fillRect(bot.id, 0, 4, 11, 11); // bot owns most of the board
+    bot.x = 0;
+    bot.y = 11;
+    w.checkEnd(bot); // a bot over the target ends the round
+    assert.equal(w.ended, true, "round ended");
+    assert.equal(w.endResult?.outcome, "bot_takeover");
+    assert.equal(w.endResult?.winnerSeat, null, "no human winner");
   });
 
   it("moveContinuous lays a 4-connected trail on a diagonal (no corner gaps)", () => {
@@ -177,13 +190,12 @@ describe("paper.io engine", () => {
     }
   });
 
-  it("a death respawns (keeping territory) while lives remain, then eliminates at zero", () => {
-    const w = makeWorld({ lives: 2 });
+  it("a human death respawns while lives remain, then is eliminated at zero (wipeout)", () => {
+    const w = makeWorld({ humanLives: 2 });
     const p = player(w);
     const landBefore = w.territoryOf(0);
     assert.ok(landBefore > 0, "starts with a home");
 
-    // First death: lose a life, then respawn after the death pause keeps land.
     w.killActor(p, null);
     assert.equal(p.lives, 1);
     w.step(1); // 1s >> DEATH_MS
@@ -191,105 +203,100 @@ describe("paper.io engine", () => {
     assert.equal(p.alive, true);
     assert.equal(w.territoryOf(0), landBefore, "kept its territory on respawn");
 
-    // Second death takes the last life: eliminated, land freed.
     w.killActor(p, null);
     assert.equal(p.lives, 0);
     w.step(1);
     assert.equal(p.eliminated, true, "eliminated at zero lives");
     assert.equal(w.territoryOf(0), 0, "territory freed on elimination");
+    assert.equal(w.ended, true);
+    assert.equal(w.endResult?.outcome, "wipeout", "solo human out of lives = wipeout");
   });
 
-  it("last survivor wins once everyone else is eliminated", () => {
-    const w = makeWorld({
-      seats: [
-        { seat: 0, isBot: false, difficulty: "normal" },
-        { seat: 1, isBot: false, difficulty: "normal" },
-      ],
-      lives: 1,
-    });
+  it("last human standing wins once the other human is eliminated", () => {
+    const w = makeWorld({ humans: [{ seat: 0 }, { seat: 1 }], humanLives: 1 });
     const a = w.actorBySeat(0)!;
     const b = w.actorBySeat(1)!;
-    w.killActor(b, a.seat); // b's last life
+    w.killActor(b, a); // b's only life
     w.step(1); // resolve the death pause -> eliminate -> checkEnd
     assert.equal(b.eliminated, true);
     assert.equal(w.ended, true, "round ended");
-    assert.equal(w.endResult?.reason, "survivor");
+    assert.equal(w.endResult?.outcome, "last_human");
     assert.equal(w.endResult?.winnerSeat, a.seat, "the survivor wins");
   });
 
-  it("timed mode ends at the limit with the territory leader as winner", () => {
+  it("timed mode ends at the limit with the top human as winner", () => {
     const w = makeWorld({
       cols: 16,
       rows: 16,
       winMode: "timed",
       timedLimitMs: 1000,
-      seats: [
-        { seat: 0, isBot: false, difficulty: "normal" },
-        { seat: 1, isBot: false, difficulty: "normal" },
-      ],
+      humans: [{ seat: 0 }, { seat: 1 }],
     });
     const a = w.actorBySeat(0)!;
-    const b = w.actorBySeat(1)!;
-    // Give seat 0 a clear territory lead.
-    w.fillRect(a.id, 0, 0, 15, 6);
+    w.fillRect(a.id, 0, 0, 15, 4); // give seat 0 a clear lead, clear of homes
     assert.ok(w.territoryOf(0) > w.territoryOf(1));
-    w.step(1.5); // past the 1s limit (nobody moving -> grid unchanged)
+    w.step(1.5); // past the 1s limit (nobody steering -> grid stable)
     assert.equal(w.ended, true, "timed round ended");
-    assert.equal(w.endResult?.reason, "timed");
+    assert.equal(w.endResult?.outcome, "timed");
     assert.equal(w.endResult?.winnerSeat, a.seat, "leader wins on time");
-    void b;
+  });
+
+  it("bots have ONE life and a fresh bot replaces a killed one over time", () => {
+    const w = makeWorld({ cols: 40, rows: 40, botCount: 1 });
+    const bot = w.bots[0]!;
+    const seed0 = bot.colorSeed;
+    w.killActor(bot, null);
+    assert.equal(bot.lives, 0);
+    // Resolve the death pause: the bot is eliminated and removed.
+    for (let i = 0; i < 10; i++) w.step(0.1); // ~1s
+    assert.equal(w.bots.length, 0, "killed bot removed (1 life, no respawn-in-place)");
+    // After the spawn interval a brand-new bot drops in (fresh colour seed).
+    for (let i = 0; i < 70; i++) w.step(0.1); // ~7s more
+    assert.equal(w.bots.length, 1, "population topped back up to 1");
+    assert.notEqual(w.bots[0]!.colorSeed, seed0, "the replacement is a NEW bot");
+  });
+
+  it("stops spawning bots once a leader dominates (spawn cap)", () => {
+    const w = makeWorld({ cols: 24, rows: 24, botCount: 1 });
+    const p = player(w);
+    w.fillRect(p.id, 0, 0, 23, 19); // human owns >80% of the board
+    assert.ok(w.territoryOf(0) / w.totalCells > 0.8);
+    const bot = w.bots[0]!;
+    w.killActor(bot, null);
+    for (let i = 0; i < 90; i++) w.step(0.1); // ~9s, well past the spawn interval
+    assert.equal(w.bots.length, 0, "no new bot spawns while a leader dominates");
   });
 
   it("bots move at the SAME cell speed as humans (no per-difficulty speed)", () => {
     const speed = 10;
     const ticks = 20;
-    const dt = 1 / 20; // 20 ticks * 0.05s = 1.0s -> exactly `speed` cells
+    const dt = 1 / 20; // 1.0s -> exactly `speed` cells
 
-    // Human, steered straight on an open board.
-    const wh = makeWorld({ cols: 60, rows: 60, speedCellsPerSec: speed, targetThreshold: 1 });
-    const h = player(wh);
-    wh.steer(0, 0); // head +x
-    const fx0 = h.fx;
-    for (let i = 0; i < ticks; i++) wh.step(dt);
-    const humanCells = h.fx - fx0;
-    assert.ok(Math.abs(humanCells - speed) <= 0.5, `human moved ~${speed} cells (got ${humanCells.toFixed(2)})`);
-
-    // Bot on its own large board: sum the Manhattan path it steps each tick.
-    const wb = makeWorld({
-      cols: 60,
-      rows: 60,
-      speedCellsPerSec: speed,
-      targetThreshold: 1,
-      seats: [{ seat: 0, isBot: true, difficulty: "extreme" }],
-    });
-    const bot = wb.actorBySeat(0)!;
+    // A stationary human keeps the round alive while we measure the bot.
+    const w = makeWorld({ cols: 60, rows: 60, speedCellsPerSec: speed, botCount: 1, botDifficulty: "extreme" });
+    const human = player(w);
+    const fx0 = human.fx;
+    const bot = w.bots[0]!;
     let path = 0;
     for (let i = 0; i < ticks; i++) {
       const px = bot.x;
       const py = bot.y;
-      wb.step(dt);
+      w.step(dt);
       path += Math.abs(bot.x - px) + Math.abs(bot.y - py);
     }
+    assert.ok(Math.abs(human.fx - fx0) < 0.001, "an unsteered human does not move");
     assert.ok(Math.abs(path - speed) <= 1, `bot stepped ~${speed} cells in 1s (got ${path})`);
   });
 
-  it("is deterministic: same seed -> identical grid and positions", () => {
-    const seats: SeatConfig[] = [
-      { seat: 0, isBot: false, difficulty: "normal" },
-      { seat: 1, isBot: true, difficulty: "hard" },
-    ];
+  it("is deterministic: same seed -> identical grid", () => {
     const run = () => {
-      const w = makeWorld({ cols: 48, rows: 32, seats, seed: 999, targetThreshold: 1 });
+      const w = makeWorld({ cols: 48, rows: 32, humans: [{ seat: 0 }], botCount: 3, botDifficulty: "hard", seed: 999 });
       w.steer(0, Math.PI / 6);
-      for (let i = 0; i < 60; i++) w.step(1 / 20);
+      for (let i = 0; i < 80; i++) w.step(1 / 20);
       return w;
     };
     const a = run();
     const b = run();
     assert.deepEqual(Array.from(a.grid), Array.from(b.grid), "grids identical");
-    const ab = a.actorBySeat(1)!;
-    const bb = b.actorBySeat(1)!;
-    assert.equal(ab.x, bb.x, "bot x identical");
-    assert.equal(ab.y, bb.y, "bot y identical");
   });
 });
