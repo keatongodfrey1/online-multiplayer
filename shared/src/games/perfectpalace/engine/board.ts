@@ -174,7 +174,7 @@ export const BOARD: readonly SquareDef[] = [
     number: 24,
     side: 'long-b',
     label: 'Roll Again',
-    flavor: 'Take a full extra turn after this one.',
+    flavor: 'Roll again right away — but no shopping on this landing. The bonus turn does not count toward the equal-turns finish.',
     effect: { kind: 'roll-again' },
   },
   // Corner 4

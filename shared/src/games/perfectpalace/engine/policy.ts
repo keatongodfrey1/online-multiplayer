@@ -16,6 +16,7 @@ import type { DuelStake, GameState, Player, PlayerId, PlayerInventory } from './
 import type { GameAction } from './actions.js'
 import { getSquare } from './board.js'
 import { DUEL_MIN_STAKE, PRICE, RECIPE } from './constants.js'
+import { quickBuildCost } from './reducer.js'
 import { totalPoints } from './scoring.js'
 
 export type Difficulty = 'easy' | 'normal' | 'hard'
@@ -207,6 +208,16 @@ function optionalAction(p: Player, difficulty: Difficulty): GameAction {
     if (inv.servers < 1 && inv.dollars >= PRICE.server) return { type: 'turn/buy', item: 'server' }
     if (inv.chefs < 1 && inv.dollars >= PRICE.chef) return { type: 'turn/buy', item: 'chef' }
     if (!hasCleaner && inv.dollars >= PRICE.cleaner) return { type: 'turn/buy', item: 'cleaner' }
+  }
+
+  // 2.5) When flush, one-click build-from-scratch the highest tier we can afford and
+  //      have the staff for — buys the missing bricks/sticks and assembles in a single
+  //      action, far faster than the buy-a-bundle-then-build grind. (Easy returned above
+  //      and never reaches here, so it stays a non-buying pushover.) Staff are bought in
+  //      step 2 above first, so a Building/3-Story from scratch always has its prereq.
+  for (const item of ['palace', 'threeStoryBuilding', 'building', 'room'] as const) {
+    const r = quickBuildCost(inv, item, 1)
+    if (r.ok && inv.dollars >= r.dollars) return { type: 'turn/buildFromScratch', item, count: 1 }
   }
 
   // 3) Buy a bundle of bricks/sticks (sold in fives) toward the next wall/roof.

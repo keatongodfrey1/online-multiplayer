@@ -2328,6 +2328,26 @@ describe('Bot policy', () => {
     };
     expect(chooseAction(s, cur).type).toBe('turn/build'); // builds rather than ending the turn
   });
+
+  it('Normal/Hard bots use build-from-scratch when flush with cash; Easy never buys', () => {
+    let s = createReadyState([{ name: 'A' }, { name: 'B' }], 3);
+    while (s.phase === 'initial-mapping') s = step(s).state;
+    const cur = s.currentPlayerId!;
+    // Lots of cash, no materials: on-hand builds fail, so a buying bot should one-click
+    // a Room from scratch ($25) rather than grind 5-brick bundles.
+    s = {
+      ...s,
+      turn: { ...s.turn, phase: 'optional-actions' },
+      players: s.players.map((p) =>
+        p.id === cur
+          ? { ...p, inventory: { ...p.inventory, dollars: 100, bricks: 0, sticks: 0, walls: 0, roofs: 0, rooms: 0 } }
+          : p,
+      ),
+    };
+    expect(chooseAction(s, cur, 'normal').type).toBe('turn/buildFromScratch');
+    expect(chooseAction(s, cur, 'hard').type).toBe('turn/buildFromScratch');
+    expect(chooseAction(s, cur, 'easy').type).toBe('turn/endTurn'); // pushover: never buys
+  });
 });
 
 // ==================== Follow-up fixes (2026-06) ====================
