@@ -23,8 +23,30 @@ import { escapeHtml } from "../../framework/dom.js";
 import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
 import { clockChime, flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
 
-const { BOARD, getSquare, RESOURCE_OPTIONS, PRICE, RECIPE, totalPoints, staffWeight, quickBuildCost } =
+const { BOARD, CARDS, getSquare, RESOURCE_OPTIONS, PRICE, RECIPE, totalPoints, staffWeight, quickBuildCost } =
   PerfectPalaceEngine;
+
+type PPCardEffect = (typeof CARDS)[number]["effect"];
+
+/** Kid-friendly one-liner for a card's effect (deck reference). */
+function cardEffectLabel(e: PPCardEffect): string {
+  switch (e.kind) {
+    case "gain-dollars": return `+$${e.amount}`;
+    case "gain-bricks": return `+${e.amount} 🧱 bricks`;
+    case "gain-sticks": return `+${e.amount} 🪵 sticks`;
+    case "gain-bricks-and-sticks": return `+${e.bricks} 🧱 +${e.sticks} 🪵`;
+    case "get-building": return "a free Building 🏢";
+    case "get-server": return "a free Server 🍽️";
+    case "get-chef": return "a free Chef 👨‍🍳";
+    case "get-cleaner": return "a free Cleaner 🧹";
+    case "get-room": return "a free Room 🚪";
+    case "alliance-or-bonus": return "ally with the Kingdom (or +$50 if already allied)";
+    case "draw-another": return "draw another card";
+    case "royal-pardon": return "keep it to escape the dungeon ⛓️";
+    case "get-bailiff": return "take the Bailiff 🎩";
+    default: return "";
+  }
+}
 const PP_SAVES_KEY = "perfectpalace-saves";
 
 type Outcome = PerfectPalaceEngine.ResourceOutcome;
@@ -196,8 +218,11 @@ export class PerfectPalaceView implements GameView {
   private iWasActing = false;
   /** Whether the rules/help modal is open. */
   private showRules = false;
-  /** Dice animation: a portal element (outside the re-rendered DOM) + timers. */
+  /** Dice + card-reveal animations: portal elements (outside the re-rendered DOM) + timers. */
   private diceLayer?: HTMLElement;
+  private cardLayer?: HTMLElement;
+  /** Whether the "what's in the deck" reference modal is open. */
+  private showDeck = false;
   private diceTimers = new Set<ReturnType<typeof setTimeout>>();
   private lastSeenRollSeq = 0;
   /** Turn-timer countdown ticker + once-per-deadline chime guard. */
@@ -216,6 +241,10 @@ export class PerfectPalaceView implements GameView {
     this.diceLayer = document.createElement("div");
     this.diceLayer.className = "pp-dice-layer";
     document.body.appendChild(this.diceLayer);
+    // Card-reveal overlay shares the same body-portal pattern as the dice.
+    this.cardLayer = document.createElement("div");
+    this.cardLayer.className = "pp-card-layer";
+    document.body.appendChild(this.cardLayer);
     this.lastSeenRollSeq = this.room.state?.lastRollSeq ?? 0;
     // Don't replay a card reveal for a draw that happened before we joined/resumed.
     this.lastCardLine = [...(this.room.state?.log ?? [])].reverse().find((l) => l.includes('drew "')) ?? "";
@@ -236,6 +265,8 @@ export class PerfectPalaceView implements GameView {
     this.diceTimers.clear();
     this.diceLayer?.remove();
     this.diceLayer = undefined;
+    this.cardLayer?.remove();
+    this.cardLayer = undefined;
     if (this.ticker) clearInterval(this.ticker);
     this.ticker = undefined;
     this.root = undefined;
@@ -297,6 +328,24 @@ export class PerfectPalaceView implements GameView {
     this.after(1750, () => layer.classList.remove("show"));
   }
 
+  /** Flip a drawn card into view (body portal, same pattern as the dice). Fires for
+   *  every player's draw so the table sees what came up. */
+  private showCard(name: string, effect: string, who: string): void {
+    const layer = this.cardLayer;
+    if (!layer) return;
+    layer.innerHTML = `
+      <div class="pp-card-reveal">
+        <div class="pp-card-face">
+          <div class="pp-card-face-top">🃏</div>
+          <div class="pp-card-name">${escapeHtml(name)}</div>
+          ${effect ? `<div class="pp-card-effect">${escapeHtml(effect)}</div>` : ""}
+        </div>
+        <div class="pp-card-cap">${escapeHtml(who)} drew a card</div>
+      </div>`;
+    layer.classList.add("show");
+    this.after(2300, () => layer.classList.remove("show"));
+  }
+
   // ---- identity helpers ----------------------------------------------------
 
   private mySeat(): PPSeat | undefined {
@@ -353,12 +402,15 @@ export class PerfectPalaceView implements GameView {
     }
     this.iWasActing = acting;
 
-    // Card-draw reveal: when a new `drew "…"` line lands in the log, surface it as a
-    // toast (the deck draw is otherwise only a quiet log line).
+    // Card-draw reveal: when a new `<who> drew "<name>" — <effect>` line lands in the
+    // log (any player's draw), flip a card overlay so the deck draw isn't just a quiet
+    // log line.
     const lastCard = [...s.log].reverse().find((l) => l.includes('drew "')) ?? "";
     if (lastCard && lastCard !== this.lastCardLine) {
       this.lastCardLine = lastCard;
-      flashToast(this.root, `🃏 ${lastCard}`);
+      const m = lastCard.match(/^(.*?) drew "(.+?)"(?: — (.+))?$/);
+      if (m) this.showCard(m[2]!, m[3] ?? "", m[1]!);
+      else flashToast(this.root, `🃏 ${lastCard}`);
     }
 
     // A brand-new fine (rising edge of finePending while it's my decision) clears
@@ -395,7 +447,8 @@ export class PerfectPalaceView implements GameView {
           <div class="pp-action">${this.renderAction()}</div>
         </div>
       </div>
-      ${this.showRules ? this.renderRulesModal() : ""}`;
+      ${this.showRules ? this.renderRulesModal() : ""}
+      ${this.showDeck ? this.renderDeckModal() : ""}`;
   }
 
   /** The always-present "what's on this square" callout. Tapping a board square
@@ -452,19 +505,46 @@ export class PerfectPalaceView implements GameView {
             <p>Fortune-Teller squares (15 &amp; 23) and some effects make you <i>draw</i>. Cards give cash, bricks/sticks, or a free Room/Server/Chef/Cleaner/Building; others ally you with the Kingdom, hand you the Bailiff, or are a <b>Royal Pardon</b> you keep to escape the dungeon. A drawn card pops up and is noted in the log.</p>
 
             <h3>🎩 The Bailiff</h3>
-            <p>Pick it up on squares 5, 13, 27 or by card. Once per turn, steal 1 wall, 1 roof, 5🧱, 5🪵, or $5 from any opponent who doesn't hold a Knight. Land in the dungeon and you lose it.</p>
+            <p>Pick it up on squares 5, 13, 27 or by card. You may steal 1 wall, 1 roof, 5🧱, 5🪵, or $5 from any opponent who doesn't hold a Knight — <b>once per turn</b>. Your steal window opens either <i>before your roll</i> (if you already hold it), or <i>right when you grab it</i> (by a card before you move, or by landing on 5/13/27 after you move). Land in the dungeon and you drop it back to the middle.</p>
 
             <h3>⛓️ The Dungeon</h3>
-            <p>Landing on Royal Court (10) sends you to the dungeon: no moving, buying, or building. Roll a 1 to break out (or wait out your third turn), or play a Royal Pardon card for a full turn.</p>
+            <p>Landing on Royal Court (10) sends you to the dungeon: no moving, buying, or building (but you still collect resources from everyone's rolls). Escape three ways: <b>roll a 1</b>, or your <b>3rd turn</b> there frees you anyway, or play a <b>Royal Pardon</b> card to pop out to Just Passing and take a full normal turn. You drop the Bailiff when you're sent in.</p>
 
             <h3>⚔️ Same-square duel</h3>
             <p>Land where another player sits and you duel: the arriver sets a stake, everyone matches and rolls — highest roll takes the whole pot (ties re-roll).</p>
 
+            <h3>🤝 Alliances</h3>
+            <p>Become allied at a Neighboring Kingdom square (3 or 20) by paying the bricks/sticks, or via the "Ally with the Kingdom" card. Once allied (it's permanent — you'll see a 🤝 badge): the <b>$100 invasion tribute</b> on 7 &amp; 28 is waived, the Ally card pays you <b>+$50</b> instead, and landing on an alliance square again gives you those bricks/sticks <b>for free</b>.</p>
+
             <h3>💸 Fines &amp; invasions</h3>
-            <p>Squares 7, 11 &amp; 28 charge you. Cash is taken first; if you're short you forfeit items (🧱/🪵 = $1, wall/roof = $5). An <b>Alliance</b> (squares 3 &amp; 20) waives the $100 invasion tribute.</p>
+            <p>Squares 7, 11 &amp; 28 charge you. Cash is taken first; if you're short you forfeit items (🧱/🪵 = $1, wall/roof = $5). An Alliance waives the $100 invasion tribute (above).</p>
+
+            <h3>🔁 Roll Again (square 24)</h3>
+            <p>You take another turn immediately — but the landing turn <b>skips the shop/build/trade step</b> (you go straight to your next roll), and the bonus turn <b>doesn't count</b> toward the equal-turns finish.</p>
 
             <h3>🏁 Winning &amp; ties</h3>
-            <p>First palace starts the finish; everyone finishes the round. Tie-break by total staff (Queen = 10, Whole-House-Cleaner = 5, others = 1), then by most cash.</p>
+            <p>The first Palace starts the finish: every other player gets exactly <b>one more turn</b> so everyone has had the same number of turns (Roll-Again bonus turns don't count). Then the game ends and the <b>most points</b> wins. Tie-break by total staff (Queen = 10, Whole-House-Cleaner = 5, others = 1), then by most cash.</p>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  /** A reference of every card in the deck (tapped from the deck pile). Static —
+   *  which specific cards are left is hidden, so no live odds. */
+  private renderDeckModal(): string {
+    const items = [...CARDS]
+      .map((c) => `<li><b>${escapeHtml(c.name)}</b> — ${escapeHtml(cardEffectLabel(c.effect))}</li>`)
+      .join("");
+    return `
+      <div class="pp-modal-backdrop">
+        <div class="pp-modal">
+          <div class="pp-modal-header">
+            <h2>🃏 What's in the deck</h2>
+            <button class="pp-icon" data-action="closeDeck" title="Close">✕</button>
+          </div>
+          <div class="pp-rules-body">
+            <p>The deck holds these <b>${CARDS.length} cards</b> (one of each), shuffled. Drawn cards go to the discard pile; the deck reshuffles when it runs out. You only see how many cards are left, not which ones.</p>
+            <ul class="pp-deck-list">${items}</ul>
           </div>
         </div>
       </div>`;
@@ -479,7 +559,13 @@ export class PerfectPalaceView implements GameView {
     const who = turnSeat?.nickname ?? "…";
     if (s.turnPhase === "duel") return `Duel at #${s.duel?.squareNumber ?? "?"}!`;
     const mine = s.currentTurn === this.ctx?.mySessionId;
-    return mine ? "Your turn" : `${who}'s turn`;
+    const turnLabel = mine ? "Your turn" : `${who}'s turn`;
+    // Endgame: a Palace has been built — everyone gets one last turn to catch up.
+    if (s.palaceBuiltBy) {
+      const builder = this.seatById(s.palaceBuiltBy)?.nickname ?? "Someone";
+      return `🏁 Final turns — ${builder} built a Palace! · ${turnLabel}`;
+    }
+    return turnLabel;
   }
 
   // ---- board ---------------------------------------------------------------
@@ -515,7 +601,7 @@ export class PerfectPalaceView implements GameView {
       <div class="pp-crest" style="grid-row:2/7;grid-column:2/10">
         <div class="pp-crest-emoji">🏰</div>
         <div class="pp-crest-bailiff">🎩 ${bailiff}</div>
-        <div class="pp-crest-deck">🃏 Deck: ${s.deckCount} · Discard: ${s.discardCount}</div>
+        <div class="pp-crest-deck" data-action="deckRef" title="What's in the deck?">🃏 Deck: ${s.deckCount} · Discard: ${s.discardCount} ⓘ</div>
       </div>`);
     return `<div class="pp-board">${cells.join("")}</div>`;
   }
@@ -656,7 +742,7 @@ export class PerfectPalaceView implements GameView {
     if (me.inDungeon) {
       return `
         <div class="pp-act-title">You're in the dungeon ⛓️ (${me.dungeonTurnsServed}/3)</div>
-        <p class="pp-hint">Roll a 1 to break out, or serve your time. ${me.inventory.pardonCards > 0 ? "Or use a Royal Pardon for a full turn." : ""}</p>
+        <p class="pp-hint">Roll a <b>1</b> to break out — or your <b>3rd turn</b> here frees you anyway. You still collect resources from every roll. ${me.inventory.pardonCards > 0 ? "Or use a Royal Pardon to pop out and take a full normal turn." : ""}</p>
         <button class="pp-primary" data-action="roll">🎲 Roll</button>
         ${me.inventory.pardonCards > 0 ? `<button class="pp-secondary" data-action="redeemPardon">📜 Use Royal Pardon</button>` : ""}`;
     }
@@ -760,6 +846,7 @@ export class PerfectPalaceView implements GameView {
       return `
         <div class="pp-act-title">Alliance offered 🤝</div>
         <p class="pp-hint">${escapeHtml(sq.flavor ?? "")}</p>
+        <p class="pp-hint">Allying is permanent: it waives the $100 invasion tribute (7 &amp; 28), turns the Ally card into +$50, and makes future alliance squares free.</p>
         <button class="pp-primary" data-action="alliance" data-choice="accept" ${afford ? "" : `disabled title="${need}"`}>Accept</button>
         <button class="pp-secondary" data-action="alliance" data-choice="decline">Decline</button>
         ${afford ? "" : `<span class="pp-reason">${need}</span>`}`;
@@ -1113,9 +1200,10 @@ export class PerfectPalaceView implements GameView {
   }
 
   private handleClick(e: MouseEvent): void {
-    // Click on the modal backdrop (but not its inner panel) closes the rules.
+    // Click on the modal backdrop (but not its inner panel) closes any open modal.
     if ((e.target as HTMLElement).classList.contains("pp-modal-backdrop")) {
       this.showRules = false;
+      this.showDeck = false;
       this.render();
       return;
     }
@@ -1137,6 +1225,14 @@ export class PerfectPalaceView implements GameView {
         return;
       case "closeRules":
         this.showRules = false;
+        this.render();
+        return;
+      case "deckRef":
+        this.showDeck = true;
+        this.render();
+        return;
+      case "closeDeck":
+        this.showDeck = false;
         this.render();
         return;
       case "mute":
