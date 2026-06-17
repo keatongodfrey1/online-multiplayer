@@ -58,7 +58,7 @@ export const BOARD: readonly SquareDef[] = [
     number: 8,
     side: 'long-a',
     label: 'Trader (walls)',
-    flavor: 'Pay $10 for 3 walls. Unlimited while here.',
+    flavor: 'Pay $10 for 3 walls — one trade per visit.',
     effect: { kind: 'trader-walls' },
   },
   {
@@ -102,7 +102,7 @@ export const BOARD: readonly SquareDef[] = [
     number: 14,
     side: 'short-a',
     label: 'Half-Price Cleaner',
-    flavor: 'Cleaners cost $10 each while here. Waives the Room prereq.',
+    flavor: 'Cleaners cost $10 each — one purchase per visit. Waives the Room prereq.',
     effect: { kind: 'half-price-cleaner' },
   },
   {
@@ -211,7 +211,7 @@ export const BOARD: readonly SquareDef[] = [
     number: 29,
     side: 'short-b',
     label: 'Trader (bricks)',
-    flavor: 'Trade 10 bricks for $15 (multiples of 10, bricks only). Unlimited while here.',
+    flavor: 'Trade 10 bricks for $15 (multiples of 10) — one trade per visit.',
     effect: { kind: 'trader-bricks' },
   },
   {

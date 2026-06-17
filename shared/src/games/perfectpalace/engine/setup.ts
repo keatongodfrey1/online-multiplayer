@@ -25,6 +25,16 @@ export interface SeatSpec {
  * re-rolled (only the tied-at-top players) until the first seat is unambiguous,
  * exactly mirroring finalizeInitialRoll's rule.
  */
+export function createLineupState(seats: SeatSpec[], seed: number): GameState {
+  let s = initialState(seed)
+  for (const seat of seats) {
+    s = reducer(s, { type: 'setup/addPlayer', name: seat.name })
+  }
+  // Park in the 'initial-roll' phase: each player (or the room, for bots) clicks
+  // to roll for turn order. The room drives finalize / clear-top-tie from there.
+  return reducer(s, { type: 'setup/startInitialRoll' })
+}
+
 export function createReadyState(seats: SeatSpec[], seed: number): GameState {
   let s = initialState(seed)
   for (const seat of seats) {

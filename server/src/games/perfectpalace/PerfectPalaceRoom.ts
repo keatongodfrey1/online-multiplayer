@@ -44,7 +44,7 @@ import { BaseGameRoom, type FrameworkSaveSeat } from "../../framework/BaseGameRo
 import { sanitizeAction } from "./sanitize.js";
 import { parseSave, serializeSave, type ParsedSave, type SaveSeat } from "./save.js";
 
-const { chooseAction, createReadyState, tryReduce, rollDieFrom, rankPlayers, totalPoints, staffWeight } =
+const { chooseAction, createLineupState, tryReduce, rollDieFrom, rankPlayers, totalPoints, staffWeight } =
   PerfectPalaceEngine;
 type GameState = PerfectPalaceEngine.GameState;
 type GameAction = PerfectPalaceEngine.GameAction;
@@ -218,11 +218,12 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
       });
       this.engine.log = [`Game resumed (turn ${load.turnCount + 1}).`];
     } else {
-      this.engine = createReadyState(
+      this.engine = createLineupState(
         players.map((p) => ({ name: p.nickname })),
         seed,
       );
-      // createReadyState builds engine.players in seat order: players[i] <-> p${i+1}.
+      // createLineupState builds engine.players in seat order: players[i] <-> p${i+1},
+      // parked in 'initial-roll' so everyone clicks "Roll for turn order" first.
       this.seatOrder = players.map((p) => p.sessionId);
     }
     this.frameworkSeatByEngineSeat = this.seatOrder.map((sid) =>
@@ -283,10 +284,14 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
         return e.players.find((p) => p.id === senderId)?.mappingLocked !== true;
       }
       case "mapping/changeOneSlot":
-        // Own card; the engine gates phase + lap credits.
+        // Own card; the engine gates phase + lap credits + own-turn (mid-game).
         return true;
+      case "initialRoll/roll":
+        // Opening roll: only during initial-roll, only if this sender hasn't rolled.
+        return e.phase === "initial-roll" && e.players.find((p) => p.id === senderId)?.initialRoll == null;
       case "turn/duelSetStake":
-        // The arriver (current player) sets the stake.
+      case "turn/duelCancel":
+        // The arriver (current player) sets the stake or calls off a no-contest duel.
         return tp === "duel" && senderId === e.currentPlayerId;
       case "turn/duelRollForPlayer":
         return tp === "duel" && !!e.duel?.contenders.includes(senderId) && e.duel.rolls[senderId] == null;
@@ -301,20 +306,21 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
   private applyClientAction(action: GameAction, senderId: string): void {
     if (action.type === "turn/rollDie") return void this.rollAndDispatch("turn", senderId);
     if (action.type === "turn/duelRollForPlayer") return void this.rollAndDispatch("duel", senderId);
+    if (action.type === "initialRoll/roll") return void this.rollAndDispatch("initial", senderId);
     this.dispatch(action);
   }
 
   /** Generate the seeded server die, record it (feeds the client dice animation
    *  via lastRollSeq/Value/By in syncFromEngine), thread the rng, and dispatch. */
-  private rollAndDispatch(kind: "turn" | "duel", byEngineId: string): boolean {
+  private rollAndDispatch(kind: "turn" | "duel" | "initial", byEngineId: string): boolean {
     const { value, rngState } = rollDieFrom(this.engine);
     this.engine = { ...this.engine, rngState };
     this.rollSeq++;
     this.lastDieValue = value;
     this.lastDieBy = byEngineId;
-    return kind === "duel"
-      ? this.dispatch({ type: "turn/duelRollForPlayer", id: byEngineId, value })
-      : this.dispatch({ type: "turn/rollDieWithValue", value });
+    if (kind === "duel") return this.dispatch({ type: "turn/duelRollForPlayer", id: byEngineId, value });
+    if (kind === "initial") return this.dispatch({ type: "initialRoll/rollForPlayer", id: byEngineId, value });
+    return this.dispatch({ type: "turn/rollDieWithValue", value });
   }
 
   /** Validate via the engine; adopt + funnel when accepted. */
@@ -358,7 +364,9 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
     const e = this.engine;
     if (!e || e.phase === "game-over") return [];
     let seats: number[];
-    if (e.phase === "initial-mapping") {
+    if (e.phase === "initial-roll") {
+      seats = e.players.map((_, i) => i).filter((i) => !e.players[i]!.removed && e.players[i]!.initialRoll == null);
+    } else if (e.phase === "initial-mapping") {
       seats = e.players.map((_, i) => i).filter((i) => !e.players[i]!.removed && !e.players[i]!.mappingLocked);
     } else if (e.turn.phase === "duel" && e.duel) {
       const d = e.duel;
@@ -402,7 +410,9 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
         ? this.rollAndDispatch("turn", engineId)
         : action.type === "turn/duelRollForPlayer"
           ? this.rollAndDispatch("duel", engineId)
-          : this.dispatch(action);
+          : action.type === "initialRoll/roll"
+            ? this.rollAndDispatch("initial", engineId)
+            : this.dispatch(action);
     if (ok) return;
     // Safety net: the policy emitted something illegal (shouldn't happen) — end
     // the turn so the table never stalls; if even that is illegal, re-schedule.
@@ -510,6 +520,26 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
     while (++guard <= 1000) {
       const e = this.engine;
       if (e.phase === "game-over") return;
+      if (e.phase === "initial-roll") {
+        const active = e.players.filter((p) => !p.removed);
+        if (active.length > 0 && active.every((p) => p.initialRoll != null)) {
+          // All rolled: finalize order, or — on a top tie — clear the tied rolls so
+          // just those players re-roll (finalize no-ops on a tie, so it's rejected).
+          const fin = tryReduce(e, { type: "initialRoll/finalize" });
+          if (fin.ok) {
+            this.engine = fin.state;
+            this.actionsApplied++;
+            continue;
+          }
+          const clr = tryReduce(e, { type: "initialRoll/clearTopTie" });
+          if (clr.ok) {
+            this.engine = clr.state;
+            this.actionsApplied++;
+            continue;
+          }
+        }
+        return;
+      }
       if (e.phase === "initial-mapping") {
         const active = e.players.filter((p) => !p.removed);
         if (active.length > 0 && active.every((p) => p.mappingLocked)) {
@@ -587,6 +617,7 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
       set(seat, "gone", !sid || ep.removed);
       set(seat, "mappingChangesAvailable", ep.mappingChangesAvailable);
       set(seat, "workerPreference", ep.workerPreference);
+      set(seat, "initialRoll", ep.initialRoll ?? 0);
       if (cardsRevealed) writeResourceCard(seat.resourceCard, ep.resourceCard);
       else if (seat.resourceCard.length) seat.resourceCard.clear();
     });
@@ -618,7 +649,10 @@ export class PerfectPalaceRoom extends BaseGameRoom<PerfectPalaceState> {
       writeStake(s.duel.stake, d.stake);
       const rollIds = Object.keys(d.rolls);
       rewriteStrings(s.duel.rollPlayers, rollIds);
-      rewriteNumbers(s.duel.rollValues, rollIds.map((id) => d.rolls[id] ?? 0));
+      // Redact roll VALUES while the duel is live — the client only shows who has
+      // rolled ("✓"). The room auto-resolves the instant the last contender rolls,
+      // so the numbers are revealed together in the resolution log, never streamed.
+      rewriteNumbers(s.duel.rollValues, rollIds.map(() => 0));
       set(s.duel, "winner", d.winner ?? "");
     } else {
       clearDuel(s.duel);

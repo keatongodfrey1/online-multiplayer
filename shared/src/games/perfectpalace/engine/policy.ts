@@ -12,7 +12,7 @@
 //  - hard:   normal PLUS aggression — Bailiff-steals from the leader, accepts
 //            alliances, grabs the Queen, raises duel stakes, buys a Knight.
 
-import type { DuelStake, GameState, Player, PlayerId } from './types.js'
+import type { DuelStake, GameState, Player, PlayerId, PlayerInventory } from './types.js'
 import type { GameAction } from './actions.js'
 import { getSquare } from './board.js'
 import { DUEL_MIN_STAKE, PRICE, RECIPE } from './constants.js'
@@ -34,6 +34,11 @@ export function chooseAction(state: GameState, id: PlayerId, difficulty: Difficu
   const me = seatOf(state, id)
   if (!me) return { type: 'turn/endTurn' }
 
+  // Opening turn-order roll: press to roll (the room injects the seeded value).
+  if (state.phase === 'initial-roll') {
+    return { type: 'initialRoll/roll' }
+  }
+
   // Initial mapping: lock the (default) one-to-one card so the reveal can fire.
   if (state.phase === 'initial-mapping') {
     return { type: 'mapping/setInitial', id, card: me.resourceCard }
@@ -45,7 +50,8 @@ export function chooseAction(state: GameState, id: PlayerId, difficulty: Difficu
     const stakeSet =
       d.stake.dollars + d.stake.bricks + d.stake.sticks + d.stake.walls + d.stake.roofs + d.stake.rooms > 0
     if (!stakeSet && state.currentPlayerId === id) {
-      return { type: 'turn/duelSetStake', stake: duelStake(me, difficulty) }
+      const stake = affordableDuelStake(state, difficulty)
+      return stake ? { type: 'turn/duelSetStake', stake } : { type: 'turn/duelCancel' }
     }
     // Value is injected by the room from the seeded PRNG (clients/bots never roll).
     return { type: 'turn/duelRollForPlayer', id, value: 0 }
@@ -115,20 +121,34 @@ function hardSteal(
   return { type, targetId: t.id, item }
 }
 
-/** Duel stake: Hard stakes bigger when flush; otherwise the cheapest minimum. */
-function duelStake(p: Player, difficulty: Difficulty): DuelStake {
+/**
+ * Pick a stake EVERY participant can match (the engine rejects a stake any
+ * participant can't cover). Prefers the cheapest minimum; Hard doubles the cash
+ * stake when all are flush. Returns null when no minimum stake is affordable by
+ * all — the caller then cancels the duel (no-contest) rather than spinning.
+ */
+function affordableDuelStake(state: GameState, difficulty: Difficulty): DuelStake | null {
+  const d = state.duel
+  if (!d) return null
+  const invs = d.participants
+    .map((id) => seatOf(state, id)?.inventory)
+    .filter((inv): inv is PlayerInventory => !!inv)
+  if (invs.length === 0) return null
   const z: DuelStake = { dollars: 0, bricks: 0, sticks: 0, walls: 0, roofs: 0, rooms: 0 }
-  const inv = p.inventory
-  if (difficulty === 'hard' && inv.dollars >= 2 * DUEL_MIN_STAKE.dollars) {
-    return { ...z, dollars: 2 * DUEL_MIN_STAKE.dollars }
+  const minAll = (k: keyof PlayerInventory) => Math.min(...invs.map((inv) => inv[k] as number))
+  if (minAll('dollars') >= DUEL_MIN_STAKE.dollars) {
+    const amt =
+      difficulty === 'hard' && minAll('dollars') >= 2 * DUEL_MIN_STAKE.dollars
+        ? 2 * DUEL_MIN_STAKE.dollars
+        : DUEL_MIN_STAKE.dollars
+    return { ...z, dollars: amt }
   }
-  if (inv.dollars >= DUEL_MIN_STAKE.dollars) return { ...z, dollars: DUEL_MIN_STAKE.dollars }
-  if (inv.bricks >= DUEL_MIN_STAKE.bricks) return { ...z, bricks: DUEL_MIN_STAKE.bricks }
-  if (inv.sticks >= DUEL_MIN_STAKE.sticks) return { ...z, sticks: DUEL_MIN_STAKE.sticks }
-  if (inv.walls >= 1) return { ...z, walls: 1 }
-  if (inv.roofs >= 1) return { ...z, roofs: 1 }
-  if (inv.rooms >= 1) return { ...z, rooms: 1 }
-  return { ...z, dollars: DUEL_MIN_STAKE.dollars } // broke edge: stake the minimum anyway
+  if (minAll('bricks') >= DUEL_MIN_STAKE.bricks) return { ...z, bricks: DUEL_MIN_STAKE.bricks }
+  if (minAll('sticks') >= DUEL_MIN_STAKE.sticks) return { ...z, sticks: DUEL_MIN_STAKE.sticks }
+  if (minAll('walls') >= 1) return { ...z, walls: 1 }
+  if (minAll('roofs') >= 1) return { ...z, roofs: 1 }
+  if (minAll('rooms') >= 1) return { ...z, rooms: 1 }
+  return null
 }
 
 /**

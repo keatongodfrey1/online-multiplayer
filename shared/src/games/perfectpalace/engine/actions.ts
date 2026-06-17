@@ -9,8 +9,10 @@ export type SetupAction =
   | { type: 'setup/startInitialRoll' }
 
 export type InitialRollAction =
+  | { type: 'initialRoll/roll' } // client press; the room injects the seeded value
   | { type: 'initialRoll/rollForPlayer'; id: PlayerId; value: number }
   | { type: 'initialRoll/finalize' } // once all players have rolled + order decided
+  | { type: 'initialRoll/clearTopTie' } // clear the tied-at-top rolls so they re-roll
 
 export type MappingAction =
   | { type: 'mapping/setInitial'; id: PlayerId; card: ResourceCard }
@@ -34,6 +36,7 @@ export type TurnAction =
   | { type: 'turn/duelSetStake'; stake: DuelStake }
   | { type: 'turn/duelRollForPlayer'; id: PlayerId; value: number }
   | { type: 'turn/duelResolve' } // settle pot
+  | { type: 'turn/duelCancel' } // no-contest: a participant can't cover any stake
   // Pre-move Bailiff steal (only when the active player just acquired the Bailiff
   // via a card drawn during the roll's distribution, before movement).
   | { type: 'turn/bailiffStealPreMove'; targetId: PlayerId; item: 'wall' | 'roof' | 'bricks' | 'sticks' | 'dollars' }
@@ -50,6 +53,7 @@ export type TurnAction =
   | { type: 'turn/traderBricksSell'; batches: number } // at #29
   | { type: 'turn/halfPriceCleanerBuy'; count: number } // at #14
   | { type: 'turn/build'; item: BuildItem; count: number }
+  | { type: 'turn/buildFromScratch'; item: BuildItem; count: number } // auto-buy raw + assemble
   | { type: 'turn/setWorkerPreference'; preference: 'wall-roof' | 'wall-wall' }
   | { type: 'turn/endTurn' }
   | { type: 'turn/advancePhase' } // nudge phase from square-effect → duel/bailiff/optional-actions

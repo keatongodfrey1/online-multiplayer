@@ -331,6 +331,24 @@ function finalizeInitialRoll(state: GameState): GameState {
   }
 }
 
+/**
+ * Clear `initialRoll` on every player tied for the current highest roll, so the
+ * room can have just those players re-roll. Mirrors the loop createReadyState
+ * runs server-side; used by the interactive (click-to-roll) opening sequence.
+ */
+function clearTopTieRolls(state: GameState): GameState {
+  if (state.players.some((p) => p.initialRoll == null)) return state
+  const highest = Math.max(...state.players.map((p) => p.initialRoll ?? 0))
+  const tied = state.players.filter((p) => (p.initialRoll ?? 0) === highest)
+  if (tied.length < 2) return state // no tie to clear
+  const players: Player[] = state.players.map((p) => {
+    if ((p.initialRoll ?? 0) !== highest) return p
+    const { initialRoll: _drop, ...rest } = p
+    return rest as Player
+  })
+  return { ...state, players }
+}
+
 // ==================== Initial mapping ====================
 
 /**
@@ -422,6 +440,10 @@ function changeOneMappingSlot(
     state.phase !== 'initial-roll' &&
     state.phase !== 'initial-mapping' &&
     state.phase !== 'mapping-reveal'
+  // Mid-game a card may only be re-tuned on its owner's own turn — the card pays
+  // out whenever ANYONE rolls, so editing it during an opponent's turn would let
+  // a player react to an imminent roll. (Initial mapping stays simultaneous.)
+  if (midGame && id !== state.currentPlayerId) return state
   if (midGame && p.mappingChangesAvailable <= 0) return state
   // Enforce one-to-one mapping via a swap: whichever slot currently holds
   // newOption receives the option displaced from slotIndex.
@@ -1386,6 +1408,7 @@ function halfPriceCleanerBuy(state: GameState, count: number): GameState {
   const player = currentPlayer(state)
   if (imprisonedAndLocked(state)) return state
   if (player.position !== 14) return state // only at #14
+  if (state.turn.traderUsedThisTurn) return state // one discount purchase per landing
   if (count <= 0) return state
   const cost = count * HALF_PRICE_CLEANER_COST
   if (player.inventory.dollars < cost) return state
@@ -1393,6 +1416,7 @@ function halfPriceCleanerBuy(state: GameState, count: number): GameState {
   let newState = updatePlayer(state, player.id, (p) =>
     addInventory(p, { dollars: -cost, cleaners: count }),
   )
+  newState = { ...newState, turn: { ...newState.turn, traderUsedThisTurn: true } }
   newState = log(
     newState,
     `${player.name} hired ${count} Cleaner(s) at half price for $${cost}.`,
@@ -1509,6 +1533,120 @@ function build(state: GameState, item: BuildItem, count: number): GameState {
   return log(newState, `${player.name} built ${built}× ${item}.`)
 }
 
+// ==================== Build from scratch (one-click) ====================
+
+type BuiltField =
+  | 'walls'
+  | 'roofs'
+  | 'rooms'
+  | 'buildings'
+  | 'threeStoryBuildings'
+  | 'palaces'
+
+const BUILD_ITEM_FIELD: Record<BuildItem, BuiltField> = {
+  wall: 'walls',
+  roof: 'roofs',
+  room: 'rooms',
+  building: 'buildings',
+  threeStoryBuilding: 'threeStoryBuildings',
+  palace: 'palaces',
+}
+
+// Each built tier in terms of its immediate parts, keyed by inventory field name.
+const SUBRECIPE: Record<BuiltField, Partial<Record<keyof PlayerInventory, number>>> = {
+  walls: { bricks: RECIPE.wall.bricks },
+  roofs: { sticks: RECIPE.roof.sticks },
+  rooms: { walls: RECIPE.room.walls, roofs: RECIPE.room.roofs },
+  buildings: { rooms: RECIPE.building.rooms },
+  threeStoryBuildings: { buildings: RECIPE.threeStoryBuilding.buildings },
+  palaces: { threeStoryBuildings: RECIPE.palace.threeStoryBuildings },
+}
+
+export interface QuickBuildResult {
+  ok: boolean
+  reason?: string
+  dollars: number
+  delta: Partial<Record<keyof PlayerInventory, number>>
+}
+
+/**
+ * Cost to build `count` of `item` "from scratch": consume owned materials first,
+ * buy the missing bricks/sticks with cash ($1 each), assemble bottom-up. Returns
+ * the cash cost and the net inventory delta to apply, or `{ ok:false, reason }`
+ * when a staff prerequisite (Building/3-Story) is unmet. Staff are NOT auto-bought.
+ * Pure — never mutates `inv`. Shared by the reducer and the client (price + greying).
+ */
+export function quickBuildCost(inv: PlayerInventory, item: BuildItem, count = 1): QuickBuildResult {
+  const fail = (reason: string): QuickBuildResult => ({ ok: false, reason, dollars: 0, delta: {} })
+  if (count <= 0) return fail('Nothing to build.')
+
+  const work: Record<string, number> = {
+    bricks: inv.bricks,
+    sticks: inv.sticks,
+    walls: inv.walls,
+    roofs: inv.roofs,
+    rooms: inv.rooms,
+    buildings: inv.buildings,
+    threeStoryBuildings: inv.threeStoryBuildings,
+    palaces: inv.palaces,
+  }
+  const get = (k: string): number => work[k] ?? 0
+  let bought = 0 // bricks + sticks purchased, $1 each
+  let madeBuilding = false
+  let madeThreeStory = false
+
+  const make = (field: BuiltField, n: number): void => {
+    if (n <= 0) return
+    if (field === 'buildings') madeBuilding = true
+    if (field === 'threeStoryBuildings') madeThreeStory = true
+    const recipe = SUBRECIPE[field]
+    for (const partKey of Object.keys(recipe) as (keyof PlayerInventory)[]) {
+      const need = (recipe[partKey] ?? 0) * n
+      if (partKey === 'bricks' || partKey === 'sticks') {
+        const short = Math.max(0, need - get(partKey))
+        if (short > 0) bought += short
+        work[partKey] = get(partKey) + short - need
+      } else {
+        if (get(partKey) < need) make(partKey as BuiltField, need - get(partKey))
+        work[partKey] = get(partKey) - need
+      }
+    }
+    work[field] = get(field) + n
+  }
+
+  make(BUILD_ITEM_FIELD[item], count)
+
+  // Staff prerequisites (persistent; not consumed) — copied from canBuild.
+  const effCleaners = inv.cleaners + inv.wholeHouseCleaners
+  if (madeBuilding && inv.servers + inv.chefs + effCleaners < 1) {
+    return fail('Needs at least 1 Server/Chef/Cleaner.')
+  }
+  if (madeThreeStory && (inv.servers < 1 || inv.chefs < 1 || effCleaners < 1)) {
+    return fail('Needs a Server, a Chef and a Cleaner.')
+  }
+
+  const delta: Partial<Record<keyof PlayerInventory, number>> = {}
+  for (const k of ['bricks', 'sticks', 'walls', 'roofs', 'rooms', 'buildings', 'threeStoryBuildings', 'palaces'] as const) {
+    const d = get(k) - (inv[k] as number)
+    if (d !== 0) delta[k] = d
+  }
+  return { ok: true, dollars: bought, delta }
+}
+
+function buildFromScratch(state: GameState, item: BuildItem, count: number): GameState {
+  const player = currentPlayer(state)
+  if (imprisonedAndLocked(state)) return state
+  if (count <= 0) return state
+  const r = quickBuildCost(player.inventory, item, count)
+  if (!r.ok) return state
+  if (player.inventory.dollars < r.dollars) return state
+  let newState = updatePlayer(state, player.id, (pp) => addInventory(pp, { dollars: -r.dollars, ...r.delta }))
+  // Fire the same post-build hooks the step-by-step path does.
+  newState = tryConvertWHC(newState, player.id)
+  if ((r.delta.palaces ?? 0) > 0) newState = checkPalaceTrigger(newState, player.id)
+  return log(newState, `${player.name} built ${count}× ${item} from scratch for $${r.dollars}.`)
+}
+
 // ==================== Duel ====================
 
 function duelSetStake(state: GameState, stake: DuelStake): GameState {
@@ -1524,6 +1662,22 @@ function duelSetStake(state: GameState, stake: DuelStake): GameState {
     stake.roofs >= 1 ||
     stake.rooms >= 1
   if (!totalMin) return state
+  // Everyone matches the stake, so reject it unless EVERY participant can cover it.
+  // (Without this, addInventory underflows to negative and duelResolve mints the
+  // pot from nothing. When no stake works, the arriver cancels — see duelCancel.)
+  for (const pid of existing.participants) {
+    const inv = findPlayer(state, pid).inventory
+    if (
+      inv.dollars < stake.dollars ||
+      inv.bricks < stake.bricks ||
+      inv.sticks < stake.sticks ||
+      inv.walls < stake.walls ||
+      inv.roofs < stake.roofs ||
+      inv.rooms < stake.rooms
+    ) {
+      return state
+    }
+  }
   // Participants contribute the literal stake. No conversions: UI should have validated.
   let newState: GameState = { ...state, duel: { ...existing, stake } }
   for (const pid of existing.participants) {
@@ -1564,9 +1718,12 @@ function duelResolve(state: GameState): GameState {
     // Re-roll only tied contenders; eliminate non-tied players from future rounds.
     const newRolls: Partial<Record<string, number>> = {}
     // Preserve nothing (clear all tied rolls); non-tied contenders are eliminated.
+    const tieRollLine = contenders
+      .map((pid) => `${findPlayer(state, pid).name} ${rolls[pid]}`)
+      .join(' · ')
     return log(
       { ...state, duel: { ...d, rolls: newRolls, contenders: winners } },
-      `Tie at ${highest}! ${winners.length} tied players re-roll (others eliminated).`,
+      `🎲 Duel rolls — ${tieRollLine}. Tie at ${highest}! ${winners.length} tied players re-roll (others eliminated).`,
     )
   }
   const winnerId = winners[0]!
@@ -1585,13 +1742,36 @@ function duelResolve(state: GameState): GameState {
   )
   newState = tryConvertWHC(newState, winnerId)
   const winner = findPlayer(newState, winnerId)
-  newState = log(newState, `🎲 ${winner.name} wins the duel (rolled ${highest})!`)
+  // Reveal every contender's roll together (the live values are hidden until now).
+  const rollLine = contenders
+    .map((pid) => `${findPlayer(newState, pid).name} ${rolls[pid]}`)
+    .join(' · ')
+  newState = log(newState, `🎲 Duel rolls — ${rollLine}. ${winner.name} wins (rolled ${highest})!`)
   // Clear duel, resume turn phase.
   newState = { ...newState, duel: undefined }
   // Proceed to post-roll Bailiff if applicable, else optional actions (or auto-end on #24).
   if (newState.turn.acquiredBailiffThisTurn) {
     newState = { ...newState, turn: { ...newState.turn, phase: 'post-roll-bailiff' } }
     return newState
+  }
+  return completeTurnOrEnterOptional(newState)
+}
+
+/**
+ * Call off a duel as a no-contest. Reachable only before stakes are committed —
+ * the escape hatch for when a participant can't cover any minimum stake (so
+ * duelSetStake rejects every option). Resumes the arriver's turn exactly like
+ * duelResolve's tail. No resources change hands.
+ */
+function duelCancel(state: GameState): GameState {
+  const d = state.duel
+  if (!d) return state
+  const stakeSet =
+    d.stake.dollars + d.stake.bricks + d.stake.sticks + d.stake.walls + d.stake.roofs + d.stake.rooms > 0
+  if (stakeSet) return state // too late — stakes are in, everyone must roll
+  let newState: GameState = log({ ...state, duel: undefined }, `Duel called off — no one could cover a stake.`)
+  if (newState.turn.acquiredBailiffThisTurn) {
+    return { ...newState, turn: { ...newState.turn, phase: 'post-roll-bailiff' } }
   }
   return completeTurnOrEnterOptional(newState)
 }
@@ -1769,10 +1949,16 @@ export function reducer(state: GameState, action: GameAction): GameState {
       return startInitialRoll(state)
 
     // Initial roll
+    case 'initialRoll/roll':
+      // Client press; the room intercepts this and injects the seeded value via
+      // initialRoll/rollForPlayer. A no-op if it ever reaches the reducer.
+      return state
     case 'initialRoll/rollForPlayer':
       return recordInitialRoll(state, action.id, action.value)
     case 'initialRoll/finalize':
       return finalizeInitialRoll(state)
+    case 'initialRoll/clearTopTie':
+      return clearTopTieRolls(state)
 
     // Mapping
     case 'mapping/setInitial':
@@ -1823,6 +2009,8 @@ export function reducer(state: GameState, action: GameAction): GameState {
       return duelRoll(state, action.id, action.value)
     case 'turn/duelResolve':
       return duelResolve(state)
+    case 'turn/duelCancel':
+      return duelCancel(state)
 
     // Turn: Bailiff pre-move (card-draw acquisition, before movement)
     case 'turn/bailiffStealPreMove': {
@@ -1886,6 +2074,8 @@ export function reducer(state: GameState, action: GameAction): GameState {
       return halfPriceCleanerBuy(state, action.count)
     case 'turn/build':
       return build(state, action.item, action.count)
+    case 'turn/buildFromScratch':
+      return buildFromScratch(state, action.item, action.count)
     case 'turn/endTurn':
       return endTurn(state)
     case 'turn/advancePhase':

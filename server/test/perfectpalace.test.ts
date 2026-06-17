@@ -43,13 +43,35 @@ describe("perfect palace", () => {
     beforeStart?.(room);
     clients[0]!.send(LobbyMsg.START, {});
     await until(() => room.state.phase === Phase.PLAYING);
+    await completeInitialRoll(room, clients);
     return { room, clients };
+  }
+
+  /** Drive every connected human seat to roll for turn order (bots auto-roll),
+   *  leaving the game at the hidden initial mapping — where the old tests began. */
+  async function completeInitialRoll(room: PerfectPalaceRoom, clients: any[]): Promise<void> {
+    const bySession = new Map(clients.map((c) => [c.sessionId, c]));
+    const deadline = Date.now() + 5000;
+    while (room.engine.phase === "initial-roll" && Date.now() < deadline) {
+      const s = room.engine.players.findIndex(
+        (p, i) => p.initialRoll == null && !!room.seatOrder[i] && bySession.has(room.seatOrder[i]!),
+      );
+      if (s >= 0) {
+        const prev = room.engine;
+        bySession.get(room.seatOrder[s]!)!.send(PerfectPalaceMsg.ACTION, { type: "initialRoll/roll" });
+        await until(() => room.engine !== prev, 2000).catch(() => {});
+      } else {
+        await sleep(8); // only bot/vacated seats outstanding — the room rolls them
+      }
+    }
   }
 
   /** Engine seats that must act now (mirrors the room's awaiting logic). */
   function awaitingSeats(room: PerfectPalaceRoom): number[] {
     const e = room.engine;
     if (e.phase === "game-over") return [];
+    if (e.phase === "initial-roll")
+      return e.players.map((_, i) => i).filter((i) => e.players[i]!.initialRoll == null);
     if (e.phase === "initial-mapping")
       return e.players.map((_, i) => i).filter((i) => !e.players[i]!.mappingLocked);
     if (e.turn.phase === "duel" && e.duel)
@@ -117,6 +139,26 @@ describe("perfect palace", () => {
     assert.equal((room.state as any).discard, undefined);
     // resource cards are hidden until reveal.
     assert.ok([...room.state.seats].every((s) => s.resourceCard.length === 0));
+  });
+
+  it("opens with an interactive turn-order roll that everyone clicks", async () => {
+    const room = (await colyseus.createRoom(PERFECT_PALACE, { seed: 60 })) as unknown as PerfectPalaceRoom;
+    room.botDelayMs = 1;
+    const a = await colyseus.connectTo(room, { nickname: "P0" });
+    const b = await colyseus.connectTo(room, { nickname: "P1" });
+    await until(() => room.state.players.size === 2);
+    a.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    // Parked at the opening roll, waiting for clicks — nobody has rolled yet.
+    assert.equal(room.engine.phase, "initial-roll");
+    assert.ok(room.engine.players.every((p) => p.initialRoll == null), "no one has rolled");
+    // A connected human is NOT auto-rolled — the table waits.
+    await sleep(60);
+    assert.equal(room.engine.phase, "initial-roll", "still waiting on the humans");
+    // Everyone clicks → the order resolves and the game moves on to the card pick.
+    await completeInitialRoll(room, [a, b]);
+    assert.equal(room.engine.phase, "initial-mapping");
+    assert.ok(room.engine.turnOrder.length === 2, "a turn order was decided");
   });
 
   // ---- forge-proofing ------------------------------------------------------
@@ -522,6 +564,7 @@ describe("perfect palace", () => {
     await until(() => room.state.turnSeconds === 30);
     a.send(LobbyMsg.START, {});
     await until(() => room.state.phase === Phase.PLAYING);
+    await completeInitialRoll(room, [a, b]);
     await completeMapping(room, [a, b]);
 
     // A connected human's single-actor turn → a deadline is armed.
