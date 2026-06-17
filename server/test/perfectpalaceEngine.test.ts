@@ -2329,3 +2329,180 @@ describe('Bot policy', () => {
     expect(chooseAction(s, cur).type).toBe('turn/build'); // builds rather than ending the turn
   });
 });
+
+// ==================== Follow-up fixes (2026-06) ====================
+
+describe('Build from scratch (one-click)', () => {
+  const { quickBuildCost } = PerfectPalaceEngine;
+
+  function withInv(s: GameState, id: string, patch: Record<string, number>): GameState {
+    return {
+      ...s,
+      players: s.players.map((p) => (p.id === id ? { ...p, inventory: { ...p.inventory, ...patch } } : p)),
+    };
+  }
+
+  it('builds a Room from an empty inventory for $25 (20 bricks + 5 sticks)', () => {
+    let s = setupGame(['A', 'B']);
+    s = withInv(s, 'p1', { dollars: 25, bricks: 0, sticks: 0, walls: 0, roofs: 0, rooms: 0 });
+    s = reducer(s, { type: 'turn/buildFromScratch', item: 'room', count: 1 });
+    const inv = playerById(s, 'p1').inventory;
+    expect(inv.rooms).toBe(1);
+    expect(inv.dollars).toBe(0);
+    expect(inv.bricks).toBe(0);
+    expect(inv.sticks).toBe(0);
+  });
+
+  it('uses owned walls/roofs first, charging only the marginal cash', () => {
+    // Owns 2 walls + 0 roofs: needs 2 more walls (10 bricks) + 1 roof (5 sticks) = $15.
+    const r = quickBuildCost(
+      { ...PerfectPalaceEngine.EMPTY_INVENTORY, walls: 2 },
+      'room',
+      1,
+    );
+    expect(r.ok).toBe(true);
+    expect(r.dollars).toBe(15);
+    expect(r.delta.rooms).toBe(1);
+    expect(r.delta.walls).toBe(-2); // 2 owned consumed, 2 built then consumed → net -2
+  });
+
+  it('owning the exact parts makes the Room free ($0)', () => {
+    const r = quickBuildCost({ ...PerfectPalaceEngine.EMPTY_INVENTORY, walls: 4, roofs: 1 }, 'room', 1);
+    expect(r.ok).toBe(true);
+    expect(r.dollars).toBe(0);
+    expect(r.delta.rooms).toBe(1);
+  });
+
+  it('rejects a Building from scratch without a staff prereq, accepts it with one', () => {
+    const bare = quickBuildCost({ ...PerfectPalaceEngine.EMPTY_INVENTORY }, 'building', 1);
+    expect(bare.ok).toBe(false);
+    const staffed = quickBuildCost({ ...PerfectPalaceEngine.EMPTY_INVENTORY, servers: 1 }, 'building', 1);
+    expect(staffed.ok).toBe(true);
+    expect(staffed.dollars).toBe(75); // 3 rooms = 60 bricks + 15 sticks
+    expect(staffed.delta.buildings).toBe(1);
+  });
+
+  it('a palace from scratch costs $675 (540 bricks + 135 sticks)', () => {
+    const r = quickBuildCost(
+      { ...PerfectPalaceEngine.EMPTY_INVENTORY, servers: 1, chefs: 1, cleaners: 1 },
+      'palace',
+      1,
+    );
+    expect(r.ok).toBe(true);
+    expect(r.dollars).toBe(675);
+    expect(r.delta.palaces).toBe(1);
+  });
+
+  it('is a no-op when you cannot afford it (no negative inventory)', () => {
+    let s = setupGame(['A', 'B']);
+    s = withInv(s, 'p1', { dollars: 10, bricks: 0, sticks: 0, walls: 0, roofs: 0, rooms: 0 });
+    const before = s;
+    s = reducer(s, { type: 'turn/buildFromScratch', item: 'room', count: 1 });
+    expect(s).toBe(before); // rejected → same reference
+    expect(playerById(s, 'p1').inventory.rooms).toBe(0);
+    expect(playerById(s, 'p1').inventory.dollars).toBe(10);
+  });
+});
+
+describe('Duel affordability + no-contest', () => {
+  function toDuel(): GameState {
+    let s = setupGame(['A', 'B']);
+    s = { ...s, players: s.players.map((p) => (p.id === 'p2' ? { ...p, position: 2 } : p)) };
+    s = reducer(s, { type: 'turn/rollDieWithValue', value: 1 }); // p1 → #2, duel with p2
+    expect(s.turn.phase).toBe('duel');
+    return s;
+  }
+  function zero(s: GameState, id: string): GameState {
+    return {
+      ...s,
+      players: s.players.map((p) =>
+        p.id === id
+          ? { ...p, inventory: { ...p.inventory, dollars: 0, bricks: 0, sticks: 0, walls: 0, roofs: 0, rooms: 0 } }
+          : p,
+      ),
+    };
+  }
+
+  it('rejects a stake a participant cannot afford (no underflow)', () => {
+    let s = toDuel();
+    s = zero(s, 'p2'); // p2 is broke
+    const before = s;
+    const after = reducer(s, {
+      type: 'turn/duelSetStake',
+      stake: { dollars: 5, bricks: 0, sticks: 0, walls: 0, roofs: 0, rooms: 0 },
+    });
+    expect(after).toBe(before); // rejected
+    expect(playerById(after, 'p2').inventory.dollars).toBe(0); // never went negative
+  });
+
+  it('duelCancel calls off the no-contest and resumes the turn', () => {
+    let s = toDuel();
+    s = zero(s, 'p2');
+    s = reducer(s, { type: 'turn/duelCancel' });
+    expect(s.duel).toBeUndefined();
+    expect(s.turn.phase).toBe('optional-actions');
+    expect(s.currentPlayerId).toBe('p1');
+  });
+
+  it('the bot policy cancels a duel nobody can stake', () => {
+    const { chooseAction } = PerfectPalaceEngine;
+    let s = toDuel();
+    s = zero(s, 'p2');
+    expect(chooseAction(s, 'p1').type).toBe('turn/duelCancel');
+  });
+});
+
+describe('Half-price cleaner is once per landing', () => {
+  it('rejects a second purchase on the same visit to #14', () => {
+    let s = setupGame(['A', 'B']);
+    s = { ...s, players: s.players.map((p) => (p.id === 'p1' ? { ...p, position: 14, inventory: { ...p.inventory, dollars: 100 } } : p)) };
+    s = reducer(s, { type: 'turn/halfPriceCleanerBuy', count: 1 });
+    expect(playerById(s, 'p1').inventory.cleaners).toBe(1);
+    expect(s.turn.traderUsedThisTurn).toBe(true);
+    const before = s;
+    s = reducer(s, { type: 'turn/halfPriceCleanerBuy', count: 1 });
+    expect(s).toBe(before); // blocked
+    expect(playerById(s, 'p1').inventory.cleaners).toBe(1);
+  });
+});
+
+describe('Mid-game roll-card edits are own-turn only', () => {
+  it('rejects editing your card on someone else turn, allows it on your own', () => {
+    let s = setupGame(['A', 'B']); // p1 is the current player, mid-game
+    s = { ...s, players: s.players.map((p) => (p.id === 'p2' ? { ...p, mappingChangesAvailable: 1 } : p)) };
+    const p2card = JSON.stringify(playerById(s, 'p2').resourceCard);
+    // p2 tries to retune while it is p1's turn → rejected (no change, no credit spent).
+    const after = reducer(s, { type: 'mapping/changeOneSlot', id: 'p2', slotIndex: 0, option: 5 });
+    expect(JSON.stringify(playerById(after, 'p2').resourceCard)).toBe(p2card);
+    expect(playerById(after, 'p2').mappingChangesAvailable).toBe(1);
+    // p1 (the current player) with a credit CAN change its own card.
+    let s2 = { ...s, players: s.players.map((p) => (p.id === 'p1' ? { ...p, mappingChangesAvailable: 1 } : p)) };
+    s2 = reducer(s2, { type: 'mapping/changeOneSlot', id: 'p1', slotIndex: 0, option: 5 });
+    expect(playerById(s2, 'p1').mappingChangesAvailable).toBe(0);
+  });
+});
+
+describe('Interactive opening roll', () => {
+  const { createLineupState } = PerfectPalaceEngine;
+
+  it('parks at initial-roll and finalizes to initial-mapping once all have rolled', () => {
+    let s = createLineupState([{ name: 'A' }, { name: 'B' }], 5);
+    expect(s.phase).toBe('initial-roll');
+    s = reducer(s, { type: 'initialRoll/rollForPlayer', id: 'p1', value: 6 });
+    s = reducer(s, { type: 'initialRoll/rollForPlayer', id: 'p2', value: 3 });
+    s = reducer(s, { type: 'initialRoll/finalize' });
+    expect(s.phase).toBe('initial-mapping');
+    expect(s.turnOrder[0]).toBe('p1');
+  });
+
+  it('finalize no-ops on a top tie; clearTopTie resets the tied rolls', () => {
+    let s = createLineupState([{ name: 'A' }, { name: 'B' }], 5);
+    s = reducer(s, { type: 'initialRoll/rollForPlayer', id: 'p1', value: 4 });
+    s = reducer(s, { type: 'initialRoll/rollForPlayer', id: 'p2', value: 4 });
+    const tied = reducer(s, { type: 'initialRoll/finalize' });
+    expect(tied).toBe(s); // rejected (still initial-roll)
+    s = reducer(s, { type: 'initialRoll/clearTopTie' });
+    expect(playerById(s, 'p1').initialRoll).toBeUndefined();
+    expect(playerById(s, 'p2').initialRoll).toBeUndefined();
+  });
+});

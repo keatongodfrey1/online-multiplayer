@@ -23,7 +23,8 @@ import { escapeHtml } from "../../framework/dom.js";
 import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
 import { clockChime, flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
 
-const { BOARD, getSquare, RESOURCE_OPTIONS, PRICE, RECIPE, totalPoints, staffWeight } = PerfectPalaceEngine;
+const { BOARD, getSquare, RESOURCE_OPTIONS, PRICE, RECIPE, totalPoints, staffWeight, quickBuildCost } =
+  PerfectPalaceEngine;
 const PP_SAVES_KEY = "perfectpalace-saves";
 
 type Outcome = PerfectPalaceEngine.ResourceOutcome;
@@ -179,6 +180,16 @@ export class PerfectPalaceView implements GameView {
   private fineSel = { bricks: 0, sticks: 0, walls: 0, roofs: 0 };
   /** Rising-edge guard so a brand-new fine clears any stale forfeit selection. */
   private finePendingPrev = false;
+  /** Local-only stepper drafts (amounts the player is adjusting before committing). */
+  private tradeAmt: { bricks: number; sticks: number } = { bricks: 10, sticks: 10 };
+  private traderQty = 1; // batches at the #8 / #29 trader squares
+  private cleanerQty = 1; // cleaners at the #14 half-price square
+  private duelStakeDraft: { kind: string; amount: number } = { kind: "dollars", amount: 5 };
+  /** Local-only Bailiff steal selection (so the "Take it" button can grey when the
+   *  chosen target lacks the chosen item). */
+  private stealSel: { target: string; item: string } = { target: "", item: "" };
+  /** Dedup key for the card-draw reveal toast (the most recent `drew "…"` line). */
+  private lastCardLine = "";
   /** Board square whose full explanation the info callout shows (tap to change);
    *  undefined = follow where you are. */
   private infoSquare?: number;
@@ -206,6 +217,8 @@ export class PerfectPalaceView implements GameView {
     this.diceLayer.className = "pp-dice-layer";
     document.body.appendChild(this.diceLayer);
     this.lastSeenRollSeq = this.room.state?.lastRollSeq ?? 0;
+    // Don't replay a card reveal for a draw that happened before we joined/resumed.
+    this.lastCardLine = [...(this.room.state?.log ?? [])].reverse().find((l) => l.includes('drew "')) ?? "";
     hookSaveData(this.room, PP_SAVES_KEY, (blob) => (blob?.turnCount ?? 0) + 1, () =>
       flashToast(this.root!, "Game saved ✓"),
     );
@@ -303,6 +316,7 @@ export class PerfectPalaceView implements GameView {
     const me = this.mySeat();
     if (!s || !me) return false;
     if (s.enginePhase === "game-over") return false;
+    if (s.enginePhase === "initial-roll") return me.initialRoll <= 0;
     if (s.enginePhase === "initial-mapping") return !me.mappingLocked;
     if (s.turnPhase === "duel") {
       return !!s.duel && [...s.duel.contenders].includes(me.engineId) && !this.hasRolled(me.engineId);
@@ -312,8 +326,9 @@ export class PerfectPalaceView implements GameView {
   private hasRolled(id: string): boolean {
     const d = this.room?.state.duel;
     if (!d) return false;
-    const i = [...d.rollPlayers].indexOf(id);
-    return i >= 0 && (d.rollValues[i] ?? 0) > 0;
+    // Roll VALUES are redacted (0) until the duel resolves; membership in
+    // rollPlayers is how we know someone has rolled.
+    return [...d.rollPlayers].includes(id);
   }
 
   private send(action: Record<string, unknown>): void {
@@ -337,6 +352,14 @@ export class PerfectPalaceView implements GameView {
       flashToast(this.root, "Your turn!");
     }
     this.iWasActing = acting;
+
+    // Card-draw reveal: when a new `drew "…"` line lands in the log, surface it as a
+    // toast (the deck draw is otherwise only a quiet log line).
+    const lastCard = [...s.log].reverse().find((l) => l.includes('drew "')) ?? "";
+    if (lastCard && lastCard !== this.lastCardLine) {
+      this.lastCardLine = lastCard;
+      flashToast(this.root, `🃏 ${lastCard}`);
+    }
 
     // A brand-new fine (rising edge of finePending while it's my decision) clears
     // any leftover forfeit selection from a previous fine so it can't pre-fill an
@@ -362,12 +385,14 @@ export class PerfectPalaceView implements GameView {
         </div>
       </div>
       <div class="pp-main">
-        <div class="pp-boardwrap">${pickInCenter ? this.renderMappingPicker() : this.renderBoard()}</div>
+        <div class="pp-left">
+          <div class="pp-boardwrap">${pickInCenter ? this.renderMappingPicker() : this.renderBoard()}</div>
+          <div class="pp-players">${this.renderPlayers()}</div>
+          <div class="pp-log">${this.renderLog()}</div>
+        </div>
         <div class="pp-side">
           <div class="pp-sqinfo">${this.renderSquareInfo()}</div>
           <div class="pp-action">${this.renderAction()}</div>
-          <div class="pp-players">${this.renderPlayers()}</div>
-          <div class="pp-log">${this.renderLog()}</div>
         </div>
       </div>
       ${this.showRules ? this.renderRulesModal() : ""}`;
@@ -404,7 +429,7 @@ export class PerfectPalaceView implements GameView {
             <p>Build a <b>Palace</b> first. When someone builds one, everyone gets the same number of turns, then the <b>most points</b> wins.</p>
 
             <h3>🎴 Your resource card</h3>
-            <p>You map die faces 1–6 to six rewards (5🪵, 5🧱, 10🧱, $5, $10, draw a card). Whenever <i>anyone</i> rolls, <i>every</i> player gains what their own card says for that number. Pass or land on Start for +$10 and a chance to swap one card slot.</p>
+            <p>You map die faces 1–6 to six rewards (5🪵, 5🧱, 10🧱, $5, $10, draw a card). Whenever <i>anyone</i> rolls, <i>every</i> player gains what their own card says for that number. Pass or land on Start for +$10 and a credit to swap one card slot — spend it from the <b>🎴 Your roll card</b> panel on your turn (it swaps two faces).</p>
 
             <h3>🎲 Your turn</h3>
             <p>If you hold the Bailiff you may steal first. <b>Roll</b> (everyone gains from their card), move, and trigger the square. Then <b>shop, trade, and build</b> as much as you like, and end your turn.</p>
@@ -419,7 +444,12 @@ export class PerfectPalaceView implements GameView {
             </ul>
 
             <h3>🛍 Shop (on your turn)</h3>
-            <p>🧱/🪵 $1 each · 👷 Worker $50 (makes resources each turn) · 🍽️ Server $15 · 👨‍🍳 Chef $30 · 🧹 Cleaner $20 (these need a Room) · 🛡️ Knight $75 (blocks the Bailiff) · 👑 Queen $300 (200 pts).</p>
+            <p>🧱/🪵 $1 each (in $5 bundles) · 👷 Worker $50 · 🍽️ Server $15 · 👨‍🍳 Chef $30 · 🧹 Cleaner $20 (these need a Room) · 🛡️ Knight $75 (blocks the Bailiff) · 👑 Queen $300 (200 pts).</p>
+            <p>👷 A <b>Worker</b> makes resources for you at the start of every turn — choose <b>+1 wall +1 roof</b> or <b>+2 walls</b> per worker. Collect <b>5 Cleaners</b> (with a Building) and they fuse into a <b>Whole-House Cleaner</b> that pays <b>$15 every turn</b>.</p>
+            <p>🏗 <b>Build from scratch</b>: once you have the cash, click <b>Build Room/Building/…</b> and it buys the missing bricks/sticks and assembles in one step (a Room from nothing is $25).</p>
+
+            <h3>🃏 The card deck</h3>
+            <p>Fortune-Teller squares (15 &amp; 23) and some effects make you <i>draw</i>. Cards give cash, bricks/sticks, or a free Room/Server/Chef/Cleaner/Building; others ally you with the Kingdom, hand you the Bailiff, or are a <b>Royal Pardon</b> you keep to escape the dungeon. A drawn card pops up and is noted in the log.</p>
 
             <h3>🎩 The Bailiff</h3>
             <p>Pick it up on squares 5, 13, 27 or by card. Once per turn, steal 1 wall, 1 roof, 5🧱, 5🪵, or $5 from any opponent who doesn't hold a Knight. Land in the dungeon and you lose it.</p>
@@ -443,6 +473,7 @@ export class PerfectPalaceView implements GameView {
   private phaseHeadline(): string {
     const s = this.room!.state;
     if (s.enginePhase === "game-over") return "Game over";
+    if (s.enginePhase === "initial-roll") return "Everyone: roll for turn order";
     if (s.enginePhase === "initial-mapping") return "Everyone: pick your resource card";
     const turnSeat = this.seatById(s.currentPlayerId);
     const who = turnSeat?.nickname ?? "…";
@@ -546,6 +577,8 @@ export class PerfectPalaceView implements GameView {
     if (!me) return `<div class="pp-act-wait">Spectating…</div>`;
     if (s.enginePhase === "game-over") return `<div class="pp-act-wait">The game is over.</div>`;
 
+    if (s.enginePhase === "initial-roll") return this.renderInitialRoll(me);
+
     if (s.enginePhase === "initial-mapping") {
       const locked = [...s.seats].filter((seat) => seat.mappingLocked).length;
       return me.mappingLocked
@@ -575,6 +608,24 @@ export class PerfectPalaceView implements GameView {
       default:
         return `<div class="pp-act-wait">…</div>`;
     }
+  }
+
+  /** The opening turn-order roll: everyone clicks to roll, highest goes first.
+   *  Rolls show as they land; a tie clears the tied players to roll again. */
+  private renderInitialRoll(me: PPSeat): string {
+    const s = this.room!.state;
+    const rolled = me.initialRoll > 0;
+    const seats = [...s.seats].filter((seat) => !seat.gone);
+    const order = seats
+      .map((seat) => `${escapeHtml(seat.nickname)}: ${seat.initialRoll > 0 ? `🎲 ${seat.initialRoll}` : "…"}`)
+      .join(" · ");
+    return `
+      <div class="pp-act-title">🎲 Roll for turn order</div>
+      <p class="pp-hint">Everyone rolls — highest goes first (ties roll again). ${rolled ? "Waiting for the others…" : "Tap to roll!"}</p>
+      ${rolled
+        ? `<div class="pp-act-wait">You rolled <strong>${me.initialRoll}</strong> — waiting for the rest.</div>`
+        : `<button class="pp-primary" data-action="initRoll">🎲 Roll the die</button>`}
+      <div class="pp-duel-rolls">${order}</div>`;
   }
 
   private renderMappingPicker(): string {
@@ -623,22 +674,44 @@ export class PerfectPalaceView implements GameView {
       <button class="pp-secondary" data-action="bailiffSkip" data-phase="${phase}">Skip</button>`;
   }
 
+  /** Does `seat` hold enough of `item` for a Bailiff steal to land? (mirrors the
+   *  engine's BAILIFF_STEAL_AMOUNTS thresholds). */
+  private stealHas(seat: PPSeat, item: string): boolean {
+    const inv = seat.inventory;
+    switch (item) {
+      case "bricks": return inv.bricks >= 5;
+      case "sticks": return inv.sticks >= 5;
+      case "wall": return inv.walls >= 1;
+      case "roof": return inv.roofs >= 1;
+      case "dollars": return inv.dollars >= 5;
+      default: return false;
+    }
+  }
+
   private renderStealControls(phase: "pre-roll" | "pre-move" | "post-roll"): string {
     const s = this.room!.state;
     const targets = [...s.seats].filter(
       (seat) => seat.engineId !== this.myId() && !seat.removed && !seat.inventory.knight,
     );
     if (targets.length === 0) return `<p class="pp-hint">No one to steal from right now.</p>`;
+    // Keep the local selection valid against the current targets/items.
+    if (!targets.some((t) => t.engineId === this.stealSel.target)) this.stealSel.target = targets[0]!.engineId;
+    if (!BAILIFF_ITEMS.includes(this.stealSel.item as any)) this.stealSel.item = BAILIFF_ITEMS[0];
     const targetOpts = targets
-      .map((t) => `<option value="${t.engineId}">${escapeHtml(t.nickname)}</option>`)
+      .map((t) => `<option value="${t.engineId}" ${t.engineId === this.stealSel.target ? "selected" : ""}>${escapeHtml(t.nickname)}</option>`)
       .join("");
-    const itemOpts = BAILIFF_ITEMS.map((it) => `<option value="${it}">${it}</option>`).join("");
+    const itemOpts = BAILIFF_ITEMS.map(
+      (it) => `<option value="${it}" ${it === this.stealSel.item ? "selected" : ""}>${it}</option>`,
+    ).join("");
+    const targetSeat = targets.find((t) => t.engineId === this.stealSel.target);
+    const canTake = !!targetSeat && this.stealHas(targetSeat, this.stealSel.item);
     return `
       <div class="pp-steal">
         <span class="pp-hint">Steal once this turn:</span>
         <select data-steal="target">${targetOpts}</select>
         <select data-steal="item">${itemOpts}</select>
-        <button class="pp-secondary" data-action="bailiffSteal" data-phase="${phase}">Take it 🎩</button>
+        <button class="pp-secondary" data-action="bailiffSteal" data-phase="${phase}" ${canTake ? "" : `disabled title="They don't have that to take."`}>Take it 🎩</button>
+        ${canTake ? "" : `<span class="pp-reason">Nothing of that to take</span>`}
       </div>`;
   }
 
@@ -676,11 +749,20 @@ export class PerfectPalaceView implements GameView {
     }
     const sq = getSquare(me.position);
     if (sq.effect.kind === "alliance-offer") {
+      // Already allied → the engine auto-grants the resources, no decision pauses;
+      // just offer Continue (showing Accept/Decline here would dead-click).
+      if (me.inventory.allied) {
+        return `<button class="pp-secondary" data-action="advance">Continue</button>`;
+      }
+      const cost = sq.effect.cost;
+      const afford = me.inventory.bricks >= cost.bricks && me.inventory.sticks >= cost.sticks;
+      const need = `Need ${cost.bricks}🧱 + ${cost.sticks}🪵`;
       return `
         <div class="pp-act-title">Alliance offered 🤝</div>
         <p class="pp-hint">${escapeHtml(sq.flavor ?? "")}</p>
-        <button class="pp-primary" data-action="alliance" data-choice="accept">Accept</button>
-        <button class="pp-secondary" data-action="alliance" data-choice="decline">Decline</button>`;
+        <button class="pp-primary" data-action="alliance" data-choice="accept" ${afford ? "" : `disabled title="${need}"`}>Accept</button>
+        <button class="pp-secondary" data-action="alliance" data-choice="decline">Decline</button>
+        ${afford ? "" : `<span class="pp-reason">${need}</span>`}`;
     }
     if (sq.effect.kind === "bricks-or-wall") {
       return `
@@ -721,6 +803,16 @@ export class PerfectPalaceView implements GameView {
     this.fineSel = { bricks, sticks, walls, roofs };
   }
 
+  /** Stake resource types, in preference order, with the engine's minimums/steps. */
+  private static DUEL_TYPES: ReadonlyArray<{ kind: string; field: keyof PPInv; emoji: string; min: number; step: number; unit: string }> = [
+    { kind: "dollars", field: "dollars", emoji: "💰", min: 5, step: 5, unit: "$" },
+    { kind: "bricks", field: "bricks", emoji: "🧱", min: 5, step: 5, unit: "bricks" },
+    { kind: "sticks", field: "sticks", emoji: "🪵", min: 5, step: 5, unit: "sticks" },
+    { kind: "wall", field: "walls", emoji: "🧱", min: 1, step: 1, unit: "wall" },
+    { kind: "roof", field: "roofs", emoji: "🏠", min: 1, step: 1, unit: "roof" },
+    { kind: "room", field: "rooms", emoji: "🚪", min: 1, step: 1, unit: "room" },
+  ];
+
   private renderDuel(): string {
     const s = this.room!.state;
     const d = s.duel;
@@ -732,30 +824,51 @@ export class PerfectPalaceView implements GameView {
       d.stake.dollars + d.stake.bricks + d.stake.sticks + d.stake.walls + d.stake.roofs + d.stake.rooms > 0;
     const names = [...d.contenders].map((id) => this.seatById(id)?.nickname ?? id).join(" vs ");
     let inner = `<div class="pp-act-title">⚔️ Duel: ${escapeHtml(names)}</div>`;
+
     if (!stakeSet) {
       if (arriver) {
-        inner += `<p class="pp-hint">You arrived — set the stake everyone matches:</p>
-          <div class="pp-stakes">
-            <button class="pp-secondary" data-action="duelStake" data-kind="dollars">💰 $5</button>
-            <button class="pp-secondary" data-action="duelStake" data-kind="bricks">🧱 5 bricks</button>
-            <button class="pp-secondary" data-action="duelStake" data-kind="sticks">🪵 5 sticks</button>
-            <button class="pp-secondary" data-action="duelStake" data-kind="wall">🧱 1 wall</button>
-            <button class="pp-secondary" data-action="duelStake" data-kind="roof">🏠 1 roof</button>
+        // Max stake everyone can match, per resource type (the engine rejects a
+        // stake any participant can't cover).
+        const invs = [...d.participants].map((id) => this.seatById(id)?.inventory).filter(Boolean) as PPInv[];
+        const minAll = (f: keyof PPInv) => Math.min(...invs.map((inv) => Number(inv[f])));
+        const types = PerfectPalaceView.DUEL_TYPES.map((t) => ({ ...t, max: minAll(t.field) })).filter(
+          (t) => t.max >= t.min,
+        );
+        if (types.length === 0) {
+          inner += `<p class="pp-hint">Nobody here can cover even the smallest stake.</p>
+            <button class="pp-secondary" data-action="duelCancel">Skip duel — no stake</button>`;
+          return inner;
+        }
+        // Keep the draft valid against what's affordable.
+        let sel = types.find((t) => t.kind === this.duelStakeDraft.kind);
+        if (!sel) { sel = types[0]!; this.duelStakeDraft = { kind: sel.kind, amount: sel.min }; }
+        const amount = Math.max(sel.min, Math.min(sel.max, this.duelStakeDraft.amount));
+        this.duelStakeDraft.amount = amount;
+        const chips = types
+          .map((t) => `<button class="pp-chip${t.kind === sel!.kind ? " pp-chip-on" : ""}" data-action="duelKind" data-kind="${t.kind}">${t.emoji} ${t.unit}</button>`)
+          .join("");
+        inner += `<p class="pp-hint">You arrived — set the stake everyone matches (highest roll takes the pot):</p>
+          <div class="pp-duel-types">${chips}</div>
+          <div class="pp-duel-stakebar">
+            ${this.stepper("duel", amount)}
+            <span class="pp-sub">${sel.emoji} ${sel.unit} · max ${sel.max}</span>
+            <button class="pp-primary" data-action="duelStake">Set stake</button>
           </div>`;
       } else {
         inner += `<p class="pp-hint">Waiting for the stake…</p>`;
       }
     } else if (contender && !this.hasRolled(me.engineId)) {
-      inner += `<p class="pp-hint">Stakes are in. Roll for the pot!</p>
+      inner += `<p class="pp-hint">Stakes are in. Roll for the pot — no one sees the rolls until everyone has rolled.</p>
         <button class="pp-primary" data-action="duelRoll">🎲 Roll</button>`;
     } else {
       inner += `<p class="pp-hint">Waiting for the other duelists to roll…</p>`;
     }
-    // show rolls so far
-    const rolls = [...d.rollPlayers]
-      .map((id, i) => `${escapeHtml(this.seatById(id)?.nickname ?? id)}: ${d.rollValues[i] ?? "—"}`)
+
+    // Who has rolled — values stay hidden until the duel resolves (revealed in the log).
+    const status = [...d.contenders]
+      .map((id) => `${escapeHtml(this.seatById(id)?.nickname ?? id)}: ${this.hasRolled(id) ? "✓ rolled" : "…"}`)
       .join(" · ");
-    if (rolls) inner += `<div class="pp-duel-rolls">${rolls}</div>`;
+    if (stakeSet) inner += `<div class="pp-duel-rolls">${status}</div>`;
     return inner;
   }
 
@@ -777,27 +890,29 @@ export class PerfectPalaceView implements GameView {
       `<button class="pp-qty-btn" data-action="${action}" data-item="${item}" ${dataAttr} ${disabled ? "disabled" : ""}${reason ? ` title="${escapeHtml(reason)}"` : ""}>${label}${cost ? `<span class="pp-price">${cost}</span>` : ""}</button>`;
 
     // Bricks & sticks: sold ONLY in $5 bundles of 5 (PRICE is $1 each). No $1 UI.
-    const bundleRow = (item: "brick" | "stick", emoji: string, name: string) => {
+    // The middle "+20" is a build-relevant recommendation (a room's 4 walls / 4 roofs).
+    const bundleRow = (item: "brick" | "stick", emoji: string, name: string, hint: string) => {
       const max5 = Math.floor(D / 5) * 5; // largest affordable whole-5 bundle
       const btns =
         qtyBtn("buy", item, `data-qty="5"`, "+5", "$5", D < 5) +
-        (D >= 25 ? qtyBtn("buy", item, `data-qty="25"`, "+25", "$25", false) : "") +
-        (max5 >= 5 ? qtyBtn("buy", item, `data-qty="${max5}"`, `Max +${max5}`, `$${max5}`, false) : "");
+        (D >= 20 ? qtyBtn("buy", item, `data-qty="20"`, "+20", "$20", false) : "") +
+        (max5 > 20 ? qtyBtn("buy", item, `data-qty="${max5}"`, `Max`, `$${max5}`, false) : "");
       return `<div class="pp-shop-row${D < 5 ? " pp-cant" : ""}">
-        <span class="pp-shop-name">${emoji} ${name} <span class="pp-sub">5 for $5</span></span>
+        <span class="pp-shop-name">${emoji} ${name} <span class="pp-sub">${hint}</span></span>
         <span class="pp-shop-actions">${btns}${D < 5 ? `<span class="pp-reason">Need $5</span>` : ""}</span>
       </div>`;
     };
 
-    // Staff & specials: single buy; stackable staff also get a ×5.
-    const buyRow = (item: string, emoji: string, name: string, stackable: boolean) => {
+    // Staff & specials: single buy; stackable staff also get a ×5. `desc` says what
+    // the staffer does (so the shop is self-explaining).
+    const buyRow = (item: string, emoji: string, name: string, desc: string, stackable: boolean) => {
       const { ok, reason } = ppCanBuy(inv, item);
       const price = PRICE[item as keyof typeof PRICE];
       const x5 = stackable && D >= price * 5
         ? qtyBtn("buy", item, `data-qty="5"`, "×5", `$${price * 5}`, false)
         : "";
       return `<div class="pp-shop-row${ok ? "" : " pp-cant"}">
-        <span class="pp-shop-name">${emoji} ${name}</span>
+        <span class="pp-shop-name">${emoji} ${name} <span class="pp-sub">${desc}</span></span>
         <span class="pp-shop-actions">
           ${qtyBtn("buy", item, `data-qty="1"`, "Buy", `$${price}`, !ok, reason)}
           ${x5}
@@ -806,13 +921,12 @@ export class PerfectPalaceView implements GameView {
       </div>`;
     };
 
-    // Build: single build; high-volume items (wall/roof/room) get a "Max ×N".
-    const buildRow = (item: string, emoji: string, name: string, recipe: string) => {
+    // Build a Wall/Roof from owned bricks/sticks (players stockpile these). Higher
+    // tiers use the one-click "from scratch" button below instead.
+    const rawBuildRow = (item: string, emoji: string, name: string, recipe: string) => {
       const { ok, reason } = ppCanBuild(inv, item);
       const max = ppBuildMax(inv, item);
-      const maxBtn = ok && max >= 2
-        ? qtyBtn("build", item, `data-count="${max}"`, `Max ×${max}`, "", false)
-        : "";
+      const maxBtn = ok && max >= 2 ? qtyBtn("build", item, `data-count="${max}"`, `Max ×${max}`, "", false) : "";
       return `<div class="pp-shop-row${ok ? "" : " pp-cant"}">
         <span class="pp-shop-name">${emoji} ${name} <span class="pp-sub">${recipe}</span></span>
         <span class="pp-shop-actions">
@@ -823,54 +937,142 @@ export class PerfectPalaceView implements GameView {
       </div>`;
     };
 
+    // One-click "build from scratch": uses owned parts first, buys the missing
+    // bricks/sticks with cash, assembles in one go. Cost shown is the marginal cash
+    // (often $0 when you already own the parts).
+    const scratchRow = (item: string, emoji: string, name: string, recipe: string) => {
+      const r = quickBuildCost(inv as any, item as any, 1);
+      const affordable = r.ok && inv.dollars >= r.dollars;
+      const reason = !r.ok ? r.reason ?? "" : `Need $${r.dollars} (have $${D}).`;
+      const cost = r.ok ? (r.dollars === 0 ? "free" : `$${r.dollars}`) : "";
+      return `<div class="pp-shop-row${affordable ? "" : " pp-cant"}">
+        <span class="pp-shop-name">${emoji} ${name} <span class="pp-sub">${recipe}</span></span>
+        <span class="pp-shop-actions">
+          <button class="pp-qty-btn" data-action="buildScratch" data-item="${item}" ${affordable ? "" : "disabled"}${affordable ? "" : ` title="${escapeHtml(reason)}"`}>Build${cost ? `<span class="pp-price">${cost}</span>` : ""}</button>
+          ${affordable ? "" : `<span class="pp-reason">${escapeHtml(reason)}</span>`}
+        </span>
+      </div>`;
+    };
+
+    // Brick↔stick trade (2:1, in 10s) with a +/- stepper.
+    const tradeRow = (from: "bricks" | "sticks", emoji: string, toEmoji: string) => {
+      const have = inv[from];
+      const amt = this.tradeAmt[from];
+      const can = have >= amt && amt >= 10;
+      return `<div class="pp-shop-row${can ? "" : " pp-cant"}">
+        <span class="pp-shop-name">${emoji} → ${toEmoji} <span class="pp-sub">2 : 1 · in 10s · have ${have}</span></span>
+        <span class="pp-shop-actions">
+          ${this.stepper(`trade-${from}`, amt)}
+          <button class="pp-qty-btn" data-action="trade" data-from="${from}" ${can ? "" : "disabled"}>Trade<span class="pp-price">→ ${Math.floor(amt / 2)}</span></button>
+        </span>
+      </div>`;
+    };
+
+    // Discount-while-here squares (#8/#29 trader, #14 cleaner): one purchase per
+    // landing (the engine sets traderUsedThisTurn). Stepper picks the amount.
+    const used = this.room!.state.traderUsedThisTurn;
     let trader = "";
     if (sq.effect.kind === "trader-walls") {
-      trader = `<button class="pp-secondary" data-action="traderWalls" ${inv.dollars < 10 ? "disabled" : ""}>🛒 Trader: $10 → 3 🧱 walls</button>`;
+      const q = this.traderQty, cost = q * 10, walls = q * 3;
+      trader = used
+        ? `<div class="pp-trader-used">✓ Already traded here this turn.</div>`
+        : `<div class="pp-shop-row"><span class="pp-shop-name">🛒 Trader <span class="pp-sub">$10 → 3 walls each</span></span>
+            <span class="pp-shop-actions">${this.stepper("trader", q)}
+              <button class="pp-qty-btn" data-action="traderWalls" ${inv.dollars < cost ? "disabled" : ""}>Buy ${walls} 🧱<span class="pp-price">$${cost}</span></button></span></div>`;
     } else if (sq.effect.kind === "trader-bricks") {
-      trader = `<button class="pp-secondary" data-action="traderBricks" ${inv.bricks < 10 ? "disabled" : ""}>🛒 Trader: 10 🧱 → $15</button>`;
+      const q = this.traderQty, bricks = q * 10, cash = q * 15;
+      trader = used
+        ? `<div class="pp-trader-used">✓ Already traded here this turn.</div>`
+        : `<div class="pp-shop-row"><span class="pp-shop-name">🛒 Trader <span class="pp-sub">10 bricks → $15 each</span></span>
+            <span class="pp-shop-actions">${this.stepper("trader", q)}
+              <button class="pp-qty-btn" data-action="traderBricks" ${inv.bricks < bricks ? "disabled" : ""}>Sell ${bricks} 🧱<span class="pp-price">$${cash}</span></button></span></div>`;
     } else if (sq.effect.kind === "half-price-cleaner") {
-      trader = `<button class="pp-secondary" data-action="halfCleaner" ${inv.dollars < 10 ? "disabled" : ""}>🧹 Cleaner (half price): $10</button>`;
+      const q = this.cleanerQty, cost = q * 10;
+      trader = used
+        ? `<div class="pp-trader-used">✓ Already bought here this turn.</div>`
+        : `<div class="pp-shop-row"><span class="pp-shop-name">🧹 Cleaner (half price) <span class="pp-sub">$10 each · no Room needed</span></span>
+            <span class="pp-shop-actions">${this.stepper("cleaner", q)}
+              <button class="pp-qty-btn" data-action="halfCleaner" ${inv.dollars < cost ? "disabled" : ""}>Buy ${q} 🧹<span class="pp-price">$${cost}</span></button></span></div>`;
     }
 
     const youHave = `<div class="pp-have">💰 <strong>$${inv.dollars}</strong> · 🧱 ${inv.bricks} · 🪵 ${inv.sticks} · 🧱${inv.walls}w · 🏠${inv.roofs}r · 🚪${inv.rooms} · 🏢${inv.buildings} · 🏯${inv.threeStoryBuildings}</div>`;
 
     return `
-      <div class="pp-act-title">Shop · Build · Trade</div>
-      ${youHave}
+      <div class="pp-action-head">
+        <div class="pp-act-title">Shop · Build · Trade</div>
+        ${youHave}
+      </div>
       <div class="pp-shop-group">
         <div class="pp-group-h">🛍 Shop</div>
-        ${bundleRow("brick", "🧱", "Bricks")}
-        ${bundleRow("stick", "🪵", "Sticks")}
-        ${buyRow("worker", "👷", "Worker", false)}
-        ${buyRow("server", "🍽️", "Server", true)}
-        ${buyRow("chef", "👨‍🍳", "Chef", true)}
-        ${buyRow("cleaner", "🧹", "Cleaner", true)}
-        ${buyRow("knight", "🛡️", "Knight", false)}
-        ${buyRow("queen", "👑", "Queen", false)}
+        ${bundleRow("brick", "🧱", "Bricks", "5/$5 · +20 = 4 walls")}
+        ${bundleRow("stick", "🪵", "Sticks", "5/$5 · +20 = 4 roofs")}
+        ${buyRow("worker", "👷", "Worker", "earns walls/roofs each turn", false)}
+        ${buyRow("server", "🍽️", "Server", "+5 pts · unlocks Buildings", true)}
+        ${buyRow("chef", "👨‍🍳", "Chef", "+10 pts · needed for 3-Story", true)}
+        ${buyRow("cleaner", "🧹", "Cleaner", "+5 pts · 5 → Whole-House Cleaner", true)}
+        ${buyRow("knight", "🛡️", "Knight", "blocks the Bailiff", false)}
+        ${buyRow("queen", "👑", "Queen", "+200 pts", false)}
         ${trader ? `<div class="pp-trader">${trader}</div>` : ""}
       </div>
       <div class="pp-shop-group">
         <div class="pp-group-h">🏗 Build</div>
-        ${buildRow("wall", "🧱", "Wall", `${RECIPE.wall.bricks} bricks`)}
-        ${buildRow("roof", "🏠", "Roof", `${RECIPE.roof.sticks} sticks`)}
-        ${buildRow("room", "🚪", "Room", `${RECIPE.room.walls} walls + ${RECIPE.room.roofs} roof`)}
-        ${buildRow("building", "🏢", "Building", `${RECIPE.building.rooms} rooms + 1 staff`)}
-        ${buildRow("threeStoryBuilding", "🏯", "3-Story", `${RECIPE.threeStoryBuilding.buildings} buildings + staff`)}
-        ${buildRow("palace", "🏰", "Palace", `${RECIPE.palace.threeStoryBuildings} 3-Story`)}
+        ${rawBuildRow("wall", "🧱", "Wall", `${RECIPE.wall.bricks} bricks`)}
+        ${rawBuildRow("roof", "🏠", "Roof", `${RECIPE.roof.sticks} sticks`)}
+        ${scratchRow("room", "🚪", "Room", `${RECIPE.room.walls} walls + ${RECIPE.room.roofs} roof`)}
+        ${scratchRow("building", "🏢", "Building", `${RECIPE.building.rooms} rooms + 1 staff`)}
+        ${scratchRow("threeStoryBuilding", "🏯", "3-Story", `${RECIPE.threeStoryBuilding.buildings} buildings + staff`)}
+        ${scratchRow("palace", "🏰", "Palace", `${RECIPE.palace.threeStoryBuildings} 3-Story`)}
       </div>
       <div class="pp-shop-group">
         <div class="pp-group-h">🔄 Trade</div>
-        <div class="pp-trade">
-          <button class="pp-secondary" data-action="trade" data-from="bricks" ${inv.bricks < 10 ? "disabled" : ""}>10 🧱 → 5 🪵</button>
-          <button class="pp-secondary" data-action="trade" data-from="sticks" ${inv.sticks < 10 ? "disabled" : ""}>10 🪵 → 5 🧱</button>
-        </div>
+        ${tradeRow("bricks", "🧱", "🪵")}
+        ${tradeRow("sticks", "🪵", "🧱")}
       </div>
+      ${this.renderCardEditor(me)}
       <div class="pp-worker">
         Worker output:
-        <button class="pp-chip${me.workerPreference === "wall-roof" ? " pp-chip-on" : ""}" data-action="workerPref" data-pref="wall-roof">wall+roof</button>
-        <button class="pp-chip${me.workerPreference === "wall-wall" ? " pp-chip-on" : ""}" data-action="workerPref" data-pref="wall-wall">wall+wall</button>
+        <button class="pp-chip${me.workerPreference === "wall-roof" ? " pp-chip-on" : ""}" data-action="workerPref" data-pref="wall-roof">+1 wall +1 roof / turn</button>
+        <button class="pp-chip${me.workerPreference === "wall-wall" ? " pp-chip-on" : ""}" data-action="workerPref" data-pref="wall-wall">+2 walls / turn</button>
       </div>
       <button class="pp-primary pp-endturn" data-action="endTurn">End turn ▶</button>`;
+  }
+
+  /** A small −/[n]/+ stepper. `id` keys which draft the +/- buttons adjust. */
+  private stepper(id: string, value: number): string {
+    return `<span class="pp-stepper">
+      <button class="pp-step" data-action="stepAdj" data-stepper="${id}" data-dir="-">−</button>
+      <span class="pp-step-n">${value}</span>
+      <button class="pp-step" data-action="stepAdj" data-stepper="${id}" data-dir="+">+</button>
+    </span>`;
+  }
+
+  /** Your resource card, always visible during your turn; editable (one swap per
+   *  earned credit) when you've passed Start. */
+  private renderCardEditor(me: PPSeat): string {
+    const slots = [...me.resourceCard];
+    if (slots.length === 0) return "";
+    const credits = me.mappingChangesAvailable;
+    const editable = credits > 0;
+    const optIndexOf = (slot: { kind: string; amount: number }) =>
+      RESOURCE_OPTIONS.findIndex((o) => o.kind === slot.kind && (o.kind === "draw-card" || o.amount === slot.amount));
+    const rows = slots
+      .map((slot, i) => {
+        const cur = optIndexOf(slot);
+        if (editable) {
+          const opts = RESOURCE_OPTIONS.map(
+            (o, oi) => `<option value="${oi}" ${oi === cur ? "selected" : ""}>${escapeHtml(outcomeLabel(o))}</option>`,
+          ).join("");
+          return `<div class="pp-map-slot"><span class="pp-die">${i + 1}</span><span class="pp-map-arrow">→</span><select data-edit-slot="${i}">${opts}</select></div>`;
+        }
+        const label = cur >= 0 ? outcomeLabel(RESOURCE_OPTIONS[cur]!) : "—";
+        return `<span class="pp-card-chip"><b>${i + 1}</b> ${escapeHtml(label)}</span>`;
+      })
+      .join("");
+    return `<div class="pp-shop-group pp-cardedit">
+      <div class="pp-group-h">🎴 Your roll card${editable ? ` · ✏️ ${credits} change${credits > 1 ? "s" : ""}` : ""}</div>
+      ${editable ? `<p class="pp-hint">Pick a die face's new reward — it swaps with whichever face has it now. Costs 1 change.</p>` : `<div class="pp-card-chips">${rows}</div>`}
+      ${editable ? `<div class="pp-map-grid pp-cardedit-grid">${rows}</div>` : ""}
+    </div>`;
   }
 
   // ---- events --------------------------------------------------------------
@@ -882,6 +1084,21 @@ export class PerfectPalaceView implements GameView {
       const slot = Number(slotAttr);
       const option = Number((el as HTMLSelectElement).value);
       this.setMappingSlot(slot, option);
+      this.render();
+      return;
+    }
+    // Mid-game roll-card edit: send a one-slot change (the engine swaps to keep the
+    // 1-to-1 mapping and spends a lap credit).
+    const editAttr = el.getAttribute("data-edit-slot");
+    if (editAttr !== null) {
+      this.send({ type: "mapping/changeOneSlot", slotIndex: Number(editAttr), option: Number((el as HTMLSelectElement).value) });
+      return;
+    }
+    // Bailiff steal target/item — keep the local selection so the "Take it" button
+    // can grey when the target lacks the item.
+    const stealAttr = el.getAttribute("data-steal");
+    if (stealAttr === "target" || stealAttr === "item") {
+      this.stealSel[stealAttr] = (el as HTMLSelectElement).value;
       this.render();
     }
   }
@@ -940,13 +1157,16 @@ export class PerfectPalaceView implements GameView {
       case "roll":
         this.send({ type: "turn/rollDie" });
         return;
+      case "initRoll":
+        this.send({ type: "initialRoll/roll" });
+        return;
       case "redeemPardon":
         this.send({ type: "dungeon/redeemPardon" });
         return;
       case "bailiffSteal": {
         const phase = btn.dataset.phase;
-        const target = this.root!.querySelector<HTMLSelectElement>('[data-steal="target"]')?.value;
-        const item = this.root!.querySelector<HTMLSelectElement>('[data-steal="item"]')?.value;
+        const target = this.stealSel.target;
+        const item = this.stealSel.item;
         if (!target || !item) return;
         const type =
           phase === "pre-move" ? "turn/bailiffStealPreMove" : phase === "post-roll" ? "turn/bailiffStealPostRoll" : "turn/bailiffStealPreRoll";
@@ -972,8 +1192,17 @@ export class PerfectPalaceView implements GameView {
         this.send({ type: "turn/payFine", ...this.fineSel });
         this.fineSel = { bricks: 0, sticks: 0, walls: 0, roofs: 0 };
         return;
+      case "duelKind": {
+        const t = PerfectPalaceView.DUEL_TYPES.find((x) => x.kind === btn.dataset.kind);
+        if (t) this.duelStakeDraft = { kind: t.kind, amount: t.min };
+        this.render();
+        return;
+      }
       case "duelStake":
-        this.send({ type: "turn/duelSetStake", stake: this.stakeFor(btn.dataset.kind!) });
+        this.send({ type: "turn/duelSetStake", stake: this.stakeFor(this.duelStakeDraft.kind, this.duelStakeDraft.amount) });
+        return;
+      case "duelCancel":
+        this.send({ type: "turn/duelCancel" });
         return;
       case "duelRoll":
         this.send({ type: "turn/duelRollForPlayer" });
@@ -988,17 +1217,25 @@ export class PerfectPalaceView implements GameView {
         this.send({ type: "turn/build", item: btn.dataset.item, count });
         return;
       }
-      case "trade":
-        this.send({ type: "turn/trade", from: btn.dataset.from, amount: 10 });
+      case "buildScratch":
+        this.send({ type: "turn/buildFromScratch", item: btn.dataset.item, count: 1 });
         return;
+      case "trade": {
+        const from = btn.dataset.from as "bricks" | "sticks";
+        this.send({ type: "turn/trade", from, amount: this.tradeAmt[from] });
+        return;
+      }
       case "traderWalls":
-        this.send({ type: "turn/traderWallsBuy", batches: 1 });
+        this.send({ type: "turn/traderWallsBuy", batches: this.traderQty });
         return;
       case "traderBricks":
-        this.send({ type: "turn/traderBricksSell", batches: 1 });
+        this.send({ type: "turn/traderBricksSell", batches: this.traderQty });
         return;
       case "halfCleaner":
-        this.send({ type: "turn/halfPriceCleanerBuy", count: 1 });
+        this.send({ type: "turn/halfPriceCleanerBuy", count: this.cleanerQty });
+        return;
+      case "stepAdj":
+        this.adjustStepper(btn.dataset.stepper!, btn.dataset.dir === "+" ? 1 : -1);
         return;
       case "workerPref":
         this.send({ type: "turn/setWorkerPreference", preference: btn.dataset.pref });
@@ -1030,16 +1267,49 @@ export class PerfectPalaceView implements GameView {
     }
   }
 
-  private stakeFor(kind: string): Record<string, number> {
+  private stakeFor(kind: string, amount: number): Record<string, number> {
     const base = { dollars: 0, bricks: 0, sticks: 0, walls: 0, roofs: 0, rooms: 0 };
     switch (kind) {
-      case "dollars": return { ...base, dollars: 5 };
-      case "bricks": return { ...base, bricks: 5 };
-      case "sticks": return { ...base, sticks: 5 };
-      case "wall": return { ...base, walls: 1 };
-      case "roof": return { ...base, roofs: 1 };
-      default: return { ...base, dollars: 5 };
+      case "dollars": return { ...base, dollars: amount };
+      case "bricks": return { ...base, bricks: amount };
+      case "sticks": return { ...base, sticks: amount };
+      case "wall": return { ...base, walls: amount };
+      case "roof": return { ...base, roofs: amount };
+      case "room": return { ...base, rooms: amount };
+      default: return { ...base, dollars: amount };
     }
+  }
+
+  /** Adjust a stepper draft by ±step, clamped to a sensible, engine-affordable range,
+   *  then re-render. */
+  private adjustStepper(id: string, dir: number): void {
+    const me = this.mySeat();
+    if (!me) return;
+    const inv = me.inventory;
+    if (id === "trade-bricks" || id === "trade-sticks") {
+      const from = id === "trade-bricks" ? "bricks" : "sticks";
+      const max = Math.max(10, Math.floor(inv[from] / 10) * 10);
+      this.tradeAmt[from] = Math.max(10, Math.min(max, this.tradeAmt[from] + dir * 10));
+    } else if (id === "trader") {
+      const eff = getSquare(me.position).effect;
+      const max =
+        eff.kind === "trader-walls" ? Math.max(1, Math.floor(inv.dollars / 10))
+        : eff.kind === "trader-bricks" ? Math.max(1, Math.floor(inv.bricks / 10))
+        : 1;
+      this.traderQty = Math.max(1, Math.min(max, this.traderQty + dir));
+    } else if (id === "cleaner") {
+      const max = Math.max(1, Math.floor(inv.dollars / 10));
+      this.cleanerQty = Math.max(1, Math.min(max, this.cleanerQty + dir));
+    } else if (id === "duel") {
+      const d = this.room!.state.duel;
+      const t = PerfectPalaceView.DUEL_TYPES.find((x) => x.kind === this.duelStakeDraft.kind);
+      if (d && t) {
+        const invs = [...d.participants].map((pid) => this.seatById(pid)?.inventory).filter(Boolean) as PPInv[];
+        const max = Math.min(...invs.map((i) => Number(i[t.field])));
+        this.duelStakeDraft.amount = Math.max(t.min, Math.min(max, this.duelStakeDraft.amount + dir * t.step));
+      }
+    }
+    this.render();
   }
 }
 

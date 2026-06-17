@@ -70,6 +70,10 @@ export function sanitizeAction(payload: unknown, senderId: string): GameAction |
       return { type: "mapping/changeOneSlot", id: senderId, slotIndex: p.slotIndex, option: p.option };
     }
 
+    // ---- opening turn-order roll (no client value; the room injects it) ----
+    case "initialRoll/roll":
+      return { type: "initialRoll/roll" };
+
     // ---- rolling (no client value; the room/engine roll the die) ----
     case "turn/rollDie":
       return { type: "turn/rollDie" };
@@ -110,6 +114,9 @@ export function sanitizeAction(payload: unknown, senderId: string): GameAction |
     case "turn/duelRollForPlayer":
       // Own roll only; value is injected by the room from the seeded PRNG.
       return { type: "turn/duelRollForPlayer", id: senderId, value: 0 };
+    case "turn/duelCancel":
+      // No-contest: only the arriver, only before stakes are set (engine re-checks).
+      return { type: "turn/duelCancel" };
 
     // ---- fine payment ----
     case "turn/payFine": {
@@ -138,6 +145,11 @@ export function sanitizeAction(payload: unknown, senderId: string): GameAction |
       if (!inEnum<BuildItem>(p.item, BUILD_ITEMS)) return null;
       if (!isNonNegInt(p.count)) return null;
       return { type: "turn/build", item: p.item, count: p.count };
+    }
+    case "turn/buildFromScratch": {
+      if (!inEnum<BuildItem>(p.item, BUILD_ITEMS)) return null;
+      if (!isNonNegInt(p.count)) return null;
+      return { type: "turn/buildFromScratch", item: p.item, count: p.count };
     }
     case "turn/setWorkerPreference":
       return inEnum(p.preference, ["wall-roof", "wall-wall"] as const)

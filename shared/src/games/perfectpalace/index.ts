@@ -150,6 +150,9 @@ export class PPSeat extends Schema {
   @type("uint8") mappingChangesAvailable = 0;
   /** "wall-roof" | "wall-wall" — how the Worker spends its output. */
   @type("string") workerPreference = "wall-roof";
+  /** Opening turn-order roll (1-6), or 0 if not yet rolled / already finalized.
+   *  Only meaningful while enginePhase === 'initial-roll'. */
+  @type("uint8") initialRoll = 0;
   /** Left for good (same as removed; kept for the view/save lineup). */
   @type("boolean") gone = false;
 }
