@@ -207,6 +207,11 @@ export class PerfectPalaceView implements GameView {
   private traderQty = 1; // batches at the #8 / #29 trader squares
   private cleanerQty = 1; // cleaners at the #14 half-price square
   private duelStakeDraft: { kind: string; amount: number } = { kind: "dollars", amount: 5 };
+  /** Per-row buy/build quantities (the +/- steppers). Keyed by item; clamped on
+   *  every adjust + on render so a stale draft never exceeds what's affordable. */
+  private buyQty: Record<string, number> = { brick: 5, stick: 5, worker: 1, server: 1, chef: 1, cleaner: 1 };
+  private buildQty: Record<string, number> = { wall: 1, roof: 1 }; // turn/build
+  private scratchQty: Record<string, number> = { room: 1, building: 1, threeStoryBuilding: 1, palace: 1 }; // turn/buildFromScratch
   /** Local-only Bailiff steal selection (so the "Take it" button can grey when the
    *  chosen target lacks the chosen item). */
   private stealSel: { target: string; item: string } = { target: "", item: "" };
@@ -439,8 +444,10 @@ export class PerfectPalaceView implements GameView {
       <div class="pp-main">
         <div class="pp-left">
           <div class="pp-boardwrap">${pickInCenter ? this.renderMappingPicker() : this.renderBoard()}</div>
-          <div class="pp-players">${this.renderPlayers()}</div>
-          <div class="pp-log">${this.renderLog()}</div>
+          <div class="pp-underboard">
+            <div class="pp-players">${this.renderPlayers()}</div>
+            <div class="pp-log">${this.renderLog()}</div>
+          </div>
         </div>
         <div class="pp-side">
           <div class="pp-sqinfo">${this.renderSquareInfo()}</div>
@@ -976,48 +983,70 @@ export class PerfectPalaceView implements GameView {
     ) =>
       `<button class="pp-qty-btn" data-action="${action}" data-item="${item}" ${dataAttr} ${disabled ? "disabled" : ""}${reason ? ` title="${escapeHtml(reason)}"` : ""}>${label}${cost ? `<span class="pp-price">${cost}</span>` : ""}</button>`;
 
-    // Bricks & sticks: sold ONLY in $5 bundles of 5 (PRICE is $1 each). No $1 UI.
-    // The middle "+20" is a build-relevant recommendation (a room's 4 walls / 4 roofs).
-    const bundleRow = (item: "brick" | "stick", emoji: string, name: string, hint: string) => {
+    // Bricks & sticks: sold ONLY in $5 bundles of 5 (PRICE is $1 each). A +/- stepper
+    // picks the amount (in 5s); "Max" jumps to the largest affordable whole-5 bundle.
+    const buyStepRow = (item: "brick" | "stick", emoji: string, name: string, hint: string) => {
+      const qty = this.buyQty[item]!; // a multiple of 5
+      const cost = qty * PRICE[item]; // $1 each
       const max5 = Math.floor(D / 5) * 5; // largest affordable whole-5 bundle
-      const btns =
-        qtyBtn("buy", item, `data-qty="5"`, "+5", "$5", D < 5) +
-        (D >= 20 ? qtyBtn("buy", item, `data-qty="20"`, "+20", "$20", false) : "") +
-        (max5 > 20 ? qtyBtn("buy", item, `data-qty="${max5}"`, `Max`, `$${max5}`, false) : "");
+      const can = D >= cost && qty >= 5;
+      const maxBtn = max5 > qty ? qtyBtn("buy", item, `data-qty="${max5}"`, "Max", `$${max5}`, false) : "";
       return `<div class="pp-shop-row${D < 5 ? " pp-cant" : ""}">
         <span class="pp-shop-name">${emoji} ${name} <span class="pp-sub">${hint}</span></span>
-        <span class="pp-shop-actions">${btns}${D < 5 ? `<span class="pp-reason">Need $5</span>` : ""}</span>
+        <span class="pp-shop-actions">
+          ${this.stepper(`buy-${item}`, qty)}
+          ${qtyBtn("buy", item, `data-qty="${qty}"`, `+${qty}`, `$${cost}`, !can)}
+          ${maxBtn}
+          ${D < 5 ? `<span class="pp-reason">Need $5</span>` : ""}
+        </span>
       </div>`;
     };
 
-    // Staff & specials: single buy; stackable staff also get a ×5. `desc` says what
-    // the staffer does (so the shop is self-explaining).
-    const buyRow = (item: string, emoji: string, name: string, desc: string, stackable: boolean) => {
+    // Staff (worker/server/chef/cleaner): a +/- stepper (step 1) buys several in one
+    // click. The engine's buy loop stops when cash or the Room prereq runs out, so an
+    // optimistic qty is a safe no-op past the limit. `desc` says what the staffer does.
+    const staffStepRow = (item: string, emoji: string, name: string, desc: string) => {
       const { ok, reason } = ppCanBuy(inv, item);
       const price = PRICE[item as keyof typeof PRICE];
-      const x5 = stackable && D >= price * 5
-        ? qtyBtn("buy", item, `data-qty="5"`, "×5", `$${price * 5}`, false)
-        : "";
+      const qty = this.buyQty[item]!;
+      const cost = qty * price;
+      const can = ok && D >= cost;
       return `<div class="pp-shop-row${ok ? "" : " pp-cant"}">
         <span class="pp-shop-name">${emoji} ${name} <span class="pp-sub">${desc}</span></span>
         <span class="pp-shop-actions">
-          ${qtyBtn("buy", item, `data-qty="1"`, "Buy", `$${price}`, !ok, reason)}
-          ${x5}
+          ${this.stepper(`buy-${item}`, qty)}
+          ${qtyBtn("buy", item, `data-qty="${qty}"`, `Buy ${qty}`, `$${cost}`, !can, reason)}
           ${ok ? "" : `<span class="pp-reason">${escapeHtml(reason)}</span>`}
         </span>
       </div>`;
     };
 
-    // Build a Wall/Roof from owned bricks/sticks (players stockpile these). Higher
-    // tiers use the one-click "from scratch" button below instead.
-    const rawBuildRow = (item: string, emoji: string, name: string, recipe: string) => {
+    // Knight & Queen: one-per-player specials (booleans) — a single Buy, no stepper.
+    const buyRow = (item: string, emoji: string, name: string, desc: string) => {
+      const { ok, reason } = ppCanBuy(inv, item);
+      const price = PRICE[item as keyof typeof PRICE];
+      return `<div class="pp-shop-row${ok ? "" : " pp-cant"}">
+        <span class="pp-shop-name">${emoji} ${name} <span class="pp-sub">${desc}</span></span>
+        <span class="pp-shop-actions">
+          ${qtyBtn("buy", item, `data-qty="1"`, "Buy", `$${price}`, !ok, reason)}
+          ${ok ? "" : `<span class="pp-reason">${escapeHtml(reason)}</span>`}
+        </span>
+      </div>`;
+    };
+
+    // Build a Wall/Roof from owned bricks/sticks (players stockpile these). A +/- stepper
+    // (step 1) + a "Max" that builds as many as your materials allow. Higher tiers use
+    // the one-click "from scratch" button below instead.
+    const buildStepRow = (item: string, emoji: string, name: string, recipe: string) => {
       const { ok, reason } = ppCanBuild(inv, item);
       const max = ppBuildMax(inv, item);
-      const maxBtn = ok && max >= 2 ? qtyBtn("build", item, `data-count="${max}"`, `Max ×${max}`, "", false) : "";
+      const qty = Math.min(this.buildQty[item]!, Math.max(1, max));
+      const maxBtn = ok && max > qty ? qtyBtn("build", item, `data-count="${max}"`, `Max ×${max}`, "", false) : "";
       return `<div class="pp-shop-row${ok ? "" : " pp-cant"}">
         <span class="pp-shop-name">${emoji} ${name} <span class="pp-sub">${recipe}</span></span>
         <span class="pp-shop-actions">
-          ${qtyBtn("build", item, `data-count="1"`, "Build", "", !ok, reason)}
+          ${this.stepper(`build-${item}`, qty)}
+          ${qtyBtn("build", item, `data-count="${qty}"`, `Build ${qty}`, "", !ok, reason)}
           ${maxBtn}
           ${ok ? "" : `<span class="pp-reason">${escapeHtml(reason)}</span>`}
         </span>
@@ -1027,15 +1056,17 @@ export class PerfectPalaceView implements GameView {
     // One-click "build from scratch": uses owned parts first, buys the missing
     // bricks/sticks with cash, assembles in one go. Cost shown is the marginal cash
     // (often $0 when you already own the parts).
-    const scratchRow = (item: string, emoji: string, name: string, recipe: string) => {
-      const r = quickBuildCost(inv as any, item as any, 1);
+    const scratchStepRow = (item: string, emoji: string, name: string, recipe: string) => {
+      const qty = this.scratchQty[item]!;
+      const r = quickBuildCost(inv as any, item as any, qty);
       const affordable = r.ok && inv.dollars >= r.dollars;
       const reason = !r.ok ? r.reason ?? "" : `Need $${r.dollars} (have $${D}).`;
       const cost = r.ok ? (r.dollars === 0 ? "free" : `$${r.dollars}`) : "";
       return `<div class="pp-shop-row${affordable ? "" : " pp-cant"}">
         <span class="pp-shop-name">${emoji} ${name} <span class="pp-sub">${recipe}</span></span>
         <span class="pp-shop-actions">
-          <button class="pp-qty-btn" data-action="buildScratch" data-item="${item}" ${affordable ? "" : "disabled"}${affordable ? "" : ` title="${escapeHtml(reason)}"`}>Build${cost ? `<span class="pp-price">${cost}</span>` : ""}</button>
+          ${this.stepper(`scratch-${item}`, qty)}
+          <button class="pp-qty-btn" data-action="buildScratch" data-item="${item}" data-count="${qty}" ${affordable ? "" : "disabled"}${affordable ? "" : ` title="${escapeHtml(reason)}"`}>Build ×${qty}${cost ? `<span class="pp-price">${cost}</span>` : ""}</button>
           ${affordable ? "" : `<span class="pp-reason">${escapeHtml(reason)}</span>`}
         </span>
       </div>`;
@@ -1091,24 +1122,24 @@ export class PerfectPalaceView implements GameView {
       </div>
       <div class="pp-shop-group">
         <div class="pp-group-h">🛍 Shop</div>
-        ${bundleRow("brick", "🧱", "Bricks", "5/$5 · +20 = 4 walls")}
-        ${bundleRow("stick", "🪵", "Sticks", "5/$5 · +20 = 4 roofs")}
-        ${buyRow("worker", "👷", "Worker", "earns walls/roofs each turn", false)}
-        ${buyRow("server", "🍽️", "Server", "+5 pts · unlocks Buildings", true)}
-        ${buyRow("chef", "👨‍🍳", "Chef", "+10 pts · needed for 3-Story", true)}
-        ${buyRow("cleaner", "🧹", "Cleaner", "+5 pts · 5 → Whole-House Cleaner", true)}
-        ${buyRow("knight", "🛡️", "Knight", "blocks the Bailiff", false)}
-        ${buyRow("queen", "👑", "Queen", "+200 pts", false)}
+        ${buyStepRow("brick", "🧱", "Bricks", "$1 ea · in 5s · 20 = 4 walls")}
+        ${buyStepRow("stick", "🪵", "Sticks", "$1 ea · in 5s · 20 = 4 roofs")}
+        ${staffStepRow("worker", "👷", "Worker", "earns walls/roofs each turn")}
+        ${staffStepRow("server", "🍽️", "Server", "+5 pts · unlocks Buildings")}
+        ${staffStepRow("chef", "👨‍🍳", "Chef", "+10 pts · needed for 3-Story")}
+        ${staffStepRow("cleaner", "🧹", "Cleaner", "+5 pts · 5 → Whole-House Cleaner")}
+        ${buyRow("knight", "🛡️", "Knight", "blocks the Bailiff")}
+        ${buyRow("queen", "👑", "Queen", "+200 pts")}
         ${trader ? `<div class="pp-trader">${trader}</div>` : ""}
       </div>
       <div class="pp-shop-group">
         <div class="pp-group-h">🏗 Build</div>
-        ${rawBuildRow("wall", "🧱", "Wall", `${RECIPE.wall.bricks} bricks`)}
-        ${rawBuildRow("roof", "🏠", "Roof", `${RECIPE.roof.sticks} sticks`)}
-        ${scratchRow("room", "🚪", "Room", `${RECIPE.room.walls} walls + ${RECIPE.room.roofs} roof`)}
-        ${scratchRow("building", "🏢", "Building", `${RECIPE.building.rooms} rooms + 1 staff`)}
-        ${scratchRow("threeStoryBuilding", "🏯", "3-Story", `${RECIPE.threeStoryBuilding.buildings} buildings + staff`)}
-        ${scratchRow("palace", "🏰", "Palace", `${RECIPE.palace.threeStoryBuildings} 3-Story`)}
+        ${buildStepRow("wall", "🧱", "Wall", `${RECIPE.wall.bricks} bricks`)}
+        ${buildStepRow("roof", "🏠", "Roof", `${RECIPE.roof.sticks} sticks`)}
+        ${scratchStepRow("room", "🚪", "Room", `${RECIPE.room.walls} walls + ${RECIPE.room.roofs} roof`)}
+        ${scratchStepRow("building", "🏢", "Building", `${RECIPE.building.rooms} rooms + 1 staff`)}
+        ${scratchStepRow("threeStoryBuilding", "🏯", "3-Story", `${RECIPE.threeStoryBuilding.buildings} buildings + staff`)}
+        ${scratchStepRow("palace", "🏰", "Palace", `${RECIPE.palace.threeStoryBuildings} 3-Story`)}
       </div>
       <div class="pp-shop-group">
         <div class="pp-group-h">🔄 Trade</div>
@@ -1313,9 +1344,11 @@ export class PerfectPalaceView implements GameView {
         this.send({ type: "turn/build", item: btn.dataset.item, count });
         return;
       }
-      case "buildScratch":
-        this.send({ type: "turn/buildFromScratch", item: btn.dataset.item, count: 1 });
+      case "buildScratch": {
+        const count = Number(btn.dataset.count) || 1;
+        this.send({ type: "turn/buildFromScratch", item: btn.dataset.item, count });
         return;
+      }
       case "trade": {
         const from = btn.dataset.from as "bricks" | "sticks";
         this.send({ type: "turn/trade", from, amount: this.tradeAmt[from] });
@@ -1382,7 +1415,32 @@ export class PerfectPalaceView implements GameView {
     const me = this.mySeat();
     if (!me) return;
     const inv = me.inventory;
-    if (id === "trade-bricks" || id === "trade-sticks") {
+    // Per-row buy/build steppers. Clamp on read so a draft never exceeds what's
+    // currently affordable (inventory can shift between taps); the engine re-checks too.
+    if (id === "buy-brick" || id === "buy-stick") {
+      const item = id === "buy-brick" ? "brick" : "stick";
+      const max = Math.max(5, Math.floor(inv.dollars / 5) * 5); // $1 each, sold in 5s
+      this.buyQty[item] = Math.max(5, Math.min(max, (this.buyQty[item] ?? 5) + dir * 5));
+    } else if (id === "buy-worker" || id === "buy-server" || id === "buy-chef" || id === "buy-cleaner") {
+      const item = id.slice(4) as "worker" | "server" | "chef" | "cleaner";
+      const price = PRICE[item];
+      const roomOk = item === "worker" ? true : ppHasRoom(inv); // staff need a Room first
+      const max = roomOk ? Math.max(1, Math.floor(inv.dollars / price)) : 1;
+      this.buyQty[item] = Math.max(1, Math.min(max, (this.buyQty[item] ?? 1) + dir));
+    } else if (id === "build-wall" || id === "build-roof") {
+      const item = id === "build-wall" ? "wall" : "roof";
+      const max = Math.max(1, ppBuildMax(inv, item));
+      this.buildQty[item] = Math.max(1, Math.min(max, (this.buildQty[item] ?? 1) + dir));
+    } else if (id.startsWith("scratch-")) {
+      const item = id.slice("scratch-".length);
+      let max = 1; // largest N (≤20) we can both afford and have the prereqs for
+      for (let n = 1; n <= 20; n++) {
+        const r = quickBuildCost(inv as any, item as any, n);
+        if (!r.ok || r.dollars > inv.dollars) break;
+        max = n;
+      }
+      this.scratchQty[item] = Math.max(1, Math.min(max, (this.scratchQty[item] ?? 1) + dir));
+    } else if (id === "trade-bricks" || id === "trade-sticks") {
       const from = id === "trade-bricks" ? "bricks" : "sticks";
       const max = Math.max(10, Math.floor(inv[from] / 10) * 10);
       this.tradeAmt[from] = Math.max(10, Math.min(max, this.tradeAmt[from] + dir * 10));
