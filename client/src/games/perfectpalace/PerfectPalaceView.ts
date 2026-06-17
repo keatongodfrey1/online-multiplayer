@@ -57,6 +57,115 @@ function squarePos(n: number): { row: number; col: number } {
 
 const CORNERS = new Set([1, 10, 16, 25]);
 
+type PPSquare = (typeof BOARD)[number];
+type PPInv = PPSeat["inventory"];
+
+/** A terse, glyphy "what happens here" line for a board square (full prose lives
+ *  in the square-info callout + hover tooltip). Mirrors board.ts effect kinds. */
+function shortEffect(def: PPSquare): string {
+  const e = def.effect;
+  switch (e.kind) {
+    case "start": return "+$10 · swap 1 slot";
+    case "royal-court": return "⛓️ to Dungeon";
+    case "bricks-or-wall": return "🎁 10🧱 or 1 wall";
+    case "dungeon-just-passing": return "—";
+    case "gain-room": return "+🚪 Room";
+    case "gain-resources": {
+      const parts: string[] = [];
+      if (e.bricks) parts.push(`+${e.bricks}🧱`);
+      if (e.sticks) parts.push(`+${e.sticks}🪵`);
+      if (e.dollars) parts.push(`+$${e.dollars}`);
+      return parts.join(" ");
+    }
+    case "alliance-offer": return `🤝 ally ${e.cost.bricks}🧱+${e.cost.sticks}🪵`;
+    case "invasion": return `⚔️ pay $${e.cost}`;
+    case "lose-money": return `💸 pay $${e.amount}`;
+    case "get-bailiff": return "🎩 take Bailiff";
+    case "draw-cards": return `🃏 draw ${e.count}`;
+    case "fortune-teller": return `🃏 draw ${e.count}`;
+    case "trader-walls": return "🛒 $10 → 3 walls";
+    case "trader-bricks": return "🛒 10🧱 → $15";
+    case "half-price-cleaner": return "🧹 $10 each";
+    case "get-server": return "+🍽️ Server";
+    case "get-building": return "+🏢 Building";
+    case "roll-again": return "🎲 roll again";
+  }
+}
+
+const PP_OK = { ok: true, reason: "" } as const;
+const ppHasRoom = (inv: PPInv): boolean =>
+  inv.rooms + inv.buildings + inv.threeStoryBuildings + inv.palaces >= 1;
+
+/** Mirror of the engine's canBuy (reducer.ts). PRESENTATION ONLY — the server
+ *  re-validates every buy. Bias is toward false-enable: when unsure, leave the
+ *  button clickable and let the room reject (a harmless no-op). */
+function ppCanBuy(inv: PPInv, item: string): { ok: boolean; reason: string } {
+  switch (item) {
+    case "worker":
+      return inv.dollars >= PRICE.worker ? PP_OK : { ok: false, reason: `Need $${PRICE.worker}.` };
+    case "server":
+    case "chef":
+    case "cleaner": {
+      if (!ppHasRoom(inv)) return { ok: false, reason: "Needs a Room first." };
+      const price = item === "server" ? PRICE.server : item === "chef" ? PRICE.chef : PRICE.cleaner;
+      return inv.dollars >= price ? PP_OK : { ok: false, reason: `Need $${price}.` };
+    }
+    case "knight":
+      if (inv.knight) return { ok: false, reason: "Already own one." };
+      return inv.dollars >= PRICE.knight ? PP_OK : { ok: false, reason: `Need $${PRICE.knight}.` };
+    case "queen":
+      if (inv.queen) return { ok: false, reason: "Already own one." };
+      return inv.dollars >= PRICE.queen ? PP_OK : { ok: false, reason: `Need $${PRICE.queen}.` };
+    default:
+      return PP_OK;
+  }
+}
+
+/** Mirror of the engine's canBuild (reducer.ts), incl. the Building/3-Story staff
+ *  prereqs (a Whole-House-Cleaner counts as a Cleaner). PRESENTATION ONLY. */
+function ppCanBuild(inv: PPInv, item: string): { ok: boolean; reason: string } {
+  const eff = inv.cleaners + inv.wholeHouseCleaners;
+  const no = (reason: string) => ({ ok: false, reason });
+  switch (item) {
+    case "wall":
+      return inv.bricks >= RECIPE.wall.bricks ? PP_OK : no(`Need ${RECIPE.wall.bricks} bricks (have ${inv.bricks}).`);
+    case "roof":
+      return inv.sticks >= RECIPE.roof.sticks ? PP_OK : no(`Need ${RECIPE.roof.sticks} sticks (have ${inv.sticks}).`);
+    case "room":
+      if (inv.walls < RECIPE.room.walls) return no(`Need ${RECIPE.room.walls} walls (have ${inv.walls}).`);
+      if (inv.roofs < RECIPE.room.roofs) return no(`Need ${RECIPE.room.roofs} roof (have ${inv.roofs}).`);
+      return PP_OK;
+    case "building":
+      if (inv.rooms < RECIPE.building.rooms) return no(`Need ${RECIPE.building.rooms} rooms (have ${inv.rooms}).`);
+      if (inv.servers + inv.chefs + eff < 1) return no("Need 1 staff (Server/Chef/Cleaner).");
+      return PP_OK;
+    case "threeStoryBuilding":
+      if (inv.buildings < RECIPE.threeStoryBuilding.buildings) return no(`Need ${RECIPE.threeStoryBuilding.buildings} buildings (have ${inv.buildings}).`);
+      if (inv.servers < 1) return no("Need a Server.");
+      if (inv.chefs < 1) return no("Need a Chef.");
+      if (eff < 1) return no("Need a Cleaner.");
+      return PP_OK;
+    case "palace":
+      return inv.threeStoryBuildings >= RECIPE.palace.threeStoryBuildings
+        ? PP_OK
+        : no(`Need ${RECIPE.palace.threeStoryBuildings} 3-Story (have ${inv.threeStoryBuildings}).`);
+    default:
+      return no("");
+  }
+}
+
+/** How many of `item` you could build right now (for the "Max ×N" quick-build).
+ *  Over/under-estimates are safe: the engine builds the affordable prefix and
+ *  stops, so a too-large count just caps itself. */
+function ppBuildMax(inv: PPInv, item: string): number {
+  switch (item) {
+    case "wall": return Math.floor(inv.bricks / RECIPE.wall.bricks);
+    case "roof": return Math.floor(inv.sticks / RECIPE.roof.sticks);
+    case "room": return Math.min(Math.floor(inv.walls / RECIPE.room.walls), Math.floor(inv.roofs / RECIPE.room.roofs));
+    default: return ppCanBuild(inv, item).ok ? 1 : 0;
+  }
+}
+
 export class PerfectPalaceView implements GameView {
   private root?: HTMLElement;
   private room?: Room<any, PerfectPalaceState>;
@@ -68,6 +177,11 @@ export class PerfectPalaceView implements GameView {
   private mappingDraft = [0, 1, 2, 3, 4, 5];
   /** Local-only fine forfeit selection. */
   private fineSel = { bricks: 0, sticks: 0, walls: 0, roofs: 0 };
+  /** Rising-edge guard so a brand-new fine clears any stale forfeit selection. */
+  private finePendingPrev = false;
+  /** Board square whose full explanation the info callout shows (tap to change);
+   *  undefined = follow where you are. */
+  private infoSquare?: number;
   private iWasActing = false;
   /** Whether the rules/help modal is open. */
   private showRules = false;
@@ -224,6 +338,19 @@ export class PerfectPalaceView implements GameView {
     }
     this.iWasActing = acting;
 
+    // A brand-new fine (rising edge of finePending while it's my decision) clears
+    // any leftover forfeit selection from a previous fine so it can't pre-fill an
+    // invalid payment.
+    const fineMine = !!s.finePending && s.currentTurn === this.ctx?.mySessionId;
+    if (fineMine && !this.finePendingPrev) {
+      this.fineSel = { bricks: 0, sticks: 0, walls: 0, roofs: 0 };
+    }
+    this.finePendingPrev = fineMine;
+
+    // During the simultaneous initial pick, the board is idle — give the picker the
+    // whole main area (it's cramped in the narrow side panel).
+    const pickInCenter = s.enginePhase === "initial-mapping" && !!me && !me.mappingLocked;
+
     this.root.innerHTML = `
       <div class="pp-top">
         <div class="pp-title">The Perfect Palace</div>
@@ -235,14 +362,32 @@ export class PerfectPalaceView implements GameView {
         </div>
       </div>
       <div class="pp-main">
-        <div class="pp-boardwrap">${this.renderBoard()}</div>
+        <div class="pp-boardwrap">${pickInCenter ? this.renderMappingPicker() : this.renderBoard()}</div>
         <div class="pp-side">
+          <div class="pp-sqinfo">${this.renderSquareInfo()}</div>
           <div class="pp-action">${this.renderAction()}</div>
           <div class="pp-players">${this.renderPlayers()}</div>
           <div class="pp-log">${this.renderLog()}</div>
         </div>
       </div>
       ${this.showRules ? this.renderRulesModal() : ""}`;
+  }
+
+  /** The always-present "what's on this square" callout. Tapping a board square
+   *  pins it here; otherwise it follows where you are (your token). */
+  private renderSquareInfo(): string {
+    const s = this.room!.state;
+    const me = this.mySeat();
+    const focus = this.infoSquare ?? me?.position ?? this.seatById(s.currentPlayerId)?.position ?? 1;
+    const def = getSquare(focus);
+    const fx = shortEffect(def);
+    return `
+      <div class="pp-sqinfo-head">
+        <span class="pp-sqinfo-n">#${def.number}</span>
+        <strong>${escapeHtml(def.label)}</strong>
+        ${fx ? `<span class="pp-sqinfo-fx">${escapeHtml(fx)}</span>` : ""}
+      </div>
+      <div class="pp-sqinfo-body">${escapeHtml(def.flavor ?? "")}</div>`;
   }
 
   /** A condensed, kid-friendly rulebook (ported from the standalone RulesModal). */
@@ -321,10 +466,13 @@ export class PerfectPalaceView implements GameView {
         )
         .join("");
       const corner = CORNERS.has(def.number) ? " pp-corner" : "";
+      const selected = def.number === this.infoSquare ? " pp-sq-sel" : "";
+      const fx = shortEffect(def);
       cells.push(`
-        <div class="pp-sq${corner}" style="grid-row:${row};grid-column:${col}" title="${escapeHtml(def.flavor ?? def.label)}">
+        <div class="pp-sq${corner}${selected}" data-sq="${def.number}" style="grid-row:${row};grid-column:${col}" title="${escapeHtml(def.flavor ?? def.label)}">
           <div class="pp-sq-n">${def.number}</div>
           <div class="pp-sq-l">${escapeHtml(def.label)}</div>
+          ${fx ? `<div class="pp-sq-fx">${escapeHtml(fx)}</div>` : ""}
           <div class="pp-sq-tokens">${tokens}</div>
         </div>`);
     }
@@ -399,9 +547,10 @@ export class PerfectPalaceView implements GameView {
     if (s.enginePhase === "game-over") return `<div class="pp-act-wait">The game is over.</div>`;
 
     if (s.enginePhase === "initial-mapping") {
+      const locked = [...s.seats].filter((seat) => seat.mappingLocked).length;
       return me.mappingLocked
-        ? `<div class="pp-act-wait">Card locked in — waiting for the others…</div>`
-        : this.renderMappingPicker();
+        ? `<div class="pp-act-wait">Card locked in — waiting for the others… (${locked}/${s.seats.length} ready)</div>`
+        : `<div class="pp-act-wait">⬅ Pick your resource card in the middle, then lock it in. (${locked}/${s.seats.length} ready)</div>`;
     }
 
     if (s.turnPhase === "duel") return this.renderDuel();
@@ -434,15 +583,20 @@ export class PerfectPalaceView implements GameView {
         const opts = RESOURCE_OPTIONS.map(
           (o, i) => `<option value="${i}" ${i === optIdx ? "selected" : ""}>${escapeHtml(outcomeLabel(o))}</option>`,
         ).join("");
-        return `<div class="pp-map-slot"><span class="pp-die">${slot + 1}</span><select data-map-slot="${slot}">${opts}</select></div>`;
+        return `
+          <div class="pp-map-slot">
+            <span class="pp-die pp-die-lg">${slot + 1}</span>
+            <span class="pp-map-arrow">→</span>
+            <select data-map-slot="${slot}">${opts}</select>
+          </div>`;
       })
       .join("");
     return `
       <div class="pp-card-pick">
-        <div class="pp-act-title">Pick your resource card</div>
-        <p class="pp-hint">Each die face gives a different reward. Every reward is used exactly once. Tweak it or keep the default.</p>
-        ${slots}
-        <button class="pp-primary" data-action="lockMapping">Lock it in</button>
+        <div class="pp-act-title">🎴 Pick your resource card</div>
+        <p class="pp-hint">Map each die face <b>1–6</b> to a reward. Every reward is used exactly once. Whenever <i>anyone</i> rolls, you collect what your card says for that number — so choose what you want most. Tweak it or keep the default, then lock it in.</p>
+        <div class="pp-map-grid">${slots}</div>
+        <button class="pp-primary pp-map-lock" data-action="lockMapping">Lock it in ✓</button>
       </div>`;
   }
 
@@ -491,24 +645,34 @@ export class PerfectPalaceView implements GameView {
   private renderDecision(me: PPSeat): string {
     const s = this.room!.state;
     if (s.finePending) {
+      const owed = s.fineAmount;
       const sel = this.fineSel;
       const value = sel.bricks * 1 + sel.sticks * 1 + sel.walls * 5 + sel.roofs * 5;
-      const counter = (k: keyof typeof sel, label: string, have: number) => `
-        <div class="pp-fine-row">
-          <span>${label} (have ${have})</span>
-          <button class="pp-step" data-fine="-" data-k="${k}">−</button>
-          <span class="pp-fine-n">${sel[k]}</span>
-          <button class="pp-step" data-fine="+" data-k="${k}">+</button>
-        </div>`;
+      const valid = this.fineValid(owed, me);
+      const counter = (k: keyof typeof sel, label: string, have: number, unit: number) => {
+        // + is blocked once you hold no more, or once one more would overpay — so
+        // the selection can never exceed what the engine accepts.
+        const plusOff = sel[k] >= have || value + unit > owed;
+        return `
+          <div class="pp-fine-row">
+            <span class="pp-fine-label">${label} <span class="pp-sub">have ${have} · $${unit} ea</span></span>
+            <button class="pp-step" data-action="fineAdjust" data-fine="-" data-k="${k}" ${sel[k] <= 0 ? "disabled" : ""}>−</button>
+            <span class="pp-fine-n">${sel[k]}</span>
+            <button class="pp-step" data-action="fineAdjust" data-fine="+" data-k="${k}" ${plusOff ? "disabled" : ""}>+</button>
+          </div>`;
+      };
       return `
         <div class="pp-act-title">Pay the fine 💸</div>
-        <p class="pp-hint">You owe <strong>$${s.fineAmount}</strong> but have no cash. Forfeit items to cover it (🧱/🪵 = $1, wall/roof = $5).</p>
-        ${counter("bricks", "🧱 bricks", me.inventory.bricks)}
-        ${counter("sticks", "🪵 sticks", me.inventory.sticks)}
-        ${counter("walls", "🧱 walls", me.inventory.walls)}
-        ${counter("roofs", "🏠 roofs", me.inventory.roofs)}
-        <div class="pp-fine-total">Selected: $${value} / $${s.fineAmount}</div>
-        <button class="pp-primary" data-action="payFine">Pay</button>`;
+        <p class="pp-hint">You owe <strong>$${owed}</strong> in items (your cash is already gone). Forfeit items to cover it — 🧱/🪵 = $1, wall/roof = $5. You can't overpay.</p>
+        ${counter("bricks", "🧱 bricks", me.inventory.bricks, 1)}
+        ${counter("sticks", "🪵 sticks", me.inventory.sticks, 1)}
+        ${counter("walls", "🧱 walls", me.inventory.walls, 5)}
+        ${counter("roofs", "🏠 roofs", me.inventory.roofs, 5)}
+        <div class="pp-fine-total${valid ? " pp-ok" : ""}">Selected: $${value} / $${owed}${valid ? " ✓" : ""}</div>
+        <div class="pp-fine-actions">
+          <button class="pp-secondary" data-action="fineAuto">✨ Auto-fill</button>
+          <button class="pp-primary" data-action="payFine" ${valid ? "" : "disabled"}>Pay $${value}</button>
+        </div>`;
     }
     const sq = getSquare(me.position);
     if (sq.effect.kind === "alliance-offer") {
@@ -525,6 +689,36 @@ export class PerfectPalaceView implements GameView {
         <button class="pp-primary" data-action="gift" data-choice="wall">Take 1 🧱 wall</button>`;
     }
     return `<button class="pp-secondary" data-action="advance">Continue</button>`;
+  }
+
+  /** Exact mirror of the engine's no-overpay rule (reducer.ts payFine): a
+   *  selection is payable when it equals what's owed, or is below it but no held
+   *  item can be added without exceeding (the max-feasible "stiff" case). */
+  private fineValid(owed: number, me: PPSeat): boolean {
+    const sel = this.fineSel;
+    const inv = me.inventory;
+    const value = sel.bricks + sel.sticks + sel.walls * 5 + sel.roofs * 5;
+    if (value > owed) return false;
+    if (value === owed) return true;
+    const canAdd =
+      (sel.bricks < inv.bricks && value + 1 <= owed) ||
+      (sel.sticks < inv.sticks && value + 1 <= owed) ||
+      (sel.walls < inv.walls && value + 5 <= owed) ||
+      (sel.roofs < inv.roofs && value + 5 <= owed);
+    return !canAdd;
+  }
+
+  /** Fill fineSel with the cheapest engine-valid forfeit (mirrors the bot's
+   *  payFineAction: $1 items first to hit the exact amount, then $5 items). */
+  private fineAutoFill(owed: number, me: PPSeat): void {
+    const inv = me.inventory;
+    let need = owed;
+    const bricks = Math.min(inv.bricks, need); need -= bricks;
+    const sticks = Math.min(inv.sticks, need); need -= sticks;
+    let fives = Math.floor(need / 5);
+    const walls = Math.min(inv.walls, fives); fives -= walls;
+    const roofs = Math.min(inv.roofs, fives);
+    this.fineSel = { bricks, sticks, walls, roofs };
   }
 
   private renderDuel(): string {
@@ -568,44 +762,108 @@ export class PerfectPalaceView implements GameView {
   private renderOptional(me: PPSeat): string {
     const inv = me.inventory;
     const sq = getSquare(me.position);
-    const shopBtn = (item: string, label: string, price: number) =>
-      `<button class="pp-shop-btn" data-action="buy" data-item="${item}" ${inv.dollars < price ? "disabled" : ""}>${label} <span class="pp-price">$${price}</span></button>`;
-    const buildBtn = (item: string, label: string, hint: string) =>
-      `<button class="pp-build-btn" data-action="build" data-item="${item}">${label}<span class="pp-recipe">${hint}</span></button>`;
+    const D = inv.dollars;
+
+    // A buy/build button + price chip. `disabled` greys it; `reason` explains why.
+    const qtyBtn = (
+      action: "buy" | "build",
+      item: string,
+      dataAttr: string,
+      label: string,
+      cost: string,
+      disabled: boolean,
+      reason = "",
+    ) =>
+      `<button class="pp-qty-btn" data-action="${action}" data-item="${item}" ${dataAttr} ${disabled ? "disabled" : ""}${reason ? ` title="${escapeHtml(reason)}"` : ""}>${label}${cost ? `<span class="pp-price">${cost}</span>` : ""}</button>`;
+
+    // Bricks & sticks: sold ONLY in $5 bundles of 5 (PRICE is $1 each). No $1 UI.
+    const bundleRow = (item: "brick" | "stick", emoji: string, name: string) => {
+      const max5 = Math.floor(D / 5) * 5; // largest affordable whole-5 bundle
+      const btns =
+        qtyBtn("buy", item, `data-qty="5"`, "+5", "$5", D < 5) +
+        (D >= 25 ? qtyBtn("buy", item, `data-qty="25"`, "+25", "$25", false) : "") +
+        (max5 >= 5 ? qtyBtn("buy", item, `data-qty="${max5}"`, `Max +${max5}`, `$${max5}`, false) : "");
+      return `<div class="pp-shop-row${D < 5 ? " pp-cant" : ""}">
+        <span class="pp-shop-name">${emoji} ${name} <span class="pp-sub">5 for $5</span></span>
+        <span class="pp-shop-actions">${btns}${D < 5 ? `<span class="pp-reason">Need $5</span>` : ""}</span>
+      </div>`;
+    };
+
+    // Staff & specials: single buy; stackable staff also get a ×5.
+    const buyRow = (item: string, emoji: string, name: string, stackable: boolean) => {
+      const { ok, reason } = ppCanBuy(inv, item);
+      const price = PRICE[item as keyof typeof PRICE];
+      const x5 = stackable && D >= price * 5
+        ? qtyBtn("buy", item, `data-qty="5"`, "×5", `$${price * 5}`, false)
+        : "";
+      return `<div class="pp-shop-row${ok ? "" : " pp-cant"}">
+        <span class="pp-shop-name">${emoji} ${name}</span>
+        <span class="pp-shop-actions">
+          ${qtyBtn("buy", item, `data-qty="1"`, "Buy", `$${price}`, !ok, reason)}
+          ${x5}
+          ${ok ? "" : `<span class="pp-reason">${escapeHtml(reason)}</span>`}
+        </span>
+      </div>`;
+    };
+
+    // Build: single build; high-volume items (wall/roof/room) get a "Max ×N".
+    const buildRow = (item: string, emoji: string, name: string, recipe: string) => {
+      const { ok, reason } = ppCanBuild(inv, item);
+      const max = ppBuildMax(inv, item);
+      const maxBtn = ok && max >= 2
+        ? qtyBtn("build", item, `data-count="${max}"`, `Max ×${max}`, "", false)
+        : "";
+      return `<div class="pp-shop-row${ok ? "" : " pp-cant"}">
+        <span class="pp-shop-name">${emoji} ${name} <span class="pp-sub">${recipe}</span></span>
+        <span class="pp-shop-actions">
+          ${qtyBtn("build", item, `data-count="1"`, "Build", "", !ok, reason)}
+          ${maxBtn}
+          ${ok ? "" : `<span class="pp-reason">${escapeHtml(reason)}</span>`}
+        </span>
+      </div>`;
+    };
 
     let trader = "";
     if (sq.effect.kind === "trader-walls") {
-      trader = `<button class="pp-secondary" data-action="traderWalls" ${inv.dollars < 10 ? "disabled" : ""}>Trader: $10 → 3 🧱 walls</button>`;
+      trader = `<button class="pp-secondary" data-action="traderWalls" ${inv.dollars < 10 ? "disabled" : ""}>🛒 Trader: $10 → 3 🧱 walls</button>`;
     } else if (sq.effect.kind === "trader-bricks") {
-      trader = `<button class="pp-secondary" data-action="traderBricks" ${inv.bricks < 10 ? "disabled" : ""}>Trader: 10 🧱 → $15</button>`;
+      trader = `<button class="pp-secondary" data-action="traderBricks" ${inv.bricks < 10 ? "disabled" : ""}>🛒 Trader: 10 🧱 → $15</button>`;
     } else if (sq.effect.kind === "half-price-cleaner") {
-      trader = `<button class="pp-secondary" data-action="halfCleaner" ${inv.dollars < 10 ? "disabled" : ""}>Cleaner (half price): $10</button>`;
+      trader = `<button class="pp-secondary" data-action="halfCleaner" ${inv.dollars < 10 ? "disabled" : ""}>🧹 Cleaner (half price): $10</button>`;
     }
+
+    const youHave = `<div class="pp-have">💰 <strong>$${inv.dollars}</strong> · 🧱 ${inv.bricks} · 🪵 ${inv.sticks} · 🧱${inv.walls}w · 🏠${inv.roofs}r · 🚪${inv.rooms} · 🏢${inv.buildings} · 🏯${inv.threeStoryBuildings}</div>`;
 
     return `
       <div class="pp-act-title">Shop · Build · Trade</div>
-      <div class="pp-shop">
-        ${shopBtn("brick", "🧱 brick", PRICE.brick)}
-        ${shopBtn("stick", "🪵 stick", PRICE.stick)}
-        ${shopBtn("worker", "👷 Worker", PRICE.worker)}
-        ${shopBtn("server", "🍽️ Server", PRICE.server)}
-        ${shopBtn("chef", "👨‍🍳 Chef", PRICE.chef)}
-        ${shopBtn("cleaner", "🧹 Cleaner", PRICE.cleaner)}
-        ${shopBtn("knight", "🛡️ Knight", PRICE.knight)}
-        ${shopBtn("queen", "👑 Queen", PRICE.queen)}
+      ${youHave}
+      <div class="pp-shop-group">
+        <div class="pp-group-h">🛍 Shop</div>
+        ${bundleRow("brick", "🧱", "Bricks")}
+        ${bundleRow("stick", "🪵", "Sticks")}
+        ${buyRow("worker", "👷", "Worker", false)}
+        ${buyRow("server", "🍽️", "Server", true)}
+        ${buyRow("chef", "👨‍🍳", "Chef", true)}
+        ${buyRow("cleaner", "🧹", "Cleaner", true)}
+        ${buyRow("knight", "🛡️", "Knight", false)}
+        ${buyRow("queen", "👑", "Queen", false)}
+        ${trader ? `<div class="pp-trader">${trader}</div>` : ""}
       </div>
-      ${trader ? `<div class="pp-trader">${trader}</div>` : ""}
-      <div class="pp-build">
-        ${buildBtn("wall", "🧱 Wall", `${RECIPE.wall.bricks} bricks`)}
-        ${buildBtn("roof", "🏠 Roof", `${RECIPE.roof.sticks} sticks`)}
-        ${buildBtn("room", "🚪 Room", `${RECIPE.room.walls} walls + ${RECIPE.room.roofs} roof`)}
-        ${buildBtn("building", "🏢 Building", `${RECIPE.building.rooms} rooms`)}
-        ${buildBtn("threeStoryBuilding", "🏯 3-Story", `${RECIPE.threeStoryBuilding.buildings} buildings`)}
-        ${buildBtn("palace", "🏰 Palace", `${RECIPE.palace.threeStoryBuildings} 3-Story`)}
+      <div class="pp-shop-group">
+        <div class="pp-group-h">🏗 Build</div>
+        ${buildRow("wall", "🧱", "Wall", `${RECIPE.wall.bricks} bricks`)}
+        ${buildRow("roof", "🏠", "Roof", `${RECIPE.roof.sticks} sticks`)}
+        ${buildRow("room", "🚪", "Room", `${RECIPE.room.walls} walls + ${RECIPE.room.roofs} roof`)}
+        ${buildRow("building", "🏢", "Building", `${RECIPE.building.rooms} rooms + 1 staff`)}
+        ${buildRow("threeStoryBuilding", "🏯", "3-Story", `${RECIPE.threeStoryBuilding.buildings} buildings + staff`)}
+        ${buildRow("palace", "🏰", "Palace", `${RECIPE.palace.threeStoryBuildings} 3-Story`)}
       </div>
-      <div class="pp-trade">
-        <button class="pp-secondary" data-action="trade" data-from="bricks" ${inv.bricks < 10 ? "disabled" : ""}>Trade 10 🧱 → 5 🪵</button>
-        <button class="pp-secondary" data-action="trade" data-from="sticks" ${inv.sticks < 10 ? "disabled" : ""}>Trade 10 🪵 → 5 🧱</button>
+      <div class="pp-shop-group">
+        <div class="pp-group-h">🔄 Trade</div>
+        <div class="pp-trade">
+          <button class="pp-secondary" data-action="trade" data-from="bricks" ${inv.bricks < 10 ? "disabled" : ""}>10 🧱 → 5 🪵</button>
+          <button class="pp-secondary" data-action="trade" data-from="sticks" ${inv.sticks < 10 ? "disabled" : ""}>10 🪵 → 5 🧱</button>
+        </div>
       </div>
       <div class="pp-worker">
         Worker output:
@@ -644,6 +902,14 @@ export class PerfectPalaceView implements GameView {
       this.render();
       return;
     }
+    // Tapping a board square pins its full explanation in the info callout.
+    const sqEl = (e.target as HTMLElement).closest<HTMLElement>("[data-sq]");
+    if (sqEl) {
+      const n = Number(sqEl.dataset.sq);
+      this.infoSquare = this.infoSquare === n ? undefined : n; // tap again to unpin
+      this.render();
+      return;
+    }
     const btn = (e.target as HTMLElement).closest<HTMLElement>("[data-action]");
     if (!btn || !this.room) return;
     const action = btn.dataset.action!;
@@ -659,9 +925,6 @@ export class PerfectPalaceView implements GameView {
       case "mute":
         setMuted(!isMuted());
         this.render();
-        return;
-      case "save":
-        this.room.send(LobbyMsg.SAVE, {});
         return;
       case "save":
         this.room.send(LobbyMsg.SAVE, {});
@@ -715,12 +978,16 @@ export class PerfectPalaceView implements GameView {
       case "duelRoll":
         this.send({ type: "turn/duelRollForPlayer" });
         return;
-      case "buy":
-        this.send({ type: "turn/buy", item: btn.dataset.item });
+      case "buy": {
+        const quantity = Number(btn.dataset.qty) || 1;
+        this.send({ type: "turn/buy", item: btn.dataset.item, quantity });
         return;
-      case "build":
-        this.send({ type: "turn/build", item: btn.dataset.item, count: 1 });
+      }
+      case "build": {
+        const count = Number(btn.dataset.count) || 1;
+        this.send({ type: "turn/build", item: btn.dataset.item, count });
         return;
+      }
       case "trade":
         this.send({ type: "turn/trade", from: btn.dataset.from, amount: 10 });
         return;
@@ -739,14 +1006,27 @@ export class PerfectPalaceView implements GameView {
       case "endTurn":
         this.send({ type: "turn/endTurn" });
         return;
-      case "fine":
-        return; // handled below
-    }
-    // fine +/- counters
-    if (btn.dataset.fine) {
-      const k = btn.dataset.k as keyof typeof this.fineSel;
-      this.fineSel[k] = Math.max(0, this.fineSel[k] + (btn.dataset.fine === "+" ? 1 : -1));
-      this.render();
+      case "fineAdjust": {
+        const me = this.mySeat();
+        if (!me) return;
+        const k = btn.dataset.k as keyof typeof this.fineSel;
+        const have =
+          k === "bricks" ? me.inventory.bricks
+          : k === "sticks" ? me.inventory.sticks
+          : k === "walls" ? me.inventory.walls
+          : me.inventory.roofs;
+        const next = this.fineSel[k] + (btn.dataset.fine === "+" ? 1 : -1);
+        this.fineSel[k] = Math.max(0, Math.min(have, next)); // clamp to what you hold
+        this.render();
+        return;
+      }
+      case "fineAuto": {
+        const me = this.mySeat();
+        if (!me) return;
+        this.fineAutoFill(this.room.state.fineAmount, me);
+        this.render();
+        return;
+      }
     }
   }
 

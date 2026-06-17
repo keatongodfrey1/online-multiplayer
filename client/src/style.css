@@ -1871,24 +1871,28 @@ button.spl-gem.selected {
 
 .pp-main { display: flex; gap: 14px; flex: 1 1 auto; min-height: 0; align-items: stretch; overflow: hidden; }
 .pp-boardwrap { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; align-items: center; justify-content: center; }
-.pp-side { flex: 0 0 360px; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+/* Wider side panel + slightly smaller board: the Shop/Build/Trade area is where
+   the game is played, so it gets the room (board capped via .pp-board max-height). */
+.pp-side { flex: 0 0 clamp(380px, 40%, 560px); min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
 
 /* board — scales to the available height in landscape, keeping its 10:7 ratio */
 .pp-board {
   display: grid; grid-template-columns: repeat(10, 1fr); grid-template-rows: repeat(7, 1fr);
   gap: 4px; aspect-ratio: 10 / 7; background: var(--pp-stone); padding: 6px; border-radius: 14px;
   border: 3px solid var(--pp-gold);
-  height: 100%; width: auto; max-width: 100%; margin: auto;
+  height: 100%; max-height: 88%; width: auto; max-width: 100%; margin: auto;
 }
 .pp-sq {
   background: var(--pp-panel); border: 1px solid var(--pp-stone-dark); border-radius: 6px;
   padding: 2px 3px; font-size: 9px; line-height: 1.05; overflow: hidden; position: relative;
-  display: flex; flex-direction: column; min-height: 0;
+  display: flex; flex-direction: column; min-height: 0; cursor: pointer;
 }
 .pp-corner { background: var(--pp-gold-soft); border-color: var(--pp-gold); }
+.pp-sq-sel { outline: 2px solid var(--pp-purple); outline-offset: -2px; }
 .pp-sq-n { font-weight: 700; color: var(--pp-purple); font-size: 9px; }
-.pp-sq-l { color: var(--pp-soft); font-size: 8px; flex: 1; }
-.pp-sq-tokens { display: flex; flex-wrap: wrap; gap: 2px; }
+.pp-sq-l { color: var(--pp-soft); font-size: 7.5px; line-height: 1; }
+.pp-sq-fx { color: var(--pp-ink); font-size: 8px; font-weight: 600; line-height: 1.05; margin-top: 1px; }
+.pp-sq-tokens { display: flex; flex-wrap: wrap; gap: 2px; margin-top: auto; }
 .pp-token { width: 9px; height: 9px; border-radius: 50%; border: 1px solid rgba(0,0,0,.3); display: inline-block; }
 .pp-crest {
   background: radial-gradient(circle at 50% 40%, #fff, var(--pp-bg)); border-radius: 12px;
@@ -1899,7 +1903,7 @@ button.spl-gem.selected {
 .pp-crest-bailiff, .pp-crest-deck { font-size: 13px; color: var(--pp-soft); font-weight: 600; }
 
 /* players */
-.pp-players { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.pp-players { display: flex; flex-direction: column; gap: 6px; flex: 0 1 auto; max-height: 36%; min-height: 0; overflow-y: auto; }
 .pp-pcard { background: var(--pp-panel); border: 1px solid var(--pp-stone); border-left: 4px solid var(--pp-stone-dark); border-radius: 8px; padding: 6px 8px; }
 .pp-pcard-turn { border-left-color: var(--pp-gold); box-shadow: 0 0 0 2px var(--pp-gold-soft); }
 .pp-pcard-gone { opacity: .5; }
@@ -1909,9 +1913,31 @@ button.spl-gem.selected {
 .pp-pts { margin-left: auto; font-weight: 700; color: var(--pp-purple); }
 .pp-pcard-inv { font-size: 10.5px; color: var(--pp-soft); margin-top: 3px; }
 
+/* square-info callout — always shows what's on the square you're on / tapped */
+.pp-sqinfo { background: var(--pp-panel); border: 1px solid var(--pp-stone); border-left: 4px solid var(--pp-purple); border-radius: 10px; padding: 7px 10px; flex: 0 0 auto; }
+.pp-sqinfo-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.pp-sqinfo-n { font-weight: 700; color: var(--pp-purple); }
+.pp-sqinfo-fx { margin-left: auto; font-size: 12px; font-weight: 600; color: var(--pp-gold); background: #fff7e6; border: 1px solid var(--pp-gold-soft); border-radius: 10px; padding: 1px 8px; }
+.pp-sqinfo-body { font-size: 11.5px; color: var(--pp-soft); margin-top: 2px; }
+
 /* action area */
-.pp-action { background: var(--pp-panel); border: 1px solid var(--pp-stone); border-radius: 10px; padding: 12px; flex: 0 0 auto; max-height: 46%; overflow-y: auto; }
+.pp-action { background: var(--pp-panel); border: 1px solid var(--pp-stone); border-radius: 10px; padding: 12px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .pp-act-title { font-family: 'Cinzel', Georgia, serif; font-weight: 700; color: var(--pp-purple); margin-bottom: 6px; }
+
+/* shop/build/trade — row layout with quick-buy quantities + affordability cues */
+.pp-have { background: #f3eede; border: 1px solid var(--pp-stone); border-radius: 8px; padding: 6px 9px; font-size: 12.5px; color: var(--pp-ink); margin-bottom: 8px; line-height: 1.5; }
+.pp-have strong { color: var(--pp-purple); }
+.pp-shop-group { margin: 8px 0; }
+.pp-group-h { font-weight: 700; color: var(--pp-purple); font-size: 12px; text-transform: uppercase; letter-spacing: .5px; margin: 6px 0 4px; opacity: .8; }
+.pp-shop-row { display: flex; align-items: center; gap: 8px; padding: 4px 2px; border-bottom: 1px dotted var(--pp-stone); }
+.pp-shop-name { flex: 1 1 auto; font-size: 13px; min-width: 0; }
+.pp-sub { color: var(--pp-muted); font-size: 10.5px; }
+.pp-shop-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; justify-content: flex-end; }
+.pp-qty-btn { background: #fff; border: 1px solid var(--pp-stone-dark); border-radius: 8px; padding: 6px 9px; cursor: pointer; font-size: 12.5px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.pp-qty-btn:hover:not(:disabled) { border-color: var(--pp-gold); background: #fffdf5; }
+.pp-qty-btn:disabled { opacity: .35; cursor: not-allowed; }
+.pp-shop-row.pp-cant .pp-shop-name { opacity: .55; }
+.pp-reason { color: var(--warn, #b4632a); font-size: 10.5px; font-style: italic; }
 .pp-act-wait { color: var(--pp-muted); font-style: italic; padding: 8px; }
 .pp-hint { font-size: 12px; color: var(--pp-soft); margin: 4px 0 8px; }
 .pp button.pp-primary, .pp button.pp-secondary {
@@ -1924,10 +1950,24 @@ button.spl-gem.selected {
 .pp button:disabled { opacity: .4; cursor: not-allowed; }
 .pp-endturn { display: block; width: 100%; margin-top: 10px; }
 
-/* mapping picker */
+/* mapping picker — roomy centered card shown in the main area during the
+   simultaneous initial pick (the side panel is too cramped for it). */
 .pp-map-slot { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
 .pp-die { width: 22px; height: 22px; border-radius: 5px; background: var(--pp-purple); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; }
 .pp-map-slot select, .pp-steal select { padding: 4px; border-radius: 6px; border: 1px solid var(--pp-stone-dark); background: #fff; }
+.pp-card-pick {
+  background: var(--pp-panel); border: 2px solid var(--pp-gold-soft); border-radius: 16px;
+  padding: 20px 24px; width: min(560px, 92%); max-height: 100%; overflow-y: auto;
+  box-shadow: 0 6px 20px rgba(0,0,0,.12); margin: auto;
+}
+.pp-card-pick .pp-act-title { font-size: 20px; }
+.pp-card-pick .pp-hint { font-size: 13.5px; }
+.pp-map-grid { display: flex; flex-direction: column; gap: 10px; margin: 14px 0 18px; }
+.pp-card-pick .pp-map-slot { gap: 12px; margin: 0; }
+.pp-die-lg { width: 40px; height: 40px; border-radius: 9px; font-size: 20px; flex: 0 0 auto; }
+.pp-map-arrow { color: var(--pp-muted); font-weight: 700; }
+.pp-card-pick select { flex: 1 1 auto; padding: 10px 12px; font-size: 15px; border-radius: 8px; border: 1px solid var(--pp-stone-dark); background: #fff; min-width: 0; }
+.pp-map-lock { display: block; width: 100%; padding: 12px; font-size: 15px; }
 
 /* steal / duel / fine / shop / build */
 .pp-steal { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
@@ -1938,16 +1978,25 @@ button.spl-gem.selected {
 .pp-price { color: var(--pp-green, #3e8b5a); font-weight: 700; }
 .pp-recipe { color: var(--pp-muted); font-size: 9.5px; }
 .pp-duel-rolls { margin-top: 8px; font-weight: 600; color: var(--pp-purple); }
-.pp-fine-row { display: flex; align-items: center; gap: 8px; margin: 3px 0; font-size: 13px; }
-.pp-step { width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--pp-stone-dark); background: #fff; cursor: pointer; font-weight: 700; }
-.pp-fine-n { min-width: 18px; text-align: center; font-weight: 700; }
-.pp-fine-total { margin: 6px 0; font-weight: 700; }
+.pp-fine-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 13px; }
+.pp-fine-label { flex: 1 1 auto; }
+.pp-step {
+  width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--pp-stone-dark);
+  background: #fff; cursor: pointer; font-weight: 700; font-size: 18px;
+  display: inline-flex; align-items: center; justify-content: center; line-height: 1; flex: 0 0 auto;
+}
+.pp-step:hover:not(:disabled) { border-color: var(--pp-gold); background: #fffdf5; }
+.pp-step:disabled { opacity: .35; cursor: not-allowed; }
+.pp-fine-n { min-width: 22px; text-align: center; font-weight: 700; }
+.pp-fine-total { margin: 8px 0; font-weight: 700; }
+.pp-fine-total.pp-ok { color: var(--pp-green, #3e8b5a); }
+.pp-fine-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .pp-worker { margin-top: 8px; font-size: 12px; color: var(--pp-soft); }
 .pp-chip { border: 1px solid var(--pp-stone-dark); background: #fff; border-radius: 14px; padding: 3px 10px; cursor: pointer; margin-left: 4px; font-size: 12px; }
 .pp-chip-on { background: var(--pp-purple); color: #fff; border-color: var(--pp-purple); }
 
 /* log */
-.pp-log { background: var(--pp-panel); border: 1px solid var(--pp-stone); border-radius: 10px; padding: 8px 10px; flex: 0 0 auto; max-height: 26%; overflow-y: auto; }
+.pp-log { background: var(--pp-panel); border: 1px solid var(--pp-stone); border-radius: 10px; padding: 8px 10px; flex: 0 0 auto; max-height: 22%; overflow-y: auto; }
 .pp-log-title { font-weight: 700; color: var(--pp-purple); font-size: 12px; margin-bottom: 4px; }
 .pp-log-line { font-size: 11.5px; color: var(--pp-soft); padding: 1px 0; border-bottom: 1px dotted var(--pp-stone); }
 
@@ -1985,7 +2034,8 @@ button.spl-gem.selected {
   .pp-boardwrap { min-height: 0; }
   .pp-board { height: auto; width: 100%; }
   .pp-side { flex: none; overflow: visible; }
-  .pp-action, .pp-players, .pp-log { max-height: none; overflow: visible; flex: none; }
+  .pp-sqinfo, .pp-action, .pp-players, .pp-log { max-height: none; overflow: visible; flex: none; }
+  .pp-card-pick { width: 100%; }
 }
 
 /* Perfect Palace — dice roll animation (a body-level portal so the view's
@@ -2006,13 +2056,15 @@ button.spl-gem.selected {
   align-items: center;
   gap: 8px;
 }
-.pp-die {
+/* Scoped to the overlay so it never bleeds into the mapping picker's .pp-die. */
+.pp-dice .pp-die {
+  width: auto; height: auto; background: none; border-radius: 0;
   font-size: 120px;
   line-height: 1;
   color: #fffdf8;
   text-shadow: 0 0 26px #e8d79a, 0 4px 10px rgba(0, 0, 0, 0.5);
 }
-.pp-die.landed { animation: pp-dice-pop 0.5s ease; }
+.pp-dice .pp-die.landed { animation: pp-dice-pop 0.5s ease; }
 .pp-die-cap {
   font-family: 'Cinzel', Georgia, serif;
   font-weight: 700;
