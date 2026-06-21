@@ -91,9 +91,14 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
         startingLives: this.state.startingLives,
         splashHit: this.state.splashHit,
         splashMiss: this.state.splashMiss,
+        mainHit: this.state.mainHit,
+        mainMiss: this.state.mainMiss,
         handLimit: this.state.handLimit,
         shopCost: this.state.shopCost,
         eventDensity: this.state.eventDensity,
+        stormDraw: this.state.stormDraw,
+        stormThrows: this.state.stormThrows,
+        maxReactions: this.state.maxReactions,
       });
       this.seatOrder = players.map((p) => p.sessionId);
       this.frameworkSeatByEngineSeat = players.map((p) => p.seat);
@@ -137,9 +142,14 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
     this.state.startingLives = o.startingLives;
     this.state.splashHit = o.splashHit;
     this.state.splashMiss = o.splashMiss;
+    this.state.mainHit = o.mainHit;
+    this.state.mainMiss = o.mainMiss;
     this.state.handLimit = o.handLimit;
     this.state.shopCost = o.shopCost;
     this.state.eventDensity = o.eventDensity;
+    this.state.stormDraw = o.stormDraw;
+    this.state.stormThrows = o.stormThrows;
+    this.state.maxReactions = o.maxReactions;
     this.state.turnSeconds = o.turnSeconds;
     this.state.reactionSeconds = o.reactionSeconds;
   }
@@ -159,9 +169,14 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
         startingLives: this.state.startingLives,
         splashHit: this.state.splashHit,
         splashMiss: this.state.splashMiss,
+        mainHit: this.state.mainHit,
+        mainMiss: this.state.mainMiss,
         handLimit: this.state.handLimit,
         shopCost: this.state.shopCost,
         eventDensity: this.state.eventDensity,
+        stormDraw: this.state.stormDraw,
+        stormThrows: this.state.stormThrows,
+        maxReactions: this.state.maxReactions,
         turnSeconds: this.state.turnSeconds,
         reactionSeconds: this.state.reactionSeconds,
       },

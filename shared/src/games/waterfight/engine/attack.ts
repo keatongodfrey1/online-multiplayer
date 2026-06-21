@@ -87,7 +87,10 @@ export function openTarget(s: GameState): void {
 export function advanceLadder(s: GameState, res: Resolution): AttackOutcome {
   const atk = s.awaiting.attack;
   if (!atk) throw new Error("no attack in progress");
-  if (++atk.rounds > MAX_ATTACK_ROUNDS) return { resolved: true, hit: !isBlocked(atk) };
+  // The lobby MAX_REACTIONS dial soft-caps the back-and-forth (0 = unlimited),
+  // never above the hard MAX_ATTACK_ROUNDS bug-backstop.
+  const cap = s.options.maxReactions > 0 ? Math.min(s.options.maxReactions, MAX_ATTACK_ROUNDS) : MAX_ATTACK_ROUNDS;
+  if (++atk.rounds > cap) return { resolved: true, hit: !isBlocked(atk) };
 
   if (s.awaiting.kind === "DEFEND" && res.kind === "DEFEND") {
     switch (res.defense) {

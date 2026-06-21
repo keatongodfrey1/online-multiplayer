@@ -3,18 +3,19 @@
 // catches an attack-state-machine soft-lock (the failure mode the eng review
 // flagged as critical).
 
-import { MAIN_DECK_SIZE, SHOP_ID_BASE, SHOP_TOTAL } from "./data.js";
+import { SHOP_ID_BASE, SHOP_TOTAL } from "./data.js";
 import { livingSeats } from "./engine.js";
 import type { GameState } from "./types.js";
 
 export function assertInvariants(s: GameState): void {
-  // --- main card conservation: count only main-deck cards (ids 1..MAIN_DECK_SIZE)
+  // --- main card conservation: count only main-deck cards (ids 1..mainIdMax)
   //     across deck + discard + hands. Shop/big/injected cards (other ids) are a
   //     separate pool and are intentionally ignored here. ---
+  const max = s.mainIdMax;
   const ids = new Set<number>();
   let mainCount = 0;
   const countMain = (c: { id: number }): void => {
-    if (c.id >= 1 && c.id <= MAIN_DECK_SIZE) {
+    if (c.id >= 1 && c.id <= max) {
       mainCount++;
       ids.add(c.id);
     }
@@ -22,12 +23,12 @@ export function assertInvariants(s: GameState): void {
   for (const c of s.mainDeck) countMain(c);
   for (const c of s.mainDiscard) countMain(c);
   for (const p of s.players) for (const c of p.hand) countMain(c);
-  if (mainCount !== MAIN_DECK_SIZE) throw new Error(`main card conservation: ${mainCount} != ${MAIN_DECK_SIZE}`);
-  if (ids.size !== MAIN_DECK_SIZE) throw new Error(`duplicate or missing main card ids: ${ids.size} != ${MAIN_DECK_SIZE}`);
+  if (mainCount !== max) throw new Error(`main card conservation: ${mainCount} != ${max}`);
+  if (ids.size !== max) throw new Error(`duplicate or missing main card ids: ${ids.size} != ${max}`);
   // The main deck may only hold main-deck cards or Events (a reshuffle mis-route
   // would surface a shop/big card here).
   for (const c of s.mainDeck) {
-    if (c.kind !== "event" && (c.id < 1 || c.id > MAIN_DECK_SIZE)) throw new Error(`non-main card ${c.id} in main deck`);
+    if (c.kind !== "event" && (c.id < 1 || c.id > max)) throw new Error(`non-main card ${c.id} in main deck`);
   }
   // Events live ONLY in the main deck + main discard (resolve-on-draw, never held).
   const eventOutsideDeck = (c: { kind: string }): boolean => c.kind === "event";

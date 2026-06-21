@@ -251,22 +251,25 @@ function resolveEvent(s: GameState, drawer: number, event: EventKind): void {
   concludeIfOver(s);
 }
 
-/** A Storm Cloud's draw (D5): 1 card per turn; a drawn Event is discarded with no
- *  effect (E5). */
+/** A Storm Cloud's draw (D5): `stormDraw` cards per turn (default 1); a drawn
+ *  Event is discarded with no effect and still consumes the slot (E5). */
 function drawStormCloud(s: GameState, seat: number): void {
-  const card = drawMainCard(s);
-  if (!card) return;
-  if (card.kind === "event") {
-    discardCard(s, card); // a Storm Cloud's Event has no effect
-    return;
+  for (let i = 0; i < s.options.stormDraw; i++) {
+    const card = drawMainCard(s);
+    if (!card) return;
+    if (card.kind === "event") {
+      discardCard(s, card); // a Storm Cloud's Event has no effect
+      continue;
+    }
+    s.players[seat]!.hand.push(card);
   }
-  s.players[seat]!.hand.push(card);
 }
 
 /** Begin a seat's turn: apply pending statuses, draw, await their action. */
 export function startTurn(s: GameState, seat: number): void {
   s.turnSeat = seat;
   s.supportUsed = false;
+  s.stormThrowsUsed = 0;
   const p = s.players[seat]!;
   if (p.stormCloud) {
     drawStormCloud(s, seat); // D5: draw 1, Events void
@@ -454,6 +457,11 @@ function afterAttack(s: GameState, kind: AttackKind): void {
     s.awaiting = { seats: [owner], kind: "EXTRA_THROW" }; // E4: optional extra basic throw
     return;
   }
+  // A Storm Cloud may splash again if its per-turn throw budget (D5 dial) remains.
+  if (p.stormCloud && s.stormThrowsUsed < s.options.stormThrows && handHas(p, "balloon") && livingSeats(s).length > 0) {
+    s.awaiting = { seats: [owner], kind: "MOVE" };
+    return;
+  }
   endActiveTurn(s);
 }
 
@@ -564,7 +572,9 @@ export function legalMoves(s: GameState): Move[] {
   if (p.stormCloud) {
     // D5: a Storm Cloud may only pass or splash a random living player.
     const moves: Move[] = [{ kind: "END_TURN" }];
-    if (handHas(p, "balloon") && livingSeats(s).length > 0) moves.push({ kind: "STORM_THROW" });
+    if (handHas(p, "balloon") && livingSeats(s).length > 0 && s.stormThrowsUsed < s.options.stormThrows) {
+      moves.push({ kind: "STORM_THROW" });
+    }
     return moves;
   }
   const opponents = livingSeats(s).filter((t) => t !== seat);
@@ -659,6 +669,7 @@ function validateMove(s: GameState, move: Move): void {
     if (move.kind !== "STORM_THROW") throw new Error("a Storm Cloud may only pass or splash");
     if (!handHas(p, "balloon")) throw new Error("no Water Balloon to splash");
     if (livingSeats(s).length === 0) throw new Error("no living target for the splash");
+    if (s.stormThrowsUsed >= s.options.stormThrows) throw new Error("no Storm Cloud throws left this turn");
     return;
   }
   if (move.kind === "STORM_THROW") throw new Error("only a Storm Cloud may STORM_THROW");
@@ -797,6 +808,7 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
     // is the ladder attacker and may play Hit from its kept hand.
     const targets = livingSeats(s);
     const target = targets[Math.floor(rand(s) * targets.length)]!;
+    s.stormThrowsUsed += 1;
     s.log.push(`Storm Cloud seat ${seat} splashes random target ${target}`);
     startThrow(s, seat, target, false);
     return { state: s, awaiting: s.awaiting, events };

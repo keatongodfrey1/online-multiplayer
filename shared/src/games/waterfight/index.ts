@@ -44,9 +44,14 @@ export const WF_SETTINGS: readonly WFSetting[] = [
   { key: "startingLives", label: "Starting lives", min: 1, max: 5, step: 1, default: 3, hint: "Lives each player starts with." },
   { key: "splashHit", label: "Splash Hit cards", min: 1, max: 30, step: 1, default: 13, hint: "Hit cards in the Splash Pile (higher = throws land more)." },
   { key: "splashMiss", label: "Splash Miss cards", min: 0, max: 30, step: 1, default: 7, hint: "Miss cards in the Splash Pile." },
+  { key: "mainHit", label: "Deck Hit cards", min: 0, max: 50, step: 1, default: 20, hint: "Hit hand-cards in the main deck (the counter-block layer)." },
+  { key: "mainMiss", label: "Deck Miss cards", min: 0, max: 50, step: 1, default: 20, hint: "Miss hand-cards in the main deck (the block layer)." },
   { key: "handLimit", label: "Hand limit", min: 3, max: 20, step: 1, default: 8, hint: "Discard down to this at end of turn." },
   { key: "shopCost", label: "Shop cost", min: 1, max: 10, step: 1, default: 4, hint: "Coins to buy one shop card." },
   { key: "eventDensity", label: "Event density", min: 0, max: 19, step: 1, default: 8, hint: "How many of the 19 Events are seeded." },
+  { key: "stormDraw", label: "Storm Cloud draw", min: 0, max: 5, step: 1, default: 1, hint: "Cards a soaked Storm Cloud draws per turn." },
+  { key: "stormThrows", label: "Storm Cloud throws", min: 0, max: 5, step: 1, default: 1, hint: "Balloons a Storm Cloud may splash per turn." },
+  { key: "maxReactions", label: "Max reactions", min: 0, max: 50, step: 1, default: 0, hint: "Cap on a defense ladder's back-and-forth (0 = unlimited)." },
   { key: "turnSeconds", label: "Turn timer (s)", min: 0, max: 300, step: 5, default: 0, hint: "Auto-pass an idle player's turn (0 = off)." },
   { key: "reactionSeconds", label: "Reaction timer (s)", min: 0, max: 60, step: 1, default: 12, hint: "Auto-pass an idle reaction (0 = off)." },
 ] as const;
@@ -139,9 +144,14 @@ export class WaterFightState extends BaseState {
   @type("uint8") startingLives = 3;
   @type("uint8") splashHit = 13;
   @type("uint8") splashMiss = 7;
+  @type("uint8") mainHit = 20;
+  @type("uint8") mainMiss = 20;
   @type("uint8") handLimit = 8;
   @type("uint8") shopCost = 4;
   @type("uint8") eventDensity = 8;
+  @type("uint8") stormDraw = 1;
+  @type("uint8") stormThrows = 1;
+  @type("uint8") maxReactions = 0;
 
   // ---- capped synced log (eng-review decision 3A) ----
   @type(["string"]) log = new ArraySchema<string>();

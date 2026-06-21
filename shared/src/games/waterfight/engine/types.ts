@@ -90,12 +90,21 @@ export interface GameOptions {
   /** Splash Pile composition (the lobby "splash odds" dial). */
   splashHit: number; // default 13
   splashMiss: number; // default 7
+  /** Main-deck Hit/Miss HAND-card counts (the defense-layer dial). Balloon/
+   *  Treasure (20 each) and Wild (1) are fixed; these tune the deck size. */
+  mainHit: number; // default 20
+  mainMiss: number; // default 20
   /** Discard down to this many cards at end of turn. */
   handLimit: number; // default 8
   /** Coins to buy one card from a shop stack. */
   shopCost: number; // default 4
   /** How many of the 19 Events are seeded into the main deck (0-19, default 8). */
   eventDensity: number;
+  /** Storm Cloud sideline rate (D5): cards drawn and balloons thrown per turn. */
+  stormDraw: number; // default 1
+  stormThrows: number; // default 1
+  /** Soft cap on a defense-ladder's back-and-forth (0 = unlimited, backstopped). */
+  maxReactions: number; // default 0
   /** Backstop so a pathological game still terminates. */
   turnCap: number;
 }
@@ -104,9 +113,14 @@ export const DEFAULT_OPTIONS: GameOptions = {
   startingLives: 3,
   splashHit: 13,
   splashMiss: 7,
+  mainHit: 20,
+  mainMiss: 20,
   handLimit: 8,
   shopCost: 4,
   eventDensity: 8,
+  stormDraw: 1,
+  stormThrows: 1,
+  maxReactions: 0,
   turnCap: 4000,
 };
 
@@ -165,6 +179,10 @@ export interface GameState {
   /** Advancing PRNG state (see rng.ts) — enables deterministic mid-game reshuffles. */
   rngState: number;
   options: GameOptions;
+  /** Highest main-deck card id (the deck size; main ids are 1..mainIdMax). Set at
+   *  setup from the Hit/Miss dial — the conservation/routing boundary, replacing a
+   *  fixed constant now that the deck size varies. */
+  mainIdMax: number;
   players: PlayerState[];
   mainDeck: Card[]; // SECRET, shuffled
   mainDiscard: Card[];
@@ -182,6 +200,8 @@ export interface GameState {
   turnSeat: number;
   /** Whether the active player has used their one Support card this turn. */
   supportUsed: boolean;
+  /** Storm-Cloud throws used this turn (capped by options.stormThrows). */
+  stormThrowsUsed: number;
   /** A committed targeting action awaiting its reaction window (null otherwise). */
   pending: PendingAction | null;
   awaiting: Awaiting;

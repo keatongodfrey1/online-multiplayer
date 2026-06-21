@@ -2,15 +2,14 @@
 // engine <-> attack import cycle). Both decks reshuffle their own discard when
 // empty, using the game's deterministic RNG stream.
 
-import { MAIN_DECK_SIZE } from "./data.js";
 import { shuffleInPlace } from "./rng.js";
 import type { Card, GameState, SplashCard } from "./types.js";
 
-/** Route a played card to the right pile: main-deck cards (ids 1..MAIN_DECK_SIZE)
- *  and resolved Events go to the main discard (they reshuffle back — D3); shop/big/
+/** Route a played card to the right pile: main-deck cards (ids 1..mainIdMax) and
+ *  resolved Events go to the main discard (they reshuffle back — D3); shop/big/
  *  injected cards go to the usedPile (removed from circulation, never recycled). */
 export function discardCard(s: GameState, card: Card): void {
-  if (card.kind === "event" || (card.id >= 1 && card.id <= MAIN_DECK_SIZE)) s.mainDiscard.push(card);
+  if (card.kind === "event" || (card.id >= 1 && card.id <= s.mainIdMax)) s.mainDiscard.push(card);
   else s.usedPile.push(card);
 }
 

@@ -2,7 +2,7 @@
 
 import type { Card, CardKind, EventKind, StackId } from "./types.js";
 
-export const ENGINE_VERSION = "0.1.0";
+export const ENGINE_VERSION = "0.2.0"; // bumped for the dialed deck + new options (invalidates older saves)
 
 /** Backstop on the attack ladder so a bug can never soft-lock the table. The
  *  unbounded Miss/Hit war is bounded in practice by cards in hand; this only
@@ -12,8 +12,9 @@ export const MAX_ATTACK_ROUNDS = 500;
 /** Cards drawn at the start of each turn. */
 export const DRAW_PER_TURN = 2;
 
-/** Main deck composition (D7). Umbrella/Towel/etc. come from the shop (Phase B),
- *  so they are NOT in the main deck — only these five kinds are seeded here. */
+/** Default main deck composition (D7). Balloon/Treasure (20) and Wild (1) are
+ *  fixed; Hit/Miss are a lobby dial (default 20/20). Umbrella/Towel/etc. come from
+ *  the shop, so they are NOT in the main deck. */
 export const MAIN_DECK_COMPOSITION: Partial<Record<CardKind, number>> = {
   balloon: 20,
   miss: 20,
@@ -21,19 +22,35 @@ export const MAIN_DECK_COMPOSITION: Partial<Record<CardKind, number>> = {
   treasure: 20,
   wild: 1,
 };
+/** Fixed (non-dialed) main-deck counts. */
+const MAIN_BALLOON = 20;
+const MAIN_TREASURE = 20;
+const MAIN_WILD = 1;
+export const DEFAULT_MAIN_HIT = 20;
+export const DEFAULT_MAIN_MISS = 20;
 
 export const MAIN_DECK_SIZE: number = Object.values(MAIN_DECK_COMPOSITION).reduce(
   (a, b) => a + (b ?? 0),
   0,
 );
 
-/** Build the ordered (unshuffled) main deck with unique ids. */
-export function buildMainDeck(): Card[] {
+/** Full main-deck size for the given Hit/Miss counts (= highest card id). */
+export function mainDeckSize(mainHit: number, mainMiss: number): number {
+  return MAIN_BALLOON + mainMiss + mainHit + MAIN_TREASURE + MAIN_WILD;
+}
+
+/** Build the ordered (unshuffled) main deck with unique ids 1..size. */
+export function buildMainDeck(mainHit = DEFAULT_MAIN_HIT, mainMiss = DEFAULT_MAIN_MISS): Card[] {
+  const comp: [CardKind, number][] = [
+    ["balloon", MAIN_BALLOON],
+    ["miss", mainMiss],
+    ["hit", mainHit],
+    ["treasure", MAIN_TREASURE],
+    ["wild", MAIN_WILD],
+  ];
   const deck: Card[] = [];
   let id = 1;
-  for (const [kind, count] of Object.entries(MAIN_DECK_COMPOSITION)) {
-    for (let i = 0; i < (count ?? 0); i++) deck.push({ id: id++, kind: kind as CardKind });
-  }
+  for (const [kind, count] of comp) for (let i = 0; i < count; i++) deck.push({ id: id++, kind });
   return deck;
 }
 

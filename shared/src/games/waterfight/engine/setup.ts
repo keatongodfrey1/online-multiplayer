@@ -1,7 +1,7 @@
 // Game setup: build the initial GameState (decks, players, opening turn).
 
 import { WF_STACK_IDS } from "../constants.js";
-import { buildEventCards, buildMainDeck, buildStacks, ENGINE_VERSION, EVENT_KINDS, EVENT_TOTAL } from "./data.js";
+import { buildEventCards, buildMainDeck, buildStacks, ENGINE_VERSION, EVENT_KINDS, EVENT_TOTAL, mainDeckSize } from "./data.js";
 import { startTurn } from "./engine.js";
 import { shuffleInPlace } from "./rng.js";
 import {
@@ -22,6 +22,8 @@ export function createGame(
   if (opts.splashHit + opts.splashMiss < 1) throw new Error("splash pile must have >= 1 card");
   if (opts.startingLives < 1) throw new Error("startingLives must be >= 1");
   if (opts.eventDensity < 0 || opts.eventDensity > EVENT_TOTAL) throw new Error(`eventDensity must be 0..${EVENT_TOTAL}`);
+  if (opts.mainHit < 0 || opts.mainMiss < 0) throw new Error("mainHit/mainMiss must be >= 0");
+  if (opts.stormDraw < 0 || opts.stormThrows < 0 || opts.maxReactions < 0) throw new Error("storm/maxReactions must be >= 0");
 
   const players: PlayerState[] = [];
   for (let i = 0; i < playerCount; i++) {
@@ -46,8 +48,9 @@ export function createGame(
     seed,
     rngState: seed >>> 0,
     options: opts,
+    mainIdMax: mainDeckSize(opts.mainHit, opts.mainMiss),
     players,
-    mainDeck: buildMainDeck(),
+    mainDeck: buildMainDeck(opts.mainHit, opts.mainMiss),
     mainDiscard: [],
     usedPile: [],
     stacks: buildStacks(),
@@ -56,6 +59,7 @@ export function createGame(
     phase: "playing",
     turnSeat: 0,
     supportUsed: false,
+    stormThrowsUsed: 0,
     pending: null,
     awaiting: { seats: [0], kind: "MOVE" },
     turnCount: 0,

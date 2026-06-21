@@ -35,7 +35,7 @@ function setHand(g: GameState, seat: number, kinds: CardKind[]): void {
   // Return any displaced REAL cards (e.g. the opening cushion) to the deck so
   // conservation still holds for the few tests that assert it after setHand.
   for (const c of g.players[seat]!.hand) {
-    if (c.id >= 1 && c.id <= MAIN_DECK_SIZE) g.mainDeck.push(c);
+    if (c.id >= 1 && c.id <= g.mainIdMax) g.mainDeck.push(c);
   }
   g.players[seat]!.hand = kinds.map((kind, i) => ({ id: 10000 + seat * 100 + i, kind }));
 }
@@ -905,6 +905,67 @@ describe("water fight engine: effects + edges (review)", () => {
     const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "hiddenstash" });
     assert.equal(r.state.players[0]!.hand.filter((c) => c.kind === "treasure").length - before, 2, "took 2 Treasure");
     assert.equal(r.state.mainDiscard.filter((c) => c.kind === "treasure").length, 1, "one Treasure left in the discard");
+  });
+});
+
+describe("water fight engine: new dials (G2)", () => {
+  it("the main-deck Hit/Miss dial resizes the deck, conserves, and plays", () => {
+    const g = createGame(3, 5, { mainHit: 5, mainMiss: 5, eventDensity: 0 });
+    assert.equal(g.mainIdMax, 51, "deck = 20 balloon + 5 miss + 5 hit + 20 treasure + 1 wild");
+    const count = (k: CardKind) => [...g.mainDeck, ...g.players.flatMap((p) => p.hand)].filter((c) => c.kind === k).length;
+    assert.equal(count("hit"), 5);
+    assert.equal(count("miss"), 5);
+    assert.equal(count("balloon"), 20);
+    assertInvariants(g);
+    let s = g;
+    const policy = new RandomPolicy(2);
+    let guard = 0;
+    while (!isGameOver(s) && ++guard < 1500) {
+      s = s.awaiting.kind === "MOVE" ? applyMove(s, policy.move(s)).state : applyResolution(s, policy.resolve(s)).state;
+      assertInvariants(s); // conservation holds against the custom mainIdMax
+    }
+  });
+
+  it("Storm Cloud rate dials: draws and throws per turn", () => {
+    const g = game(3, 5, { stormDraw: 2 });
+    g.players[1]!.lives = 0;
+    g.players[1]!.out = true;
+    g.players[1]!.stormCloud = true;
+    setHand(g, 1, []);
+    g.turnSeat = 0;
+    g.awaiting = { seats: [0], kind: "MOVE" };
+    const r = applyMove(g, { kind: "END_TURN" }); // seat 1's Storm Cloud turn
+    assert.equal(r.state.turnSeat, 1);
+    assert.equal(r.state.players[1]!.hand.length, 2, "stormDraw = 2 drew two");
+
+    const g2 = game(3, 7, { stormThrows: 2 });
+    g2.players[1]!.lives = 0;
+    g2.players[1]!.out = true;
+    g2.players[1]!.stormCloud = true;
+    setHand(g2, 1, ["balloon", "balloon"]);
+    g2.turnSeat = 1;
+    g2.awaiting = { seats: [1], kind: "MOVE" };
+    g2.splashPile = ["hit", "hit", "hit", "hit"];
+    let r2 = applyMove(g2, { kind: "STORM_THROW" });
+    r2 = applyResolution(r2.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r2.state.awaiting.kind, "MOVE", "a Storm Cloud with 2 throws gets a second");
+    assert.equal(r2.state.awaiting.seats[0], 1);
+    r2 = applyMove(r2.state, { kind: "STORM_THROW" });
+    r2 = applyResolution(r2.state, { kind: "DEFEND", defense: "pass" });
+    assert.notEqual(r2.state.turnSeat, 1, "after two throws the Storm Cloud's turn ends");
+  });
+
+  it("the MAX_REACTIONS dial caps the defense ladder", () => {
+    const g = game(2, 5, { maxReactions: 2 });
+    setHand(g, 0, ["balloon", "hit", "hit"]);
+    setHand(g, 1, ["miss", "miss"]);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "miss" }); // round 1
+    r = applyResolution(r.state, { kind: "ATTACKER_RESPOND", respond: "hit" }); // round 2
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "miss" }); // round 3 > cap -> resolves
+    assert.notEqual(r.state.awaiting.kind, "DEFEND", "the cap ended the ladder");
+    assert.notEqual(r.state.awaiting.kind, "ATTACKER_RESPOND");
   });
 });
 

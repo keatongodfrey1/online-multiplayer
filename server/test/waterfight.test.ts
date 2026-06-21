@@ -21,7 +21,7 @@ describe("water fight save validator", () => {
         { nickname: "A", isBot: false, gone: false },
         { nickname: "B", isBot: false, gone: false },
       ],
-      options: { startingLives: 3, splashHit: 13, splashMiss: 7, handLimit: 8, shopCost: 4, eventDensity: 8, turnSeconds: 0, reactionSeconds: 12 },
+      options: { startingLives: 3, splashHit: 13, splashMiss: 7, mainHit: 20, mainMiss: 20, handLimit: 8, shopCost: 4, eventDensity: 8, stormDraw: 1, stormThrows: 1, maxReactions: 0, turnSeconds: 0, reactionSeconds: 12 },
     });
   }
 

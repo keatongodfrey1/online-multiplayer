@@ -9,7 +9,7 @@
  */
 import { WaterFightEngine as WF } from "@backbone/shared";
 
-const { ENGINE_VERSION, assertInvariants, legalMoves } = WF;
+const { ENGINE_VERSION, assertInvariants, legalMoves, mainDeckSize } = WF;
 type GameState = WF.GameState;
 
 export interface SaveSeat {
@@ -27,9 +27,14 @@ export interface ParsedSave {
     startingLives: number;
     splashHit: number;
     splashMiss: number;
+    mainHit: number;
+    mainMiss: number;
     handLimit: number;
     shopCost: number;
     eventDensity: number;
+    stormDraw: number;
+    stormThrows: number;
+    maxReactions: number;
     turnSeconds: number;
     reactionSeconds: number;
   };
@@ -103,9 +108,14 @@ function rebuildEngine(e: unknown): GameState {
     startingLives: clampInt(o.startingLives, 1, 50),
     splashHit: clampInt(o.splashHit, 0, 200),
     splashMiss: clampInt(o.splashMiss, 0, 200),
+    mainHit: clampInt(o.mainHit, 0, 200),
+    mainMiss: clampInt(o.mainMiss, 0, 200),
     handLimit: clampInt(o.handLimit, 1, 100),
     shopCost: clampInt(o.shopCost, 0, 100),
     eventDensity: clampInt(o.eventDensity, 0, 19),
+    stormDraw: clampInt(o.stormDraw, 0, 20),
+    stormThrows: clampInt(o.stormThrows, 0, 20),
+    maxReactions: clampInt(o.maxReactions, 0, 100_000),
     turnCap: clampInt(o.turnCap, 1, 1_000_000),
   };
   need(options.splashHit + options.splashMiss >= 1, "empty splash pile");
@@ -183,6 +193,7 @@ function rebuildEngine(e: unknown): GameState {
     seed: e.seed as number,
     rngState: e.rngState as number,
     options,
+    mainIdMax: mainDeckSize(options.mainHit, options.mainMiss), // recomputed, not trusted
     players,
     mainDeck: rebuildCards(e.mainDeck),
     mainDiscard: rebuildCards(e.mainDiscard),
@@ -192,6 +203,7 @@ function rebuildEngine(e: unknown): GameState {
     splashDiscard: rebuildSplash(e.splashDiscard),
     turnSeat: e.turnSeat as number,
     supportUsed: e.supportUsed as boolean,
+    stormThrowsUsed: clampInt(e.stormThrowsUsed ?? 0, 0, options.stormThrows),
     pending,
     phase: e.phase as "playing" | "sudden-death",
     awaiting,
@@ -290,9 +302,14 @@ export function parseSave(raw: unknown): ParsedSave | null {
       startingLives: clampInt(o.startingLives ?? 3, 1, 5),
       splashHit: clampInt(o.splashHit ?? 13, 1, 30),
       splashMiss: clampInt(o.splashMiss ?? 7, 0, 30),
+      mainHit: clampInt(o.mainHit ?? 20, 0, 50),
+      mainMiss: clampInt(o.mainMiss ?? 20, 0, 50),
       handLimit: clampInt(o.handLimit ?? 8, 3, 20),
       shopCost: clampInt(o.shopCost ?? 4, 1, 10),
       eventDensity: clampInt(o.eventDensity ?? 8, 0, 19),
+      stormDraw: clampInt(o.stormDraw ?? 1, 0, 5),
+      stormThrows: clampInt(o.stormThrows ?? 1, 0, 5),
+      maxReactions: clampInt(o.maxReactions ?? 0, 0, 50),
       turnSeconds: clampInt(o.turnSeconds ?? 0, 0, 300),
       reactionSeconds: clampInt(o.reactionSeconds ?? 12, 0, 60),
     };
