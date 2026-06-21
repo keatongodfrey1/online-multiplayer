@@ -10,7 +10,7 @@
  *  and tests can inject one. */
 export type CardKind =
   // main deck
-  | "balloon" | "miss" | "hit" | "treasure" | "wild"
+  | "balloon" | "miss" | "hit" | "treasure" | "wild" | "event"
   // Defense Depot (shop)
   | "umbrella" | "backpack" | "firstaid" | "towel" | "goggles" | "needle" | "lifeguard"
   // Mischief Market (shop)
@@ -38,9 +38,28 @@ export const SUPPORT_KINDS: readonly SupportKind[] = [
 /** The three blind shop stacks. */
 export type StackId = "defense" | "mischief" | "attack";
 
+/** Events live ONLY in the main deck; they resolve on draw and count as a draw
+ *  (D3/E5). Each maps to one immediate, self-contained effect (no awaiting). */
+export type EventKind =
+  // table-wide -1 life (the E9 Sudden-Death clamp keeps a simultaneous wipe from happening)
+  | "mudslide" | "stormsurge" | "heatwave" | "downpour" | "tidalwave"
+  // anti-leader: the player with the most lives loses 1
+  | "lightning" | "targetedstorm"
+  // heals (capped at starting lives — E8)
+  | "sunbreak" | "rainbow" | "waterparkpass"
+  // gain Treasure from the deck
+  | "treasurechest" | "supplycache" | "supplydrop"
+  // forced discards
+  | "leakybucket" | "springcleaning"
+  // misc
+  | "lostandfound" // E7: the drawer takes a random card from each opponent
+  | "calmwaters" | "falsealarm" | "gentlebreeze"; // duds (variance)
+
 export interface Card {
   id: number;
   kind: CardKind;
+  /** Set iff kind === "event" — which Event this card resolves to. */
+  event?: EventKind;
 }
 
 /** The Splash Pile is a SEPARATE deck of only these two verdicts (default 13/7). */
@@ -69,6 +88,8 @@ export interface GameOptions {
   handLimit: number; // default 8
   /** Coins to buy one card from a shop stack. */
   shopCost: number; // default 4
+  /** How many of the 19 Events are seeded into the main deck (0-19, default 8). */
+  eventDensity: number;
   /** Backstop so a pathological game still terminates. */
   turnCap: number;
 }
@@ -79,6 +100,7 @@ export const DEFAULT_OPTIONS: GameOptions = {
   splashMiss: 7,
   handLimit: 8,
   shopCost: 4,
+  eventDensity: 8,
   turnCap: 4000,
 };
 

@@ -1,6 +1,6 @@
 // Card data + tuning constants for the Water Fight engine.
 
-import type { Card, CardKind, StackId } from "./types.js";
+import type { Card, CardKind, EventKind, StackId } from "./types.js";
 
 export const ENGINE_VERSION = "0.1.0";
 
@@ -35,6 +35,29 @@ export function buildMainDeck(): Card[] {
     for (let i = 0; i < (count ?? 0); i++) deck.push({ id: id++, kind: kind as CardKind });
   }
   return deck;
+}
+
+// ---- Events (D3/E5) ----
+// The full roster of 19. The lobby "event density" dial seeds a random subset of
+// these into the main deck. Event cards carry kind "event" + their EventKind, and
+// get ids in a dedicated range so they never collide with main/shop cards and are
+// easy to conserve (they only ever live in the main deck + main discard).
+export const EVENT_ID_BASE = 2000;
+export const EVENT_KINDS: readonly EventKind[] = [
+  "mudslide", "stormsurge", "heatwave", "downpour", "tidalwave",
+  "lightning", "targetedstorm",
+  "sunbreak", "rainbow", "waterparkpass",
+  "treasurechest", "supplycache", "supplydrop",
+  "leakybucket", "springcleaning",
+  "lostandfound",
+  "calmwaters", "falsealarm", "gentlebreeze",
+];
+export const EVENT_TOTAL = EVENT_KINDS.length; // 19
+
+/** The ordered list of Event cards to seed (caller shuffles + assigns into the
+ *  deck); `chosen` is a subset of EVENT_KINDS already trimmed to the density. */
+export function buildEventCards(chosen: readonly EventKind[]): Card[] {
+  return chosen.map((event, i) => ({ id: EVENT_ID_BASE + i, kind: "event" as CardKind, event }));
 }
 
 // ---- Shop stacks (D4; Soaker x3 per the user's tweak) ----

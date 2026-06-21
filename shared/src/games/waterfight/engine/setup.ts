@@ -1,6 +1,6 @@
 // Game setup: build the initial GameState (decks, players, opening turn).
 
-import { buildMainDeck, buildStacks, ENGINE_VERSION } from "./data.js";
+import { buildEventCards, buildMainDeck, buildStacks, ENGINE_VERSION, EVENT_KINDS, EVENT_TOTAL } from "./data.js";
 import { startTurn } from "./engine.js";
 import { shuffleInPlace } from "./rng.js";
 import {
@@ -20,6 +20,7 @@ export function createGame(
   const opts: GameOptions = { ...DEFAULT_OPTIONS, ...(options ?? {}) };
   if (opts.splashHit + opts.splashMiss < 1) throw new Error("splash pile must have >= 1 card");
   if (opts.startingLives < 1) throw new Error("startingLives must be >= 1");
+  if (opts.eventDensity < 0 || opts.eventDensity > EVENT_TOTAL) throw new Error(`eventDensity must be 0..${EVENT_TOTAL}`);
 
   const players: PlayerState[] = [];
   for (let i = 0; i < playerCount; i++) {
@@ -61,6 +62,13 @@ export function createGame(
     log: [],
   };
 
+  // Seed a random subset of the 19 Events (D3): shuffle the roster, take the
+  // first `eventDensity`, and mix those event cards into the main deck.
+  if (opts.eventDensity > 0) {
+    const roster = [...EVENT_KINDS];
+    shuffleInPlace(roster, s);
+    s.mainDeck.push(...buildEventCards(roster.slice(0, opts.eventDensity)));
+  }
   shuffleInPlace(s.mainDeck, s);
   shuffleInPlace(s.splashPile, s);
   for (const id of ["defense", "mischief", "attack"] as const) shuffleInPlace(s.stacks[id], s);

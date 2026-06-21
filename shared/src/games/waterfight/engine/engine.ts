@@ -14,6 +14,7 @@ import {
   Awaiting,
   BigKind,
   CardKind,
+  EventKind,
   GameEvent,
   GameState,
   Move,
@@ -86,13 +87,144 @@ function actingSeat(s: GameState): number {
 
 // ---- turn flow --------------------------------------------------------------
 
-/** Draw `n` cards from the main deck into a seat's hand. */
+/** Draw `n` cards from the main deck into a seat's hand. A drawn Event resolves
+ *  immediately and counts as one of the draws (no replacement — D3/E5); drawing
+ *  stops early if an Event ends the game or soaks the drawer. */
 function drawCards(s: GameState, seat: number, n: number): void {
   const p = s.players[seat]!;
   for (let i = 0; i < n; i++) {
+    if (s.over || p.out) return;
     const card = drawMainCard(s);
-    if (card) p.hand.push(card);
+    if (!card) return;
+    if (card.kind === "event") {
+      discardCard(s, card); // resolved Events go to the main discard (reshuffle back — D3)
+      resolveEvent(s, seat, card.event!);
+      continue;
+    }
+    p.hand.push(card);
   }
+}
+
+/** Apply `dmg` to one seat, with the automatic Lifeguard save (E10) and soak. */
+function damageSeat(s: GameState, seat: number, dmg: number): void {
+  const t = s.players[seat]!;
+  if (t.out) return;
+  t.lives = Math.max(0, t.lives - dmg);
+  s.log.push(`seat ${seat} -${dmg} -> ${t.lives} lives`);
+  if (t.lives <= 0) {
+    if (handHas(t, "lifeguard")) {
+      spendKind(s, seat, "lifeguard");
+      t.lives = 1;
+      s.log.push(`seat ${seat} saved by Lifeguard (-> 1 life)`);
+    } else {
+      t.out = true;
+      s.log.push(`seat ${seat} is SOAKED`);
+    }
+  }
+}
+
+/** Heal one seat by 1, capped at starting lives (E8). */
+function healSeat(s: GameState, seat: number): void {
+  const t = s.players[seat]!;
+  if (!t.out) t.lives = Math.min(s.options.startingLives, t.lives + 1);
+}
+
+/** Move `n` Treasure cards from the main deck/discard into a seat's hand. */
+function gainTreasure(s: GameState, seat: number, n: number): void {
+  const p = s.players[seat]!;
+  for (let i = 0; i < n; i++) {
+    let idx = s.mainDeck.findIndex((c) => c.kind === "treasure");
+    if (idx >= 0) {
+      p.hand.push(s.mainDeck.splice(idx, 1)[0]!);
+      continue;
+    }
+    idx = s.mainDiscard.findIndex((c) => c.kind === "treasure");
+    if (idx >= 0) p.hand.push(s.mainDiscard.splice(idx, 1)[0]!);
+  }
+}
+
+/** Table-wide damage with the E9 guard: a single source can never soak EVERY
+ *  living player at once — that instead clamps each to 1 life (full Sudden-Death
+ *  phase lands in B.8). */
+function applyTableDamage(s: GameState, dmg: number): void {
+  const living = livingSeats(s);
+  const wouldSoak = living.filter((seat) => !handHas(s.players[seat]!, "lifeguard") && s.players[seat]!.lives <= dmg);
+  if (living.length > 1 && wouldSoak.length === living.length) {
+    for (const seat of living) s.players[seat]!.lives = 1;
+    s.log.push("table damage would soak all -> clamp each to 1 life (E9)");
+    return;
+  }
+  for (const seat of living) damageSeat(s, seat, dmg);
+}
+
+/** End the game if <= 1 living remains. Returns true if it concluded. */
+function concludeIfOver(s: GameState): boolean {
+  if (s.over) return true;
+  const living = livingSeats(s);
+  if (living.length <= 1) {
+    endGame(s, living[0] ?? leaderByLives(s), "last-standing");
+    return true;
+  }
+  return false;
+}
+
+/** Lost and Found (E7): the drawer takes a random card from each living opponent. */
+function lostAndFound(s: GameState, seat: number): void {
+  const p = s.players[seat]!;
+  for (const t of livingSeats(s)) {
+    if (t === seat) continue;
+    const h = s.players[t]!.hand;
+    if (h.length > 0) p.hand.push(h.splice(Math.floor(rand(s) * h.length), 1)[0]!);
+  }
+}
+
+/** Resolve one Event immediately on draw (D3). All effects are self-contained
+ *  (no awaiting), so this is safe to run inside a draw. */
+function resolveEvent(s: GameState, drawer: number, event: EventKind): void {
+  s.log.push(`seat ${drawer} draws Event: ${event}`);
+  switch (event) {
+    case "mudslide":
+    case "stormsurge":
+    case "heatwave":
+    case "downpour":
+    case "tidalwave":
+      applyTableDamage(s, 1);
+      break;
+    case "lightning":
+    case "targetedstorm": {
+      const leader = leaderByLives(s); // anti-snowball: the life leader takes 1
+      if (leader !== null) damageSeat(s, leader, 1);
+      break;
+    }
+    case "sunbreak":
+    case "rainbow":
+      for (const t of livingSeats(s)) healSeat(s, t);
+      break;
+    case "waterparkpass":
+      healSeat(s, drawer);
+      break;
+    case "treasurechest":
+    case "supplycache":
+      gainTreasure(s, drawer, 2);
+      break;
+    case "supplydrop":
+      for (const t of livingSeats(s)) gainTreasure(s, t, 1);
+      break;
+    case "leakybucket":
+      discardRandom(s, drawer, 1);
+      break;
+    case "springcleaning":
+      for (const t of livingSeats(s)) discardRandom(s, t, 1);
+      break;
+    case "lostandfound":
+      lostAndFound(s, drawer);
+      break;
+    case "calmwaters":
+    case "falsealarm":
+    case "gentlebreeze":
+      break; // duds — variance only
+  }
+  concludeIfOver(s);
 }
 
 /** Begin a seat's turn: apply pending statuses, draw, await their action. */
@@ -102,7 +234,12 @@ export function startTurn(s: GameState, seat: number): void {
   const p = s.players[seat]!;
   const draw = p.statuses.freezeOut ? 1 : DRAW_PER_TURN; // Freeze Out
   p.statuses.freezeOut = false;
-  drawCards(s, seat, draw);
+  drawCards(s, seat, draw); // may resolve Events (D3)
+  if (s.over) return;
+  if (s.players[seat]!.out) {
+    advanceTurn(s); // an Event soaked the turn player on their opening draw
+    return;
+  }
   s.awaiting = { seats: [seat], kind: "MOVE" };
 }
 
@@ -260,6 +397,7 @@ function afterAttack(s: GameState, kind: AttackKind): void {
   if (kind === "golden" && !s.players[owner]!.out) {
     drawCards(s, owner, 2); // Golden draws 2 whether it hit or missed (E2)
     s.log.push(`seat ${owner} draws 2 (Golden)`);
+    if (s.over) return; // a Golden-drawn Event ended the game
   }
   s.awaiting = { seats: [], kind: "GAME_OVER" }; // clears the attack
   const p = s.players[owner]!;
@@ -274,23 +412,8 @@ function afterAttack(s: GameState, kind: AttackKind): void {
 function resolveTarget(s: GameState, hit: boolean): void {
   const atk = s.awaiting.attack!;
   const tSeat = currentTarget(atk);
-  if (hit) {
-    const t = s.players[tSeat]!;
-    t.lives = Math.max(0, t.lives - atk.damage);
-    s.log.push(`seat ${tSeat} hit for ${atk.damage} -> ${t.lives} lives`);
-    if (t.lives <= 0) {
-      if (handHas(t, "lifeguard")) {
-        spendKind(s, tSeat, "lifeguard"); // automatic save at 0 lives (once)
-        t.lives = 1;
-        s.log.push(`seat ${tSeat} saved by Lifeguard (-> 1 life)`);
-      } else {
-        t.out = true;
-        s.log.push(`seat ${tSeat} is SOAKED`);
-      }
-    }
-  } else {
-    s.log.push(`attack on seat ${tSeat} missed`);
-  }
+  if (hit) damageSeat(s, tSeat, atk.damage);
+  else s.log.push(`attack on seat ${tSeat} missed`);
   const living = livingSeats(s);
   if (living.length <= 1) {
     endGame(s, living[0] ?? null, "last-standing");
@@ -607,8 +730,14 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
       // E11: a targeting Support opens a Towel window before it resolves.
       offerReaction(s, { kind: "SUPPORT", attacker: seat, target: move.target, support: move.support, redirectedSeats: [] });
     } else {
-      applySupport(s, seat, move.support, move.target);
-      s.awaiting = { seats: [seat], kind: "MOVE" }; // Support does NOT end the turn
+      applySupport(s, seat, move.support, move.target); // may draw (Backpack) -> resolve an Event
+      if (s.over) {
+        // game ended on a drawn Event; awaiting is already GAME_OVER
+      } else if (s.players[seat]!.out) {
+        endActiveTurn(s); // a Backpack-drawn Event soaked the player mid-turn
+      } else {
+        s.awaiting = { seats: [seat], kind: "MOVE" }; // Support does NOT end the turn
+      }
     }
     return { state: s, awaiting: s.awaiting, events };
   }

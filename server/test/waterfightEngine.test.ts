@@ -25,6 +25,12 @@ type Policy = WF.Policy;
 
 // --- helpers (combat unit tests inject hands + force the splash; they do not
 //     assert full card conservation, like Splendor's injected-card tests) ---
+/** A pristine game with Events OFF — keeps the injected-hand unit tests
+ *  deterministic (a seeded Event resolving on the opening draw would perturb
+ *  lives/hands). The fuzz + the dedicated Events block opt back into Events. */
+function game(pc: number, seed: number, opts?: Partial<WF.GameOptions>): GameState {
+  return createGame(pc, seed, { eventDensity: 0, ...(opts ?? {}) });
+}
 function setHand(g: GameState, seat: number, kinds: CardKind[]): void {
   g.players[seat]!.hand = kinds.map((kind, i) => ({ id: 10000 + seat * 100 + i, kind }));
 }
@@ -32,6 +38,11 @@ function setHand(g: GameState, seat: number, kinds: CardKind[]): void {
 function forceSplash(g: GameState, verdict: SplashCard): void {
   if (g.splashPile.length === 0) g.splashPile.push(verdict);
   else g.splashPile[g.splashPile.length - 1] = verdict;
+}
+/** Put an Event card on top of the main deck (drawn next). The next seat's
+ *  opening draw resolves it. */
+function injectTopEvent(g: GameState, event: WF.EventKind): void {
+  g.mainDeck.push({ id: 3000, kind: "event", event });
 }
 /** Move `n` cards of a kind from the deck into a seat's hand (preserves conservation). */
 function moveFromDeck(g: GameState, seat: number, kind: CardKind, n: number): void {
@@ -43,11 +54,11 @@ function moveFromDeck(g: GameState, seat: number, kind: CardKind, n: number): vo
 
 describe("water fight engine: setup", () => {
   it("createGame is deterministic for a given seed", () => {
-    assert.deepEqual(createGame(3, 12345), createGame(3, 12345));
+    assert.deepEqual(game(3, 12345), game(3, 12345));
   });
 
   it("setup: lives, splash pile, opening hand, decks", () => {
-    const g = createGame(4, 7);
+    const g = game(4, 7);
     assert.equal(g.players.length, 4);
     for (const p of g.players) assert.equal(p.lives, 3);
     assert.equal(g.options.splashHit + g.options.splashMiss, 20);
@@ -60,15 +71,15 @@ describe("water fight engine: setup", () => {
   });
 
   it("rejects bad player counts and an empty splash pile", () => {
-    assert.throws(() => createGame(1, 1));
-    assert.throws(() => createGame(6, 1));
-    assert.throws(() => createGame(2, 1, { splashHit: 0, splashMiss: 0 }));
+    assert.throws(() => game(1, 1));
+    assert.throws(() => game(6, 1));
+    assert.throws(() => game(2, 1, { splashHit: 0, splashMiss: 0 }));
   });
 });
 
 describe("water fight engine: combat", () => {
   it("splash MISS ends the attack with no damage; turn advances", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["balloon"]);
     forceSplash(g, "miss");
     const r = applyMove(g, { kind: "THROW", target: 1 });
@@ -78,7 +89,7 @@ describe("water fight engine: combat", () => {
   });
 
   it("splash HIT, defender passes -> lands for 1", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["balloon"]);
     setHand(g, 1, []);
     forceSplash(g, "hit");
@@ -90,7 +101,7 @@ describe("water fight engine: combat", () => {
   });
 
   it("HIT, Miss, attacker passes -> the block holds (miss)", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["balloon"]);
     setHand(g, 1, ["miss"]);
     forceSplash(g, "hit");
@@ -103,7 +114,7 @@ describe("water fight engine: combat", () => {
   });
 
   it("HIT, Miss, Hit cancels it, defender passes -> lands (the ladder alternates)", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["balloon", "hit"]);
     setHand(g, 1, ["miss"]);
     forceSplash(g, "hit");
@@ -116,7 +127,7 @@ describe("water fight engine: combat", () => {
   });
 
   it("Umbrella is an uncancelable full block on a basic throw (R1)", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["balloon", "hit"]); // attacker holds a Hit but cannot use it
     setHand(g, 1, ["umbrella"]);
     forceSplash(g, "hit");
@@ -128,7 +139,7 @@ describe("water fight engine: combat", () => {
 
   it("Wild-as-miss and Wild-as-hit are unblockable (R4)", () => {
     // Wild as miss
-    let g = createGame(2, 5);
+    let g = game(2, 5);
     setHand(g, 0, ["balloon", "hit"]);
     setHand(g, 1, ["wild"]);
     forceSplash(g, "hit");
@@ -137,7 +148,7 @@ describe("water fight engine: combat", () => {
     assert.equal(r.state.players[1]!.lives, 3, "Wild-as-miss blocked");
 
     // Wild as hit
-    g = createGame(2, 5);
+    g = game(2, 5);
     setHand(g, 0, ["balloon", "wild"]);
     setHand(g, 1, ["miss"]);
     forceSplash(g, "hit");
@@ -148,7 +159,7 @@ describe("water fight engine: combat", () => {
   });
 
   it("soaking the last opponent ends the game (last-standing)", () => {
-    const g = createGame(2, 9);
+    const g = game(2, 9);
     g.players[1]!.lives = 1;
     setHand(g, 0, ["balloon"]);
     setHand(g, 1, []);
@@ -164,7 +175,7 @@ describe("water fight engine: combat", () => {
 
 describe("water fight engine: big attacks (auto-connect)", () => {
   it("Mega auto-connects (no Splash flip) and 1 Miss is not enough to stop it", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["mega"]);
     setHand(g, 1, ["miss"]);
     const splashBefore = g.splashPile.length;
@@ -178,7 +189,7 @@ describe("water fight engine: big attacks (auto-connect)", () => {
   });
 
   it("Mega: two Miss stop it (attacker passes -> miss)", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["mega"]);
     setHand(g, 1, ["miss", "miss"]);
     let r = applyMove(g, { kind: "PLAY_BIG", big: "mega", target: 1 });
@@ -190,7 +201,7 @@ describe("water fight engine: big attacks (auto-connect)", () => {
   });
 
   it("R1: Umbrella vs Mega is Hit-cancelable -> one Hit forces a full re-block", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["mega", "hit"]);
     setHand(g, 1, ["umbrella"]);
     let r = applyMove(g, { kind: "PLAY_BIG", big: "mega", target: 1 });
@@ -203,7 +214,7 @@ describe("water fight engine: big attacks (auto-connect)", () => {
   });
 
   it("Giant deals 2 damage", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["giant"]);
     setHand(g, 1, []);
     let r = applyMove(g, { kind: "PLAY_BIG", big: "giant", target: 1 });
@@ -212,7 +223,7 @@ describe("water fight engine: big attacks (auto-connect)", () => {
   });
 
   it("Golden draws 2 whether it hits or misses; conservation holds", () => {
-    const g = createGame(3, 5); // 3p so soaking 1 does not end the game
+    const g = game(3, 5); // 3p so soaking 1 does not end the game
     g.players[0]!.hand.push({ id: 10000, kind: "golden" }); // keep seat 0's opening hand
     setHand(g, 1, ["umbrella"]); // seat 1's opening hand was empty
     const before = g.players[0]!.hand.length;
@@ -226,7 +237,7 @@ describe("water fight engine: big attacks (auto-connect)", () => {
 
 describe("water fight engine: turn structure (Support + hand limit)", () => {
   it("First Aid heals, capped at starting lives (E8); Support does not end the turn", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     g.players[0]!.lives = 1;
     g.players[0]!.hand.push({ id: 10001, kind: "firstaid" });
     const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "firstaid" });
@@ -234,14 +245,14 @@ describe("water fight engine: turn structure (Support + hand limit)", () => {
     assert.equal(r.state.supportUsed, true);
     assert.equal(r.awaiting.kind, "MOVE", "still the same player's turn");
 
-    const g2 = createGame(2, 5); // full lives -> heal is a no-op (cap)
+    const g2 = game(2, 5); // full lives -> heal is a no-op (cap)
     g2.players[0]!.hand.push({ id: 10001, kind: "firstaid" });
     const r2 = applyMove(g2, { kind: "PLAY_SUPPORT", support: "firstaid" });
     assert.equal(r2.state.players[0]!.lives, 3, "cannot exceed starting lives");
   });
 
   it("Waterproof Backpack draws 2", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     g.players[0]!.hand.push({ id: 10002, kind: "backpack" });
     const before = g.players[0]!.hand.length;
     const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "backpack" });
@@ -249,14 +260,14 @@ describe("water fight engine: turn structure (Support + hand limit)", () => {
   });
 
   it("only one Support per turn", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     g.players[0]!.hand.push({ id: 10001, kind: "firstaid" }, { id: 10002, kind: "backpack" });
     const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "firstaid" });
     assert.throws(() => applyMove(r.state, { kind: "PLAY_SUPPORT", support: "backpack" }), /already used a Support/);
   });
 
   it("hand limit: end of turn over the limit forces a discard, then advances", () => {
-    const g = createGame(2, 5, { handLimit: 3 });
+    const g = game(2, 5, { handLimit: 3 });
     setHand(g, 0, ["miss", "hit", "treasure", "miss", "hit"]);
     let r = applyMove(g, { kind: "END_TURN" });
     assert.equal(r.awaiting.kind, "DISCARD");
@@ -271,7 +282,7 @@ describe("water fight engine: turn structure (Support + hand limit)", () => {
 
 describe("water fight engine: shop (D4)", () => {
   it("builds + shuffles the 3 stacks to the right sizes", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     assert.equal(g.stacks.defense.length, 16);
     assert.equal(g.stacks.mischief.length, 19);
     assert.equal(g.stacks.attack.length, 18, "Attack Arsenal has Soaker x3");
@@ -279,7 +290,7 @@ describe("water fight engine: shop (D4)", () => {
   });
 
   it("sell Treasure for coins and buy a card into hand; SHOP ends the turn", () => {
-    const g = createGame(2, 5, { shopCost: 4 });
+    const g = game(2, 5, { shopCost: 4 });
     moveFromDeck(g, 0, "treasure", 2); // 2 Treasure = 4 coins
     const handBefore = g.players[0]!.hand.length;
     const r = applyMove(g, { kind: "SHOP", sell: { balloons: 0, treasures: 2, wild: 0 }, buy: ["defense"] });
@@ -290,7 +301,7 @@ describe("water fight engine: shop (D4)", () => {
   });
 
   it("rejects buying without enough coins", () => {
-    const g = createGame(2, 5, { shopCost: 4 });
+    const g = game(2, 5, { shopCost: 4 });
     assert.throws(
       () => applyMove(g, { kind: "SHOP", sell: { balloons: 0, treasures: 0, wild: 0 }, buy: ["defense"] }),
       /not enough coins/,
@@ -305,7 +316,7 @@ describe("water fight engine: shop (D4)", () => {
 
 describe("water fight engine: support/mischief effects (B.4)", () => {
   it("Pickpocket steals a Treasure; Needle discards the target's balloons", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     g.players[0]!.hand.push({ id: 10001, kind: "pickpocket" });
     moveFromDeck(g, 1, "treasure", 1);
     let r = applyMove(g, { kind: "PLAY_SUPPORT", support: "pickpocket", target: 1 });
@@ -313,7 +324,7 @@ describe("water fight engine: support/mischief effects (B.4)", () => {
     assert.ok(r.state.players[0]!.hand.some((c) => c.kind === "treasure"), "thief gained it");
     assert.equal(r.awaiting.kind, "MOVE", "Support does not end the turn");
 
-    const g2 = createGame(2, 5);
+    const g2 = game(2, 5);
     g2.players[0]!.hand.push({ id: 10002, kind: "needle" });
     setHand(g2, 1, ["balloon", "balloon", "miss"]);
     const r2 = applyMove(g2, { kind: "PLAY_SUPPORT", support: "needle", target: 1 });
@@ -322,7 +333,7 @@ describe("water fight engine: support/mischief effects (B.4)", () => {
   });
 
   it("Switcheroo swaps entire hands", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     g.players[0]!.hand = [{ id: 10001, kind: "switcheroo" }, { id: 10002, kind: "miss" }];
     g.players[1]!.hand = [{ id: 10003, kind: "hit" }, { id: 10004, kind: "hit" }, { id: 10005, kind: "hit" }];
     const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "switcheroo", target: 1 });
@@ -332,7 +343,7 @@ describe("water fight engine: support/mischief effects (B.4)", () => {
   });
 
   it("Freeze Out: target draws only 1 next turn (status consumed)", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     g.players[0]!.hand.push({ id: 10001, kind: "freezeout" });
     let r = applyMove(g, { kind: "PLAY_SUPPORT", support: "freezeout", target: 1 });
     assert.equal(r.state.players[1]!.statuses.freezeOut, true);
@@ -343,7 +354,7 @@ describe("water fight engine: support/mischief effects (B.4)", () => {
   });
 
   it("Lemonade Spill: target discards 1 and cannot Shop next turn", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     g.players[0]!.hand.push({ id: 10001, kind: "lemonadespill" });
     setHand(g, 1, ["miss", "hit"]);
     let r = applyMove(g, { kind: "PLAY_SUPPORT", support: "lemonadespill", target: 1 });
@@ -360,7 +371,7 @@ describe("water fight engine: support/mischief effects (B.4)", () => {
 
 describe("water fight engine: modifiers (B.5)", () => {
   it("Soaker Cannon (R2): declared pre-flip, negates the defender's hand-Miss", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["balloon", "soaker"]);
     setHand(g, 1, ["miss"]);
     forceSplash(g, "hit");
@@ -374,7 +385,7 @@ describe("water fight engine: modifiers (B.5)", () => {
   });
 
   it("Soaker is wasted on a Miss flip; a spread modifier is NOT spent on a Miss (E3)", () => {
-    const g = createGame(3, 5);
+    const g = game(3, 5);
     setHand(g, 0, ["balloon", "soaker", "triplesplash"]);
     forceSplash(g, "miss");
     const r = applyMove(g, {
@@ -392,7 +403,7 @@ describe("water fight engine: modifiers (B.5)", () => {
   });
 
   it("Triple Splash spreads one Hit to multiple targets, each defending in sequence (E3)", () => {
-    const g = createGame(3, 7);
+    const g = game(3, 7);
     setHand(g, 0, ["balloon", "triplesplash"]);
     setHand(g, 1, []);
     setHand(g, 2, []);
@@ -410,7 +421,7 @@ describe("water fight engine: modifiers (B.5)", () => {
   });
 
   it("Splash Zone hits every living opponent", () => {
-    const g = createGame(3, 11);
+    const g = game(3, 11);
     setHand(g, 0, ["balloon", "splashzone"]);
     setHand(g, 1, []);
     setHand(g, 2, []);
@@ -423,7 +434,7 @@ describe("water fight engine: modifiers (B.5)", () => {
   });
 
   it("Launcher grants an extra basic throw after the attack resolves (E4)", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["balloon", "balloon", "launcher"]);
     setHand(g, 1, []);
     g.splashPile = ["hit", "hit", "hit", "hit"];
@@ -441,7 +452,7 @@ describe("water fight engine: modifiers (B.5)", () => {
   });
 
   it("declining the extra throw (EXTRA pass) ends the turn", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["balloon", "balloon", "rapidfire"]);
     setHand(g, 1, []);
     forceSplash(g, "hit");
@@ -454,7 +465,7 @@ describe("water fight engine: modifiers (B.5)", () => {
   });
 
   it("legalMoves enumerates Soaker and spread throw variants", () => {
-    const g = createGame(3, 5);
+    const g = game(3, 5);
     setHand(g, 0, ["balloon", "soaker", "splashzone", "triplesplash"]);
     const moves = legalMoves(g);
     assert.ok(moves.some((m) => m.kind === "THROW" && m.soaker), "a Soaker throw is offered");
@@ -465,7 +476,7 @@ describe("water fight engine: modifiers (B.5)", () => {
 
 describe("water fight engine: reactions (B.6)", () => {
   it("no reaction window opens when the target holds no reaction card", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["balloon"]);
     setHand(g, 1, ["miss"]); // Miss is a ladder card, not a reaction
     forceSplash(g, "hit");
@@ -474,7 +485,7 @@ describe("water fight engine: reactions (B.6)", () => {
   });
 
   it("Towel cancels a basic throw BEFORE the flip (E10/E11)", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["balloon"]);
     setHand(g, 1, ["towel"]);
     forceSplash(g, "hit");
@@ -490,7 +501,7 @@ describe("water fight engine: reactions (B.6)", () => {
   });
 
   it("Towel cancels a targeting Support too (E11)", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     g.players[0]!.hand.push({ id: 10001, kind: "sabotage" });
     setHand(g, 1, ["towel", "miss", "hit"]);
     let r = applyMove(g, { kind: "PLAY_SUPPORT", support: "sabotage", target: 1 });
@@ -505,7 +516,7 @@ describe("water fight engine: reactions (B.6)", () => {
   });
 
   it("Redirect shifts the hit to another player (R3/E6)", () => {
-    const g = createGame(3, 7);
+    const g = game(3, 7);
     setHand(g, 0, ["balloon"]);
     setHand(g, 1, ["redirect"]);
     setHand(g, 2, []);
@@ -521,7 +532,7 @@ describe("water fight engine: reactions (B.6)", () => {
   });
 
   it("Water Trap bounces the throw back at the attacker (role-flip)", () => {
-    const g = createGame(2, 5);
+    const g = game(2, 5);
     setHand(g, 0, ["balloon"]);
     setHand(g, 1, ["watertrap"]);
     forceSplash(g, "hit");
@@ -535,7 +546,7 @@ describe("water fight engine: reactions (B.6)", () => {
   });
 
   it("a discrete reaction is capped at once per seat per attack", () => {
-    const g = createGame(3, 7);
+    const g = game(3, 7);
     setHand(g, 0, ["balloon"]);
     setHand(g, 1, ["redirect", "redirect"]);
     setHand(g, 2, ["redirect"]);
@@ -554,7 +565,7 @@ describe("water fight engine: reactions (B.6)", () => {
   });
 
   it("Lifeguard automatically saves a player from a soak, once (-> 1 life)", () => {
-    const g = createGame(2, 9);
+    const g = game(2, 9);
     g.players[1]!.lives = 1;
     setHand(g, 0, ["balloon"]);
     setHand(g, 1, ["lifeguard"]); // automatic, not a chosen reaction
@@ -569,9 +580,67 @@ describe("water fight engine: reactions (B.6)", () => {
   });
 });
 
+describe("water fight engine: events (B.7)", () => {
+  it("the event-density dial seeds that many of the 19 Events into the main deck", () => {
+    const countEvents = (g: GameState): number =>
+      [...g.mainDeck, ...g.mainDiscard].filter((c) => c.kind === "event").length;
+    assert.equal(countEvents(createGame(2, 5, { eventDensity: 5 })), 5);
+    assert.equal(countEvents(createGame(3, 7, { eventDensity: 0 })), 0);
+    assert.throws(() => createGame(2, 5, { eventDensity: 20 }), /eventDensity/);
+  });
+
+  it("an Event resolves on draw, counts as a draw, and goes to the main discard (D3/E5)", () => {
+    const g = game(2, 5);
+    injectTopEvent(g, "calmwaters"); // a dud — isolates the draw mechanics
+    const r = applyMove(g, { kind: "END_TURN" }); // seat 1's opening draw resolves it
+    assert.equal(r.state.turnSeat, 1);
+    assert.equal(r.state.players[1]!.hand.length, 1, "the Event consumed one of the two draws (no replacement)");
+    assert.ok(r.state.mainDiscard.some((c) => c.id === 3000), "the resolved Event went to the main discard");
+  });
+
+  it("a table-wide storm damages every living player by 1", () => {
+    const g = game(2, 5); // both at 3 lives
+    injectTopEvent(g, "mudslide");
+    const r = applyMove(g, { kind: "END_TURN" });
+    assert.equal(r.state.players[0]!.lives, 2);
+    assert.equal(r.state.players[1]!.lives, 2);
+  });
+
+  it("a table-wide storm that would soak EVERYONE clamps each to 1 life (E9)", () => {
+    const g = game(2, 9);
+    g.players[0]!.lives = 1;
+    g.players[1]!.lives = 1;
+    injectTopEvent(g, "heatwave");
+    const r = applyMove(g, { kind: "END_TURN" });
+    assert.equal(r.state.players[0]!.lives, 1, "clamped, not soaked");
+    assert.equal(r.state.players[1]!.lives, 1);
+    assert.equal(r.state.players[0]!.out, false);
+    assert.equal(r.state.players[1]!.out, false);
+    assert.equal(r.state.over, false, "no simultaneous wipe");
+  });
+
+  it("Lightning strikes the life leader (anti-snowball)", () => {
+    const g = game(2, 5);
+    g.players[0]!.lives = 3;
+    g.players[1]!.lives = 2;
+    injectTopEvent(g, "lightning"); // drawn by seat 1, but hits the leader (seat 0)
+    const r = applyMove(g, { kind: "END_TURN" });
+    assert.equal(r.state.players[0]!.lives, 2, "the leader took it");
+    assert.equal(r.state.players[1]!.lives, 2);
+  });
+
+  it("Water Park Pass heals the drawer, capped at starting lives (E8)", () => {
+    const g = game(2, 5);
+    g.players[1]!.lives = 1;
+    injectTopEvent(g, "waterparkpass");
+    const r = applyMove(g, { kind: "END_TURN" });
+    assert.equal(r.state.players[1]!.lives, 2, "drawer healed 1");
+  });
+});
+
 describe("water fight engine: illegal input", () => {
   it("rejects targeting yourself, throwing without a balloon, and illegal blocks", () => {
-    const g = createGame(2, 1);
+    const g = game(2, 1);
     assert.throws(() => applyMove(g, { kind: "THROW", target: 0 }), /yourself/);
     setHand(g, 0, ["miss", "hit"]);
     assert.throws(() => applyMove(g, { kind: "THROW", target: 1 }), /no Water Balloon/);
@@ -585,7 +654,7 @@ describe("water fight engine: illegal input", () => {
   });
 
   it("END_TURN is always a legal move; THROW needs a balloon", () => {
-    const g = createGame(2, 1);
+    const g = game(2, 1);
     setHand(g, 0, ["treasure"]);
     const moves = legalMoves(g);
     assert.ok(moves.some((m) => m.kind === "END_TURN"));
@@ -595,7 +664,7 @@ describe("water fight engine: illegal input", () => {
 
 describe("water fight engine: decks", () => {
   it("drawMainCard reshuffles the discard when the deck is empty", () => {
-    const g = createGame(2, 1);
+    const g = game(2, 1);
     g.mainDeck = [];
     g.mainDiscard = [{ id: 9999, kind: "balloon" }];
     const drawn = drawMainCard(g);
@@ -605,7 +674,7 @@ describe("water fight engine: decks", () => {
   });
 
   it("flipSplash reshuffles its own discard when the pile is empty", () => {
-    const g = createGame(2, 1);
+    const g = game(2, 1);
     g.splashPile = [];
     g.splashDiscard = ["hit"];
     assert.equal(flipSplash(g), "hit");
@@ -614,7 +683,7 @@ describe("water fight engine: decks", () => {
 
 describe("water fight engine: fuzz", () => {
   function playGame(pc: number, seed: number, policy: Policy, turnCap: number): GameState {
-    let g = createGame(pc, seed, { turnCap });
+    let g = createGame(pc, seed, { turnCap }); // Events ON (default density) — fuzz exercises them
     assertInvariants(g);
     let guard = 0;
     while (!isGameOver(g)) {

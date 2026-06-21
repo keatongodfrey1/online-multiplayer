@@ -24,8 +24,16 @@ export function assertInvariants(s: GameState): void {
   for (const p of s.players) for (const c of p.hand) countMain(c);
   if (mainCount !== MAIN_DECK_SIZE) throw new Error(`main card conservation: ${mainCount} != ${MAIN_DECK_SIZE}`);
   if (ids.size !== MAIN_DECK_SIZE) throw new Error(`duplicate or missing main card ids: ${ids.size} != ${MAIN_DECK_SIZE}`);
-  // The main deck itself must never hold a non-main card (a reshuffle mis-route).
-  for (const c of s.mainDeck) if (c.id < 1 || c.id > MAIN_DECK_SIZE) throw new Error(`non-main card ${c.id} in main deck`);
+  // The main deck may only hold main-deck cards or Events (a reshuffle mis-route
+  // would surface a shop/big card here).
+  for (const c of s.mainDeck) {
+    if (c.kind !== "event" && (c.id < 1 || c.id > MAIN_DECK_SIZE)) throw new Error(`non-main card ${c.id} in main deck`);
+  }
+  // Events live ONLY in the main deck + main discard (resolve-on-draw, never held).
+  const eventOutsideDeck = (c: { kind: string }): boolean => c.kind === "event";
+  for (const p of s.players) for (const c of p.hand) if (eventOutsideDeck(c)) throw new Error(`Event card in seat ${p.seat}'s hand`);
+  for (const st of ["defense", "mischief", "attack"] as const) for (const c of s.stacks[st]) if (eventOutsideDeck(c)) throw new Error("Event card in a shop stack");
+  for (const c of s.usedPile) if (eventOutsideDeck(c)) throw new Error("Event card in the usedPile");
 
   // --- splash conservation (pile + discard) ---
   const splashCount = s.splashPile.length + s.splashDiscard.length;
