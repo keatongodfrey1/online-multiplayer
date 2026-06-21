@@ -2,7 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { defineRoom, defineServer, monitor, playground, WebSocketTransport } from "colyseus";
-import { ARENA, CATAN, PAPERIO, PERFECT_PALACE, SPACE_CHASE, SPLENDOR, TICTACTOE } from "@backbone/shared";
+import { ARENA, CATAN, PAPERIO, PERFECT_PALACE, SPACE_CHASE, SPLENDOR, TICTACTOE, WATER_FIGHT } from "@backbone/shared";
 import { ArenaRoom } from "./games/arena/ArenaRoom.js";
 import { CatanRoom } from "./games/catan/CatanRoom.js";
 import { PaperIoRoom } from "./games/paperio/PaperIoRoom.js";
@@ -10,6 +10,7 @@ import { PerfectPalaceRoom } from "./games/perfectpalace/PerfectPalaceRoom.js";
 import { SpaceChaseRoom } from "./games/spacechase/SpaceChaseRoom.js";
 import { SplendorRoom } from "./games/splendor/SplendorRoom.js";
 import { TicTacToeRoom } from "./games/tictactoe/TicTacToeRoom.js";
+import { WaterFightRoom } from "./games/waterfight/WaterFightRoom.js";
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -47,6 +48,7 @@ const server = defineServer({
     [SPACE_CHASE]: defineRoom(SpaceChaseRoom),
     [PERFECT_PALACE]: defineRoom(PerfectPalaceRoom),
     [PAPERIO]: defineRoom(PaperIoRoom),
+    [WATER_FIGHT]: defineRoom(WaterFightRoom),
   },
 
   express: (app) => {

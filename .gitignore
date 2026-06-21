@@ -6,3 +6,4 @@ build/
 .env.local
 .DS_Store
 *.log
+.gstack/

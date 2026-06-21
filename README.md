@@ -69,6 +69,11 @@ card) as a single service in a few clicks - the full walkthrough is in
    return to the same game with the same seat within a few seconds.
 4. Finish the game; both press "Play again"; the board must reset.
 5. Repeat 2-3 with Dot Arena (arrows/WASD to move; phone: drag on the field).
+6. Repeat 2-4 with **Water Fight** (2-5 players): create as "Ann", join as
+   "Ben", optionally add a bot, throw a balloon and confirm the block/defense
+   prompts reach the right player; **refresh window B mid-game** and confirm your
+   hand stays hidden from the other window; then close window B's tab and rejoin
+   from a fresh tab to retake your seat. Play to a winner.
 
 ## Honest limitations (by design, for now)
 
