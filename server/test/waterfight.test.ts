@@ -4,8 +4,9 @@
 import assert from "node:assert/strict";
 import { boot, type ColyseusTestServer } from "@colyseus/testing";
 import { defineRoom, defineServer } from "colyseus";
-import { EndReason, LobbyMsg, Phase, WATER_FIGHT, WaterFightEngine, WaterFightMsg } from "@backbone/shared";
+import { EndReason, LobbyMsg, Phase, ServerMsg, WATER_FIGHT, WaterFightEngine, WaterFightMsg } from "@backbone/shared";
 import { WaterFightRoom } from "../src/games/waterfight/WaterFightRoom.js";
+import { parseSave } from "../src/games/waterfight/save.js";
 import { sleep, until } from "./StubRoom.js";
 
 const { RandomPolicy, assertInvariants } = WaterFightEngine;
@@ -229,6 +230,34 @@ describe("water fight room", () => {
     assert.strictEqual(bState().seats.at(1)!.hand.at(0)!.kind ?? "", "miss", "the defender sees their own Miss");
     assert.strictEqual(aState().seats.at(1)!.hand?.length ?? 0, 0, "the attacker cannot see the defender's hand");
     assert.ok((aState().seats.at(1)!.handCount ?? 0) >= 1, "but knows the size");
+  });
+
+  it("saves and resumes a game (validated blob), and rejects a tampered one", async () => {
+    const { room, clients } = await startedGame(45);
+    const [a] = clients;
+    a!.send(WaterFightMsg.MOVE, { kind: "END_TURN" });
+    await until(() => room.engine.turnCount === 1);
+
+    let saved: any = null;
+    a!.onMessage(ServerMsg.SAVE_DATA, (blob: unknown) => {
+      saved = blob;
+    });
+    a!.send(LobbyMsg.SAVE, {});
+    await until(() => saved !== null);
+    assert.ok(parseSave(saved), "the produced blob validates");
+    assert.strictEqual(parseSave({ v: 1, seats: [], options: {}, engine: { engineVersion: "x" } }), null, "tampered blob rejected");
+    const savedTurnCount = saved.engine.turnCount;
+
+    // Resume in a fresh room with the same lineup.
+    const room2 = (await colyseus.createRoom(WATER_FIGHT, {})) as unknown as WaterFightRoom;
+    const c0 = await colyseus.connectTo(room2, { nickname: "Player0" });
+    await colyseus.connectTo(room2, { nickname: "Player1" });
+    c0.send(LobbyMsg.LOAD, saved);
+    await until(() => room2.state.loadedSave !== "");
+    c0.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+    assert.strictEqual(room2.engine.turnCount, savedTurnCount, "resumed at the saved turn");
+    assertInvariants(room2.engine);
   });
 
   it("auto-advances a bot seat without any client input", async () => {

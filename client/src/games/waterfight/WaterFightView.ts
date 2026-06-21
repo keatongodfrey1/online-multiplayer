@@ -17,6 +17,10 @@ import {
 import type { GameView, GameViewContext, LobbySettingsContext } from "../../framework/GameView.js";
 import { escapeHtml } from "../../lobby/HomeScreen.js";
 import { flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
+import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
+
+const WF_SAVES_KEY = "waterfight-saves";
+const wfTurnLabel = (blob: any): number => (blob?.engine?.turnCount ?? 0) + 1;
 
 const TARGETED_SUPPORTS = new Set([
   "needle", "pickpocket", "sabotage", "cardswap", "freezeout", "lemonadespill", "switcheroo",
@@ -105,6 +109,7 @@ export class WaterFightView implements GameView {
     root.innerHTML = `<style>${STYLE}</style><div class="wf"></div>`;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
+    hookSaveData(this.room, WF_SAVES_KEY, wfTurnLabel, () => flashToast(root, "Saved ✓"));
     this.render();
   }
 
@@ -130,6 +135,9 @@ export class WaterFightView implements GameView {
       case "mute":
         setMuted(!isMuted());
         this.render();
+        return;
+      case "save":
+        room.send(LobbyMsg.SAVE, {});
         return;
       case "end":
         room.send(WaterFightMsg.MOVE, { kind: "END_TURN" });
@@ -202,8 +210,11 @@ export class WaterFightView implements GameView {
     }
     this.wasMyMoment = myMoment;
 
+    const isHost = state.hostSessionId === this.ctx.mySessionId;
     wrap.innerHTML = [
-      `<button class="wf-mute" data-act="mute" title="Sound">${isMuted() ? "🔕" : "🔔"}</button>`,
+      `<div style="display:flex;gap:6px;align-self:flex-end">${
+        isHost ? `<button class="wf-mute" data-act="save" title="Save game">💾</button>` : ""
+      }<button class="wf-mute" data-act="mute" title="Sound">${isMuted() ? "🔕" : "🔔"}</button></div>`,
       this.renderBanner(state, mySeat, myMoment),
       this.renderSeats(state, seats, mySeat),
       this.renderDecks(state),
@@ -402,8 +413,15 @@ export function renderWaterFightLobbySettings(
   }).join("");
   const seatsLeft = state.maxPlayers - state.players.size;
   const addBot = ctx.isHost && seatsLeft > 0 ? `<button class="wf-add-bot" data-addbot>+ Add AI</button>` : "";
-  container.innerHTML = `<div class="wf-lobby">${rows}${addBot}${ctx.isHost ? "" : '<div class="wf-lobby-setting muted">(host sets the dials)</div>'}</div>`;
+  container.innerHTML = `<div class="wf-lobby">${rows}${addBot}${
+    ctx.isHost ? "" : '<div class="wf-lobby-setting muted">(host sets the dials)</div>'
+  }<div class="wf-saves-block"></div></div>`;
 
+  renderSaveSlots(container.querySelector<HTMLElement>(".wf-saves-block")!, room, {
+    key: WF_SAVES_KEY,
+    isHost: ctx.isHost,
+    loadedSave: state.loadedSave,
+  });
   container.querySelectorAll<HTMLInputElement>("input[data-key]").forEach((input) => {
     input.addEventListener("change", () => {
       room.send(WaterFightMsg.CONFIG, { key: input.dataset.key, value: Number(input.value) });

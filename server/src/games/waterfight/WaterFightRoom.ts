@@ -24,6 +24,7 @@ import {
 import { BaseGameRoom } from "../../framework/BaseGameRoom.js";
 import { grantPrivateView, revokePrivateView } from "../../framework/privateState.js";
 import { parseMove, parseResolution } from "./sanitize.js";
+import { type ParsedSave, parseSave, serializeSave } from "./save.js";
 
 type GameState = WF.GameState;
 type Policy = WF.Policy;
@@ -39,6 +40,7 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
   override supportsBots = true;
   override allowLateJoin = true;
   override supportsReclaim = true;
+  protected override supportsSaves = true;
 
   /** Server-only source of truth. */
   public engine!: GameState;
@@ -72,36 +74,97 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
   protected onGameStart(): void {
     const players = [...this.state.players.values()].sort((a, b) => a.seat - b.seat);
     const seed = this.seedOption ?? (Math.floor(Math.random() * 0xffffffff) >>> 0);
+    const load = this.pendingLoad?.payload as ParsedSave | undefined;
+    this.pendingLoad = undefined;
 
-    this.engine = WF.createGame(players.length, seed, {
-      startingLives: this.state.startingLives,
-      splashHit: this.state.splashHit,
-      splashMiss: this.state.splashMiss,
-      handLimit: this.state.handLimit,
-      shopCost: this.state.shopCost,
-      eventDensity: this.state.eventDensity,
-    });
-    this.seatOrder = players.map((p) => p.sessionId);
-    this.frameworkSeatByEngineSeat = players.map((p) => p.seat);
+    if (load) {
+      // Resume: reuse the validated engine, rebinding seats to the present
+      // humans/bots by name; an unmatched saved seat stays vacated (autopilot).
+      this.engine = load.engine;
+      this.seatOrder = load.seats.map((s) =>
+        s.gone ? "" : players.find((p) => p.isBot === s.isBot && p.nickname.toLowerCase() === s.nickname.toLowerCase())?.sessionId ?? "",
+      );
+      this.frameworkSeatByEngineSeat = this.seatOrder.map((sid) => players.find((p) => p.sessionId === sid)?.seat ?? -1);
+    } else {
+      this.engine = WF.createGame(players.length, seed, {
+        startingLives: this.state.startingLives,
+        splashHit: this.state.splashHit,
+        splashMiss: this.state.splashMiss,
+        handLimit: this.state.handLimit,
+        shopCost: this.state.shopCost,
+        eventDensity: this.state.eventDensity,
+      });
+      this.seatOrder = players.map((p) => p.sessionId);
+      this.frameworkSeatByEngineSeat = players.map((p) => p.seat);
+    }
 
     this.ghost = new WF.RandomPolicy((seed ^ 0x9e3779b9) >>> 0);
     this.botBrains.clear();
-    players.forEach((p, i) => {
-      if (p.isBot) this.botBrains.set(p.sessionId, new WF.GreedyPolicy((seed ^ ((i + 1) * 0x5bd1e995)) >>> 0));
+    this.seatOrder.forEach((sid, i) => {
+      if (sid && this.state.players.get(sid)?.isBot) {
+        this.botBrains.set(sid, new WF.GreedyPolicy((seed ^ ((i + 1) * 0x5bd1e995)) >>> 0));
+      }
     });
 
     this.state.seats.clear();
     this.grantedHands.clear();
-    players.forEach((p, i) => {
+    this.seatOrder.forEach((sid, i) => {
       const seat = new WaterFightSeat();
-      seat.sessionId = p.sessionId;
-      seat.nickname = p.nickname;
+      seat.sessionId = sid;
       seat.seat = i;
+      seat.nickname = load ? (load.seats[i]?.nickname ?? `Seat ${i + 1}`) : (this.state.players.get(sid)?.nickname ?? `Seat ${i + 1}`);
+      if (!sid) seat.gone = true;
       this.state.seats.push(seat);
-      this.regrantHand(p.sessionId, seat.hand);
+      if (sid) this.regrantHand(sid, seat.hand);
     });
 
     this.afterApply();
+  }
+
+  // ---- save / resume ------------------------------------------------------
+
+  protected override isGameOver(): boolean {
+    return !this.engine || this.engine.over;
+  }
+
+  protected override loadedSaveTurnLabel(parsed: unknown): number {
+    return (parsed as ParsedSave).engine.turnCount + 1;
+  }
+
+  protected override onSaveStaged(parsed: unknown): void {
+    const o = (parsed as ParsedSave).options;
+    this.state.startingLives = o.startingLives;
+    this.state.splashHit = o.splashHit;
+    this.state.splashMiss = o.splashMiss;
+    this.state.handLimit = o.handLimit;
+    this.state.shopCost = o.shopCost;
+    this.state.eventDensity = o.eventDensity;
+    this.state.turnSeconds = o.turnSeconds;
+    this.state.reactionSeconds = o.reactionSeconds;
+  }
+
+  protected override parseSave(raw: unknown): ParsedSave | null {
+    return parseSave(raw);
+  }
+
+  protected override serializeSave(): object | null {
+    return serializeSave({
+      engine: this.engine,
+      seats: this.seatOrder.map((sid, i) => {
+        const p = sid ? this.state.players.get(sid) : undefined;
+        return { nickname: this.state.seats[i]?.nickname ?? `Seat ${i + 1}`, isBot: p?.isBot === true, gone: !p };
+      }),
+      options: {
+        startingLives: this.state.startingLives,
+        splashHit: this.state.splashHit,
+        splashMiss: this.state.splashMiss,
+        handLimit: this.state.handLimit,
+        shopCost: this.state.shopCost,
+        eventDensity: this.state.eventDensity,
+        turnSeconds: this.state.turnSeconds,
+        reactionSeconds: this.state.reactionSeconds,
+      },
+    });
   }
 
   // ---- message handlers ---------------------------------------------------
