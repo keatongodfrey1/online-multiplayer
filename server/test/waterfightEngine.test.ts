@@ -17,6 +17,7 @@ const {
   RandomPolicy,
   GreedyPolicy,
   MAIN_DECK_SIZE,
+  validateWaterFightData,
 } = WF;
 type GameState = WF.GameState;
 type CardKind = WF.CardKind;
@@ -81,6 +82,18 @@ describe("water fight engine: setup", () => {
     assert.throws(() => game(1, 1));
     assert.throws(() => game(6, 1));
     assert.throws(() => game(2, 1, { splashHit: 0, splashMiss: 0 }));
+  });
+
+  it("the card pools are internally consistent (validateWaterFightData)", () => {
+    // default deck, both dial extremes, and the max dial — every pool must stay
+    // self-consistent and the main/shop/event id ranges must never collide.
+    for (const [hit, miss] of [[20, 20], [0, 0], [0, 50], [50, 0], [50, 50]] as const) {
+      assert.deepEqual(validateWaterFightData(hit, miss), [], `dials ${hit}/${miss} valid`);
+    }
+    // teeth: an absurd beyond-clamp dial overflows the main-deck ids into the
+    // shop range (1000+) — the validator must catch it, not return clean.
+    const overflow = validateWaterFightData(979, 0); // size = 41 + 979 = 1020 >= 1000
+    assert.ok(overflow.some((m) => m.includes("shop range")), "overflowing the shop id range is flagged");
   });
 });
 

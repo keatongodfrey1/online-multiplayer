@@ -8,3 +8,4 @@ export * from "./engine.js";
 export * from "./setup.js";
 export * from "./policies.js";
 export * from "./invariants.js";
+export * from "./validateData.js";
