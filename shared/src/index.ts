@@ -7,3 +7,4 @@ export * from "./games/spacechase/index.js";
 export * from "./games/catan/index.js";
 export * from "./games/perfectpalace/index.js";
 export * from "./games/paperio/index.js";
+export * from "./games/waterfight/index.js";
