@@ -2,8 +2,13 @@
  * Every game registers itself here with one entry.
  * The home screen's "create a game" menu is generated from this list.
  */
-import { ARENA, CATAN, PAPERIO, PERFECT_PALACE, SPACE_CHASE, SPLENDOR, TICTACTOE } from "@backbone/shared";
+import { ARENA, CATAN, PAPERIO, PERFECT_PALACE, SPACE_CHASE, SPLENDOR, TICTACTOE, WATER_FIGHT } from "@backbone/shared";
 import type { GameDefinition } from "../framework/GameView.js";
+import {
+  renderWaterFightGameSummary,
+  renderWaterFightLobbySettings,
+  WaterFightView,
+} from "./waterfight/WaterFightView.js";
 import { ArenaView } from "./arena/ArenaView.js";
 import { PaperIoView, renderPaperIoGameSummary, renderPaperIoLobbySettings } from "./paperio/PaperIoView.js";
 import { CatanView, renderCatanGameSummary, renderCatanLobbySettings } from "./catan/CatanView.js";
@@ -76,6 +81,14 @@ export const games: GameDefinition[] = [
     createView: () => new PaperIoView(),
     renderLobbySettings: renderPaperIoLobbySettings,
     renderGameSummary: renderPaperIoGameSummary,
+  },
+  {
+    gameType: WATER_FIGHT,
+    displayName: "Water Fight",
+    description: "2–5 players — throw balloons, block, and soak the table.",
+    createView: () => new WaterFightView(),
+    renderLobbySettings: renderWaterFightLobbySettings,
+    renderGameSummary: renderWaterFightGameSummary,
   },
 ];
 
