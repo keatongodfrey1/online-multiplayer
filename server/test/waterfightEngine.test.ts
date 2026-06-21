@@ -638,6 +638,128 @@ describe("water fight engine: events (B.7)", () => {
   });
 });
 
+describe("water fight engine: Storm Cloud + Sudden-Death (B.8)", () => {
+  /** Force a seat into the Storm Cloud state with a given hand. */
+  function makeStormCloud(g: GameState, seat: number, hand: CardKind[] = []): void {
+    g.players[seat]!.lives = 0;
+    g.players[seat]!.out = true;
+    g.players[seat]!.stormCloud = true;
+    setHand(g, seat, hand);
+  }
+
+  it("soaking in normal play makes a Storm Cloud (soft elimination), game continues", () => {
+    const g = game(3, 5);
+    g.players[1]!.lives = 1;
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, []);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.out, true);
+    assert.equal(r.state.players[1]!.stormCloud, true, "soft elimination -> Storm Cloud");
+    assert.equal(r.state.over, false, "seat 2 still alive");
+  });
+
+  it("a Storm Cloud may only pass or splash (no shop/support/big)", () => {
+    const g = game(3, 5);
+    makeStormCloud(g, 1, ["balloon", "mega", "firstaid"]);
+    g.turnSeat = 1;
+    g.awaiting = { seats: [1], kind: "MOVE" };
+    const moves = legalMoves(g);
+    assert.ok(moves.some((m) => m.kind === "STORM_THROW"), "may splash");
+    assert.ok(moves.some((m) => m.kind === "END_TURN"));
+    assert.ok(!moves.some((m) => m.kind === "PLAY_BIG" || m.kind === "PLAY_SUPPORT" || m.kind === "SHOP"));
+  });
+
+  it("a Storm Cloud splash hits a random living player for 1", () => {
+    const g = game(3, 5);
+    makeStormCloud(g, 2, ["balloon"]);
+    g.turnSeat = 2;
+    g.awaiting = { seats: [2], kind: "MOVE" };
+    g.splashPile = ["hit", "hit", "hit"];
+    const before = g.players[0]!.lives + g.players[1]!.lives;
+    let r = applyMove(g, { kind: "STORM_THROW" });
+    assert.equal(r.awaiting.kind, "DEFEND");
+    const tSeat = r.awaiting.seats[0]!;
+    assert.ok(tSeat === 0 || tSeat === 1, "splashed a living player, not itself");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[0]!.lives + r.state.players[1]!.lives, before - 1, "dealt 1 damage");
+  });
+
+  it("a Storm Cloud cannot be targeted by a normal attack", () => {
+    const g = game(3, 5);
+    makeStormCloud(g, 2);
+    setHand(g, 0, ["balloon"]);
+    g.turnSeat = 0;
+    g.awaiting = { seats: [0], kind: "MOVE" };
+    assert.throws(() => applyMove(g, { kind: "THROW", target: 2 }), /not a living player/);
+    assert.ok(!legalMoves(g).some((m) => m.kind === "THROW" && m.target === 2));
+  });
+
+  it("a Storm Cloud's drawn Event has no effect (D5/E5)", () => {
+    const g = game(3, 5);
+    makeStormCloud(g, 2);
+    g.turnSeat = 1;
+    g.awaiting = { seats: [1], kind: "MOVE" };
+    injectTopEvent(g, "mudslide");
+    const before = [g.players[0]!.lives, g.players[1]!.lives];
+    const r = applyMove(g, { kind: "END_TURN" }); // seat 1 ends -> seat 2 (Storm Cloud) draws the Event
+    assert.equal(r.state.turnSeat, 2);
+    assert.equal(r.state.players[0]!.lives, before[0], "no table damage from a Storm Cloud's Event");
+    assert.equal(r.state.players[1]!.lives, before[1]);
+    assert.equal(r.state.players[2]!.hand.length, 0, "the Event was discarded, not kept");
+  });
+
+  it("win = last LIVING player; Storm Clouds do not count", () => {
+    const g = game(3, 9);
+    makeStormCloud(g, 2);
+    g.players[1]!.lives = 1;
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, []);
+    g.turnSeat = 0;
+    g.awaiting = { seats: [0], kind: "MOVE" };
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.over, true, "only seat 0 lives -> over (Storm Clouds ignored)");
+    assert.equal(r.state.winner, 0);
+  });
+
+  it("a table storm that would wipe the table triggers Sudden-Death, then a single-target soak decides it (E9)", () => {
+    const g = game(2, 9);
+    g.players[0]!.lives = 1;
+    g.players[1]!.lives = 1;
+    injectTopEvent(g, "mudslide");
+    let r = applyMove(g, { kind: "END_TURN" }); // seat 1 draws it -> would soak both
+    assert.equal(r.state.phase, "sudden-death");
+    assert.equal(r.state.players[0]!.lives, 1, "finalists clamped to 1, not soaked");
+    assert.equal(r.state.players[1]!.lives, 1);
+    assert.equal(r.state.over, false);
+
+    setHand(r.state, 1, ["balloon"]);
+    forceSplash(r.state, "hit");
+    let r2 = applyMove(r.state, { kind: "THROW", target: 0 });
+    r2 = applyResolution(r2.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r2.state.over, true, "a single-target soak ends Sudden-Death with one winner");
+    assert.equal(r2.state.winner, 1);
+    assert.equal(r2.state.players[0]!.out, true);
+    assert.equal(r2.state.players[0]!.stormCloud, false, "soaked in Sudden-Death = fully out, not a Storm Cloud");
+  });
+
+  it("Sudden-Death suppresses further table damage", () => {
+    const g = game(2, 9);
+    g.players[0]!.lives = 1;
+    g.players[1]!.lives = 1;
+    injectTopEvent(g, "mudslide");
+    let r = applyMove(g, { kind: "END_TURN" });
+    assert.equal(r.state.phase, "sudden-death");
+    injectTopEvent(r.state, "heatwave");
+    const r2 = applyMove(r.state, { kind: "END_TURN" }); // seat 0 draws heatwave
+    assert.equal(r2.state.players[0]!.lives, 1, "table damage is suppressed");
+    assert.equal(r2.state.players[1]!.lives, 1);
+  });
+});
+
 describe("water fight engine: illegal input", () => {
   it("rejects targeting yourself, throwing without a balloon, and illegal blocks", () => {
     const g = game(2, 1);

@@ -56,7 +56,7 @@ export class GreedyPolicy implements Policy {
     return arr[Math.floor(this.rng() * arr.length)]!;
   }
   move(s: GameState): Move {
-    const throws = legalMoves(s).filter((m) => m.kind === "THROW");
+    const throws = legalMoves(s).filter((m) => m.kind === "THROW" || m.kind === "STORM_THROW");
     return throws.length > 0 ? this.pick(throws) : { kind: "END_TURN" };
   }
   resolve(s: GameState): Resolution {

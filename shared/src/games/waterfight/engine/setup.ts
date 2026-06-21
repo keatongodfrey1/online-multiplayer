@@ -30,6 +30,7 @@ export function createGame(
       lives: opts.startingLives,
       hand: [],
       out: false,
+      stormCloud: false,
       statuses: { freezeOut: false, noShop: false },
     });
   }
@@ -51,6 +52,7 @@ export function createGame(
     stacks: buildStacks(),
     splashPile,
     splashDiscard: [],
+    phase: "playing",
     turnSeat: 0,
     supportUsed: false,
     pending: null,

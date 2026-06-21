@@ -70,8 +70,12 @@ export interface PlayerState {
   name: string;
   lives: number;
   hand: Card[];
-  /** Soaked: lives reached 0. (Phase A: removed from rotation; Storm Cloud is Phase B.) */
+  /** Soaked: lives reached 0 — not "living", cannot win. */
   out: boolean;
+  /** Soft elimination (D5): a soaked player who keeps playing from the sideline
+   *  (draw 1/turn, may splash a random living player). Implies `out`. A finalist
+   *  soaked during Sudden-Death is `out` but NOT a Storm Cloud (fully removed). */
+  stormCloud: boolean;
   /** Pending status effects (set by opponents' cards; applied on this player's next turn). */
   statuses: {
     freezeOut: boolean; // Freeze Out: draw only 1 next turn
@@ -168,6 +172,10 @@ export interface GameState {
   stacks: Record<StackId, Card[]>;
   splashPile: SplashCard[]; // SECRET, shuffled
   splashDiscard: SplashCard[];
+  /** "playing", or "sudden-death" once a single source would have soaked every
+   *  living player at once (E9) — multi-target/table/Storm-Cloud damage is then
+   *  suppressed so only single-target soaks end the game (exactly one winner). */
+  phase: "playing" | "sudden-death";
   /** The active player (whose Main Action it is). */
   turnSeat: number;
   /** Whether the active player has used their one Support card this turn. */
@@ -194,6 +202,7 @@ export type Move =
   | { kind: "THROW"; target: number; soaker?: boolean; spread?: Spread } // Main Action
   | { kind: "PLAY_BIG"; big: BigKind; target: number; soaker?: boolean; spread?: Spread } // Main Action
   | { kind: "SHOP"; sell: { balloons: number; treasures: number; wild: number }; buy: StackId[] } // Main Action
+  | { kind: "STORM_THROW" } // a Storm Cloud's sideline splash (engine picks a random living target)
   | { kind: "END_TURN" }; // Main Action (pass)
 
 // ---- Resolutions (out-of-turn ladder responses, discard, extra throw) ----

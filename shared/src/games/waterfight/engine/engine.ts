@@ -118,7 +118,12 @@ function damageSeat(s: GameState, seat: number, dmg: number): void {
       s.log.push(`seat ${seat} saved by Lifeguard (-> 1 life)`);
     } else {
       t.out = true;
-      s.log.push(`seat ${seat} is SOAKED`);
+      if (s.phase !== "sudden-death") {
+        t.stormCloud = true; // soft elimination (D5): keeps playing from the sideline
+        s.log.push(`seat ${seat} SOAKED -> Storm Cloud`);
+      } else {
+        s.log.push(`seat ${seat} SOAKED (out)`); // Sudden-Death: fully removed
+      }
     }
   }
 }
@@ -143,18 +148,26 @@ function gainTreasure(s: GameState, seat: number, n: number): void {
   }
 }
 
-/** Table-wide damage with the E9 guard: a single source can never soak EVERY
- *  living player at once — that instead clamps each to 1 life (full Sudden-Death
- *  phase lands in B.8). */
+/** Table-wide damage. Suppressed entirely in Sudden-Death (E9). Otherwise, if a
+ *  single source would soak EVERY living player at once, it triggers Sudden-Death
+ *  and clamps each finalist to 1 life instead of wiping the table. */
 function applyTableDamage(s: GameState, dmg: number): void {
+  if (s.phase === "sudden-death") return; // E9: multi-target/table damage deals nothing
   const living = livingSeats(s);
   const wouldSoak = living.filter((seat) => !handHas(s.players[seat]!, "lifeguard") && s.players[seat]!.lives <= dmg);
   if (living.length > 1 && wouldSoak.length === living.length) {
-    for (const seat of living) s.players[seat]!.lives = 1;
-    s.log.push("table damage would soak all -> clamp each to 1 life (E9)");
+    enterSuddenDeath(s, living);
     return;
   }
   for (const seat of living) damageSeat(s, seat, dmg);
+}
+
+/** Enter Sudden-Death (E9): clamp the tied finalists to 1 life. From here only
+ *  single-target soaks happen, so the game ends with exactly one winner. */
+function enterSuddenDeath(s: GameState, finalists: number[]): void {
+  s.phase = "sudden-death";
+  for (const seat of finalists) s.players[seat]!.lives = 1;
+  s.log.push(`SUDDEN-DEATH: ${finalists.length} finalists clamped to 1 life`);
 }
 
 /** End the game if <= 1 living remains. Returns true if it concluded. */
@@ -227,11 +240,28 @@ function resolveEvent(s: GameState, drawer: number, event: EventKind): void {
   concludeIfOver(s);
 }
 
+/** A Storm Cloud's draw (D5): 1 card per turn; a drawn Event is discarded with no
+ *  effect (E5). */
+function drawStormCloud(s: GameState, seat: number): void {
+  const card = drawMainCard(s);
+  if (!card) return;
+  if (card.kind === "event") {
+    discardCard(s, card); // a Storm Cloud's Event has no effect
+    return;
+  }
+  s.players[seat]!.hand.push(card);
+}
+
 /** Begin a seat's turn: apply pending statuses, draw, await their action. */
 export function startTurn(s: GameState, seat: number): void {
   s.turnSeat = seat;
   s.supportUsed = false;
   const p = s.players[seat]!;
+  if (p.stormCloud) {
+    drawStormCloud(s, seat); // D5: draw 1, Events void
+    s.awaiting = { seats: [seat], kind: "MOVE" };
+    return;
+  }
   const draw = p.statuses.freezeOut ? 1 : DRAW_PER_TURN; // Freeze Out
   p.statuses.freezeOut = false;
   drawCards(s, seat, draw); // may resolve Events (D3)
@@ -352,7 +382,15 @@ function endGame(s: GameState, winner: number | null, reason: GameState["endReas
   s.log.push(`game over: ${reason}, winner seat ${winner}`);
 }
 
-/** End the active player's turn and pass to the next living seat. */
+/** Whether a seat takes a turn now: living players always; Storm Clouds in normal
+ *  play (D5) but NOT in Sudden-Death (their splashes are suppressed — E9). */
+function canActThisTurn(s: GameState, seat: number): boolean {
+  const p = s.players[seat]!;
+  if (s.phase === "sudden-death") return !p.out;
+  return !p.out || p.stormCloud;
+}
+
+/** End the active player's turn and pass to the next seat that may act. */
 function advanceTurn(s: GameState): void {
   if (s.over) return;
   s.players[s.turnSeat]!.statuses.noShop = false; // the finishing player's Lemonade Spill lifts
@@ -364,7 +402,7 @@ function advanceTurn(s: GameState): void {
   const N = s.players.length;
   let next = (s.turnSeat + 1) % N;
   for (let i = 0; i < N; i++) {
-    if (!s.players[next]!.out) break;
+    if (canActThisTurn(s, next)) break;
     next = (next + 1) % N;
   }
   startTurn(s, next);
@@ -412,8 +450,10 @@ function afterAttack(s: GameState, kind: AttackKind): void {
 function resolveTarget(s: GameState, hit: boolean): void {
   const atk = s.awaiting.attack!;
   const tSeat = currentTarget(atk);
-  if (hit) damageSeat(s, tSeat, atk.damage);
-  else s.log.push(`attack on seat ${tSeat} missed`);
+  // E9: in Sudden-Death, multi-target attacks deal no damage (single-target only).
+  const suppressed = s.phase === "sudden-death" && atk.targets.length > 1;
+  if (hit && !suppressed) damageSeat(s, tSeat, atk.damage);
+  else s.log.push(`attack on seat ${tSeat} ${hit ? "suppressed (Sudden-Death AoE)" : "missed"}`);
   const living = livingSeats(s);
   if (living.length <= 1) {
     endGame(s, living[0] ?? null, "last-standing");
@@ -510,6 +550,12 @@ export function legalMoves(s: GameState): Move[] {
   if (s.over || s.awaiting.kind !== "MOVE") return [];
   const seat = s.turnSeat;
   const p = s.players[seat]!;
+  if (p.stormCloud) {
+    // D5: a Storm Cloud may only pass or splash a random living player.
+    const moves: Move[] = [{ kind: "END_TURN" }];
+    if (handHas(p, "balloon") && livingSeats(s).length > 0) moves.push({ kind: "STORM_THROW" });
+    return moves;
+  }
   const opponents = livingSeats(s).filter((t) => t !== seat);
   const moves: Move[] = [{ kind: "END_TURN" }];
   if (!s.supportUsed) {
@@ -560,7 +606,11 @@ export function legalResolutions(s: GameState): Resolution[] {
     if (canDiscrete && handHas(p, "redirect")) {
       for (const t of livingSeats(s)) if (t !== seat) out.push({ kind: "REACT", action: "redirect", target: t });
     }
-    if (canDiscrete && handHas(p, "watertrap")) out.push({ kind: "REACT", action: "watertrap" });
+    // Water Trap bounces to the attacker, so it is unavailable vs a Storm Cloud
+    // splash (a Storm Cloud cannot be targeted).
+    if (canDiscrete && handHas(p, "watertrap") && !s.players[pa.attacker]!.out) {
+      out.push({ kind: "REACT", action: "watertrap" });
+    }
     return out;
   }
   if (s.awaiting.kind === "DEFEND") {
@@ -593,6 +643,14 @@ function validateMove(s: GameState, move: Move): void {
   if (s.awaiting.kind !== "MOVE") throw new Error("not awaiting a move");
   const seat = s.turnSeat;
   const p = s.players[seat]!;
+  if (p.stormCloud) {
+    if (move.kind === "END_TURN") return;
+    if (move.kind !== "STORM_THROW") throw new Error("a Storm Cloud may only pass or splash");
+    if (!handHas(p, "balloon")) throw new Error("no Water Balloon to splash");
+    if (livingSeats(s).length === 0) throw new Error("no living target for the splash");
+    return;
+  }
+  if (move.kind === "STORM_THROW") throw new Error("only a Storm Cloud may STORM_THROW");
   if (move.kind === "END_TURN") return;
   if (move.kind === "PLAY_SUPPORT") {
     if (s.supportUsed) throw new Error("already used a Support this turn");
@@ -670,6 +728,7 @@ function validateResolution(s: GameState, res: Resolution): void {
       return;
     }
     if (!handHas(rp, "watertrap")) throw new Error("no Water Trap in hand");
+    if (s.players[pa.attacker]!.out) throw new Error("cannot Water Trap a Storm Cloud's splash");
     return;
   }
   if (res.kind === "REACT") throw new Error("not awaiting a reaction");
@@ -717,6 +776,16 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
 
   if (move.kind === "END_TURN") {
     endActiveTurn(s);
+    return { state: s, awaiting: s.awaiting, events };
+  }
+
+  if (move.kind === "STORM_THROW") {
+    // D5: the engine picks the target at random (no ganging up). The Storm Cloud
+    // is the ladder attacker and may play Hit from its kept hand.
+    const targets = livingSeats(s);
+    const target = targets[Math.floor(rand(s) * targets.length)]!;
+    s.log.push(`Storm Cloud seat ${seat} splashes random target ${target}`);
+    startThrow(s, seat, target, false);
     return { state: s, awaiting: s.awaiting, events };
   }
 

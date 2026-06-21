@@ -59,6 +59,8 @@ export function assertInvariants(s: GameState): void {
   for (const p of s.players) {
     if (p.lives < 0 || p.lives > s.options.startingLives) throw new Error(`seat ${p.seat} lives out of range: ${p.lives}`);
     if (p.out !== (p.lives <= 0)) throw new Error(`seat ${p.seat} out flag mismatch (lives=${p.lives}, out=${p.out})`);
+    if (p.stormCloud && !p.out) throw new Error(`seat ${p.seat} is a Storm Cloud but not out`);
+    if (s.phase === "sudden-death" && p.stormCloud && !p.out) throw new Error("Storm Cloud acting in Sudden-Death");
   }
 
   // --- pending action / reaction window consistency ---
@@ -78,7 +80,14 @@ export function assertInvariants(s: GameState): void {
   } else {
     if (s.awaiting.seats.length === 0) throw new Error("not over but nobody is awaited");
     const seat = s.awaiting.seats[0]!;
-    if (s.players[seat]?.out) throw new Error(`awaiting a soaked seat ${seat}`);
+    const ap = s.players[seat];
+    // A Storm Cloud legitimately acts while `out`: its MOVE turn, and ATTACKER_RESPOND
+    // while it is splashing (it may play Hit). Any other await of an out seat
+    // (DEFEND/REACT/DISCARD/EXTRA_THROW) is a bug.
+    const stormOk = ap?.stormCloud && (s.awaiting.kind === "MOVE" || s.awaiting.kind === "ATTACKER_RESPOND");
+    if (ap?.out && !stormOk) {
+      throw new Error(`awaiting a soaked seat ${seat} (kind ${s.awaiting.kind})`);
+    }
     // An attack in progress must have a CURRENT target that is still alive.
     if (s.awaiting.attack) {
       const atk = s.awaiting.attack;
