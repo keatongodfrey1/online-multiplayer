@@ -6,10 +6,49 @@ import { boot, type ColyseusTestServer } from "@colyseus/testing";
 import { defineRoom, defineServer } from "colyseus";
 import { EndReason, LobbyMsg, Phase, ServerMsg, WATER_FIGHT, WaterFightEngine, WaterFightMsg } from "@backbone/shared";
 import { WaterFightRoom } from "../src/games/waterfight/WaterFightRoom.js";
-import { parseSave } from "../src/games/waterfight/save.js";
+import { parseSave, serializeSave } from "../src/games/waterfight/save.js";
 import { sleep, until } from "./StubRoom.js";
 
-const { RandomPolicy, assertInvariants } = WaterFightEngine;
+const { RandomPolicy, assertInvariants, createGame } = WaterFightEngine;
+
+// ---- save-blob validator (pure; no Colyseus harness needed) ----
+describe("water fight save validator", () => {
+  function validBlob(): any {
+    const engine = createGame(2, 7);
+    return serializeSave({
+      engine,
+      seats: [
+        { nickname: "A", isBot: false, gone: false },
+        { nickname: "B", isBot: false, gone: false },
+      ],
+      options: { startingLives: 3, splashHit: 13, splashMiss: 7, handLimit: 8, shopCost: 4, eventDensity: 8, turnSeconds: 0, reactionSeconds: 12 },
+    });
+  }
+
+  it("accepts a clean blob and rejects tampered/inconsistent ones", () => {
+    const good = validBlob();
+    assert.ok(parseSave(good), "a clean blob validates");
+    const tamper = (mut: (b: any) => void): unknown => {
+      const b = JSON.parse(JSON.stringify(good));
+      mut(b);
+      return parseSave(b);
+    };
+    // XSS source: a card kind that isn't a real CardKind
+    assert.strictEqual(tamper((b) => (b.engine.players[0].hand = [{ id: 1, kind: "<img src=x onerror=alert(1)>" }])), null, "junk card kind rejected");
+    // soft-lock: DEFEND await with no attack object
+    assert.strictEqual(tamper((b) => (b.engine.awaiting = { seats: [1], kind: "DEFEND" })), null, "DEFEND without an attack rejected");
+    // soft-lock: DISCARD await with nothing to discard
+    assert.strictEqual(tamper((b) => (b.engine.awaiting = { seats: [0], kind: "DISCARD" })), null, "DISCARD with hand <= limit rejected");
+    // desync: a MOVE await that doesn't head the turn seat
+    assert.strictEqual(tamper((b) => { b.engine.turnSeat = 0; b.engine.awaiting = { seats: [1], kind: "MOVE" }; }), null, "MOVE/turn desync rejected");
+    // soft-lock: a bogus pending support kind
+    assert.strictEqual(tamper((b) => { b.engine.awaiting = { seats: [1], kind: "REACT" }; b.engine.pending = { kind: "SUPPORT", attacker: 0, target: 1, support: "bogus", redirectedSeats: [] }; }), null, "bogus pending support rejected");
+    // soft-lock: a live game awaiting nobody
+    assert.strictEqual(tamper((b) => { b.engine.over = false; b.engine.awaiting = { seats: [], kind: "GAME_OVER" }; }), null, "live game awaiting nobody rejected");
+    // version mismatch
+    assert.strictEqual(tamper((b) => (b.engine.engineVersion = "9.9.9")), null, "engine version mismatch rejected");
+  });
+});
 
 function makeConfig() {
   return defineServer({
@@ -258,6 +297,26 @@ describe("water fight room", () => {
     await until(() => room2.state.phase === Phase.PLAYING);
     assert.strictEqual(room2.engine.turnCount, savedTurnCount, "resumed at the saved turn");
     assertInvariants(room2.engine);
+  });
+
+  it("CONFIG is host-only, lobby-only, and clamps out-of-range values", async () => {
+    const room = (await colyseus.createRoom(WATER_FIGHT, {})) as unknown as WaterFightRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Host" });
+    const other = await colyseus.connectTo(room, { nickname: "Other" });
+
+    other.send(WaterFightMsg.CONFIG, { key: "startingLives", value: 5 }); // not the host
+    await sleep(100);
+    assert.strictEqual(room.state.startingLives, 3, "a non-host CONFIG is ignored");
+
+    host.send(WaterFightMsg.CONFIG, { key: "startingLives", value: 999 }); // out of range
+    await until(() => room.state.startingLives === 5);
+    assert.strictEqual(room.state.startingLives, 5, "clamped to the setting max");
+
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    host.send(WaterFightMsg.CONFIG, { key: "shopCost", value: 9 }); // mid-game
+    await sleep(100);
+    assert.strictEqual(room.state.shopCost, 4, "CONFIG is ignored once playing");
   });
 
   it("auto-advances a bot seat without any client input", async () => {

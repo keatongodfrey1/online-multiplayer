@@ -1,8 +1,9 @@
-// Pure, deterministic Water Fight rules engine (Phase A: basic combat).
-// All functions are pure: clone-then-mutate, no I/O, no wall clock, no
-// Math.random (the RNG state lives in GameState). The attack ladder lives in
-// attack.ts; this module owns the turn flow, draws, damage/soak/win, and the
-// legal-move surface that policies (bots/fuzz) read.
+// Pure, deterministic Water Fight rules engine (the full ruleset: turn flow,
+// draws + Events, shop, Support/Mischief, big attacks + modifiers, reactions,
+// Storm Cloud, Sudden-Death). All functions are pure: clone-then-mutate, no I/O,
+// no wall clock, no Math.random (the RNG state lives in GameState). The attack
+// ladder lives in attack.ts; this module owns the turn flow, draws, damage/soak/
+// win, and the legal-move surface that policies (bots/fuzz) read.
 
 import { advanceLadder, bigStats, currentTarget, openAttack, openTarget } from "./attack.js";
 import { DRAW_PER_TURN } from "./data.js";
@@ -28,8 +29,17 @@ import {
 
 const STACK_IDS: readonly StackId[] = ["defense", "mischief", "attack"];
 
+/** Keep the in-memory log bounded so structuredClone (per reduce) and the save
+ *  blob don't grow with game length. Only the last ~80 are ever synced. */
+const ENGINE_LOG_CAP = 200;
+
 function clone<T>(x: T): T {
   return structuredClone(x);
+}
+
+/** Trim the log to the last ENGINE_LOG_CAP lines (called once per reduce). */
+function trimLog(s: GameState): void {
+  if (s.log.length > ENGINE_LOG_CAP) s.log.splice(0, s.log.length - ENGINE_LOG_CAP);
 }
 
 /** Support cards whose effect is implemented (grows each Phase B slice). Only
@@ -771,6 +781,7 @@ export function isLegalMove(s: GameState, move: Move): boolean {
 export function applyMove(state: GameState, move: Move): ApplyResult {
   validateMove(state, move);
   const s = clone(state);
+  trimLog(s);
   const seat = s.turnSeat;
   const events: GameEvent[] = [{ type: move.kind, seat, detail: move }];
 
@@ -844,6 +855,7 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
 export function applyResolution(state: GameState, res: Resolution): ApplyResult {
   validateResolution(state, res);
   const s = clone(state);
+  trimLog(s);
   const seat = actingSeat(s);
   const events: GameEvent[] = [{ type: res.kind, seat, detail: res }];
   if (res.kind === "DISCARD") {

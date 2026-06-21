@@ -760,6 +760,62 @@ describe("water fight engine: Storm Cloud + Sudden-Death (B.8)", () => {
   });
 });
 
+describe("water fight engine: regression gaps (review)", () => {
+  it("MAX_ATTACK_ROUNDS backstops a runaway Miss/Hit ladder (no infinite loop)", () => {
+    const g = game(2, 5);
+    setHand(g, 0, ["balloon", ...Array(600).fill("hit")] as CardKind[]);
+    setHand(g, 1, Array(600).fill("miss") as CardKind[]);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    let guard = 0;
+    // Stay in the ladder only; the cap must eject us before cards (or the guard) run out.
+    while ((r.awaiting.kind === "DEFEND" || r.awaiting.kind === "ATTACKER_RESPOND") && ++guard < 2000) {
+      r =
+        r.awaiting.kind === "DEFEND"
+          ? applyResolution(r.state, { kind: "DEFEND", defense: "miss" })
+          : applyResolution(r.state, { kind: "ATTACKER_RESPOND", respond: "hit" });
+    }
+    assert.ok(guard < 2000, "the MAX_ATTACK_ROUNDS cap ended the ladder (no infinite loop)");
+    assert.ok(["MOVE", "DISCARD", "GAME_OVER"].includes(r.awaiting.kind) || r.state.over, "left the ladder in a terminal state");
+  });
+
+  it("a bounced Water Trap can soak the turn player; the turn still ends cleanly", () => {
+    const g = game(3, 7);
+    g.players[0]!.lives = 1;
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, ["watertrap"]);
+    setHand(g, 2, []);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    r = applyResolution(r.state, { kind: "REACT", action: "watertrap" }); // bounce to seat 0
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" }); // seat 0 takes its own throw
+    assert.equal(r.state.players[0]!.out, true, "the attacker soaked themselves");
+    assert.equal(r.state.players[0]!.stormCloud, true, "soft-eliminated, not in Sudden-Death");
+    assert.notEqual(r.state.awaiting.kind, "DISCARD", "no discard opened for the out turn player");
+    assert.notEqual(r.state.turnSeat, 0, "the turn advanced off the soaked player");
+  });
+
+  it("a Backpack-drawn Event that soaks the drawer ends the turn (mid-turn soak)", () => {
+    const g = game(3, 5);
+    g.players[0]!.lives = 1;
+    g.players[0]!.hand.push({ id: 10002, kind: "backpack" });
+    injectTopEvent(g, "mudslide"); // table -1; seat 0 is at 1 life
+    const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "backpack" });
+    assert.equal(r.state.players[0]!.out, true, "the drawer soaked mid-turn");
+    assert.notEqual(r.state.turnSeat, 0, "the turn advanced");
+  });
+
+  it("Golden's draw over the hand limit forces a post-attack discard by the ATTACKER", () => {
+    const g = game(2, 5, { handLimit: 3 });
+    setHand(g, 0, ["golden", "miss", "hit"]); // 3 cards; Golden draws 2 -> 4 > limit
+    setHand(g, 1, []);
+    let r = applyMove(g, { kind: "PLAY_BIG", big: "golden", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.awaiting.kind, "DISCARD", "the over-limit hand must discard");
+    assert.equal(r.awaiting.seats[0], 0, "the attacker discards, not the target");
+  });
+});
+
 describe("water fight engine: illegal input", () => {
   it("rejects targeting yourself, throwing without a balloon, and illegal blocks", () => {
     const g = game(2, 1);

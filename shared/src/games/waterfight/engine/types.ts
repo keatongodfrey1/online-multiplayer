@@ -1,9 +1,11 @@
-// Core types for the Water Fight rules engine.
+// Core types for the Water Fight rules engine (the FULL ruleset).
 //
-// PHASE A scope: turn = draw 2 -> throw a basic Water Balloon -> Splash flip ->
-// Miss/Hit/Umbrella defense ladder -> damage -> soak -> last-standing win.
-// Shop, Events, Support cards, big attacks, modifiers, Storm Cloud, Sudden-Death
-// are Phase B+ and extend these unions + the attack state machine.
+// A turn = draw 2 -> optional Support -> one Main Action (throw / big attack /
+// shop / pass) -> Splash flip -> the Miss/Hit/Umbrella defense ladder -> damage
+// -> soak. Layered on top: the shop, seeded Events, throw modifiers (Soaker,
+// spread, extra throws), out-of-turn reactions (Towel/Redirect/Water Trap/
+// Lifeguard), Storm Cloud soft-elimination, and the Sudden-Death phase. Goggles
+// and Sneaky Peek are modeled but deferred (not yet offered by legalMoves).
 
 /** Every card kind in the game. Phase A only seeds balloon/miss/hit/treasure/wild
  *  into the main deck; umbrella (a shop card) is modeled so the ladder is complete

@@ -22,6 +22,10 @@ import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
 const WF_SAVES_KEY = "waterfight-saves";
 const wfTurnLabel = (blob: any): number => (blob?.engine?.turnCount ?? 0) + 1;
 
+// MIRROR of the engine's TARGETED_SUPPORTS / implemented supports (engine.ts) —
+// the engine is the authority and is unreachable from the client, so these are a
+// hand-copy purely to pick which buttons to show. Keep in sync; the server still
+// validates, so drift only mis-renders, never mis-applies.
 const TARGETED_SUPPORTS = new Set([
   "needle", "pickpocket", "sabotage", "cardswap", "freezeout", "lemonadespill", "switcheroo",
 ]);
@@ -81,7 +85,9 @@ function countKind(hand: { kind: string }[], kind: string): number {
   return hand.reduce((n, c) => n + (c.kind === kind ? 1 : 0), 0);
 }
 
-/** Minimal sell to reach `cost` coins (Treasure 2, Balloon 1, Wild 5), or null. */
+/** Minimal sell to reach `cost` coins (Treasure 2, Balloon 1, Wild 5), or null.
+ *  MIRROR of the engine's minimalSell — UI-only (gates which Shop buttons show);
+ *  the server recomputes and validates the actual sale. Keep coin values in sync. */
 function minimalSell(hand: { kind: string }[], cost: number): { balloons: number; treasures: number; wild: number } | null {
   const b = countKind(hand, "balloon");
   const t = countKind(hand, "treasure");
@@ -294,7 +300,9 @@ export class WaterFightView implements GameView {
         if (picking) cls.push("pick");
         if (sel) cls.push("sel");
         const attr = picking ? `data-act="togglecard" data-id="${c.id}"` : "";
-        return `<span class="${cls.join(" ")}" ${attr}>${CARD_LABELS[c.kind] ?? c.kind}</span>`;
+        // CARD_LABELS values are static/safe; escape the fallback (kind could be
+        // an unrecognized string from a tampered save blob).
+        return `<span class="${cls.join(" ")}" ${attr}>${CARD_LABELS[c.kind] ?? escapeHtml(c.kind)}</span>`;
       })
       .join("")}</div>`;
   }

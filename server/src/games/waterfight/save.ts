@@ -46,6 +46,17 @@ const intIn = (x: unknown, lo: number, hi: number): x is number => isInt(x) && x
 const ATTACK_KINDS = new Set(["basic", "mega", "giant", "golden"]);
 const AWAIT_KINDS = new Set(["MOVE", "REACT", "DEFEND", "ATTACKER_RESPOND", "DISCARD", "EXTRA_THROW", "GAME_OVER"]);
 const PENDING_KINDS = new Set(["THROW", "PLAY_BIG", "SUPPORT"]);
+const BIG_KINDS = new Set(["mega", "giant", "golden"]);
+const SPREAD_MODS = new Set(["triplesplash", "splashzone"]);
+const SUPPORT_KINDS_SET = new Set<string>(WF.SUPPORT_KINDS);
+/** Every legal CardKind, derived from engine data so it can't drift. */
+const CARD_KINDS = new Set<string>([
+  ...Object.keys(WF.MAIN_DECK_COMPOSITION),
+  ...Object.keys(WF.STACK_COMPOSITIONS.defense),
+  ...Object.keys(WF.STACK_COMPOSITIONS.mischief),
+  ...Object.keys(WF.STACK_COMPOSITIONS.attack),
+  "event",
+]);
 
 class RejectSave extends Error {}
 function need(cond: unknown, why = "bad save"): asserts cond {
@@ -53,9 +64,13 @@ function need(cond: unknown, why = "bad save"): asserts cond {
 }
 
 function rebuildCard(c: unknown): { id: number; kind: string; event?: string } {
-  need(isObj(c) && isInt(c.id) && c.id >= 0 && isStr(c.kind) && c.kind.length > 0, "card");
+  // Whitelist the kind (closes a stored-XSS source in the view + junk-card states).
+  need(isObj(c) && isInt(c.id) && c.id >= 0 && isStr(c.kind) && CARD_KINDS.has(c.kind), "card");
   const card: { id: number; kind: string; event?: string } = { id: c.id as number, kind: c.kind as string };
-  if (isStr(c.event)) card.event = c.event;
+  if (c.kind === "event") {
+    need(isStr(c.event) && c.event.length > 0, "event card needs an event name");
+    card.event = c.event as string;
+  }
   return card;
 }
 function rebuildCards(a: unknown): { id: number; kind: string; event?: string }[] {
@@ -136,6 +151,33 @@ function rebuildEngine(e: unknown): GameState {
   need(e.endReason === null || isStr(e.endReason), "endReason");
   need(Array.isArray(e.log), "log");
 
+  // --- awaiting/turn consistency (assertInvariants does NOT cross-check these,
+  //     so a structurally-valid blob could still throw or soft-lock on resume) ---
+  const alive = (seat: number | undefined): boolean =>
+    seat !== undefined && seat >= 0 && seat < players.length && !players[seat]!.out;
+  const head = awaiting.seats[0];
+  if (!(e.over as boolean)) {
+    need(awaiting.kind !== "GAME_OVER" && awaiting.seats.length >= 1, "a live game must await a seat");
+  }
+  if (awaiting.kind === "MOVE") {
+    need(head === (e.turnSeat as number), "a MOVE await must head the turn seat");
+  }
+  if (awaiting.kind === "DEFEND" || awaiting.kind === "ATTACKER_RESPOND") {
+    need(awaiting.attack, "a ladder await needs an attack");
+    need(alive(awaiting.attack!.attackerSeat), "the attacker is soaked");
+    need(alive(awaiting.attack!.targets[awaiting.attack!.targetIdx]), "the ladder target is soaked");
+  } else {
+    need(!awaiting.attack, "an attack is present without a ladder await");
+  }
+  if (awaiting.kind === "REACT") {
+    need(pending, "a REACT await needs a pending action");
+  } else {
+    need(!pending, "a pending action is present without a REACT await");
+  }
+  if (awaiting.kind === "DISCARD") {
+    need(head !== undefined && players[head]!.hand.length > options.handLimit, "a DISCARD await with nothing to discard");
+  }
+
   const state = {
     engineVersion: ENGINE_VERSION,
     seed: e.seed as number,
@@ -203,10 +245,19 @@ function rebuildPending(p: unknown, n: number): GameState["pending"] {
     target: p.target as number,
     redirectedSeats: intArray(p.redirectedSeats).filter((s) => s < n),
   } as NonNullable<GameState["pending"]>;
-  if (isStr(p.big)) (out as { big?: string }).big = p.big;
+  // Whitelist enum-ish fields so a tampered pending can't feed the engine a
+  // value its switch statements don't handle (which would throw on resume).
+  if (p.kind === "PLAY_BIG") {
+    need(isStr(p.big) && BIG_KINDS.has(p.big), "pending big kind");
+    (out as { big?: string }).big = p.big as string;
+  }
+  if (p.kind === "SUPPORT") {
+    need(isStr(p.support) && SUPPORT_KINDS_SET.has(p.support), "pending support kind");
+    (out as { support?: string }).support = p.support as string;
+  }
   if (p.soaker === true) (out as { soaker?: boolean }).soaker = true;
-  if (isStr(p.support)) (out as { support?: string }).support = p.support;
-  if (isObj(p.spread) && isStr(p.spread.modifier)) {
+  if (isObj(p.spread)) {
+    need(isStr(p.spread.modifier) && SPREAD_MODS.has(p.spread.modifier), "pending spread modifier");
     (out as { spread?: unknown }).spread = {
       modifier: p.spread.modifier,
       extraTargets: Array.isArray(p.spread.extraTargets) ? (p.spread.extraTargets as unknown[]).filter((v) => intIn(v, 0, n - 1)) : [],

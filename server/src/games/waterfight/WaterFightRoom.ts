@@ -180,7 +180,11 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
     if (seat < 0 || !this.engine.awaiting.seats.includes(seat)) return; // not the awaited mover
     const move = parseMove(payload);
     if (!move || !WF.isLegalMove(this.engine, move)) return;
-    this.engine = WF.applyMove(this.engine, move).state;
+    try {
+      this.engine = WF.applyMove(this.engine, move).state;
+    } catch {
+      return; // defense-in-depth: never let a legal-looking-but-bad apply crash the room
+    }
     this.afterApply();
   }
 
