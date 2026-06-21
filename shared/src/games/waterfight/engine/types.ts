@@ -3,9 +3,9 @@
 // A turn = draw 2 -> optional Support -> one Main Action (throw / big attack /
 // shop / pass) -> Splash flip -> the Miss/Hit/Umbrella defense ladder -> damage
 // -> soak. Layered on top: the shop, seeded Events, throw modifiers (Soaker,
-// spread, extra throws), out-of-turn reactions (Towel/Redirect/Water Trap/
-// Lifeguard), Storm Cloud soft-elimination, and the Sudden-Death phase. Goggles
-// and Sneaky Peek are modeled but deferred (not yet offered by legalMoves).
+// multi-target spread with per-victim reactions, extra throws), out-of-turn
+// reactions (Towel/Redirect/Water Trap/Lifeguard), peeks (Goggles/Sneaky Peek),
+// Storm Cloud soft-elimination, Flash Flood, and the Sudden-Death phase.
 
 /** Every card kind in the game. Phase A only seeds balloon/miss/hit/treasure/wild
  *  into the main deck; umbrella (a shop card) is modeled so the ladder is complete
@@ -125,22 +125,21 @@ export const DEFAULT_OPTIONS: GameOptions = {
   turnCap: 4000,
 };
 
-/** Who/what the engine is waiting on. Phase A kinds; `seats` is an array for
- *  forward-compat with multi-target (Phase B) but holds exactly one seat here. */
+/** Who/what the engine is waiting on. `seats` holds the single seat acting now
+ *  (a multi-target attack resolves its targets one at a time, not all at once). */
 export type AwaitKind =
   | "MOVE" | "REACT" | "DEFEND" | "ATTACKER_RESPOND" | "DISCARD" | "EXTRA_THROW" | "GAME_OVER";
 
-/** A targeting card committed but not yet resolved — held during the pre-effect
+/** A SINGLE-target card committed but not yet resolved — held during the pre-effect
  *  reaction window (E10/E11). On pass it resolves; Towel cancels it; Redirect /
- *  Water Trap re-point or bounce it (attacks only). The played card(s) are
- *  already spent; only the spread is dropped if a discrete reaction fires (R3). */
+ *  Water Trap re-point or bounce it (attacks only). The played card(s) are already
+ *  spent. (Spread attacks never use this path — they open per-target windows.) */
 export interface PendingAction {
   kind: "THROW" | "PLAY_BIG" | "SUPPORT";
   attacker: number; // the seat whose hits resolve in the ladder (swapped by Water Trap)
   target: number; // the current (possibly redirected) target
   big?: BigKind;
   soaker?: boolean;
-  spread?: Spread;
   support?: SupportKind;
   /** Seats that already spent a discrete reaction (Redirect/Water Trap) — caps the chain. */
   redirectedSeats: number[];

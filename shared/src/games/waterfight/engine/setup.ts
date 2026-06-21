@@ -70,7 +70,7 @@ export function createGame(
     reveals: [],
   };
 
-  // Shuffle the 81 main cards, then deal each NON-first player a 1-card opening
+  // Shuffle the main deck, then deal each NON-first player a 1-card opening
   // cushion (#6) from the still-event-free deck — so the first player draws their
   // normal 2 on turn one while everyone else starts with a card to defend with,
   // and a starting hand can never hold an Event.

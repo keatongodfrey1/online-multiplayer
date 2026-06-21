@@ -12,6 +12,10 @@ export const MAX_ATTACK_ROUNDS = 500;
 /** Cards drawn at the start of each turn. */
 export const DRAW_PER_TURN = 2;
 
+/** Flash Flood (Main Action, table-wide): damage per opponent + blocks to stop it. */
+export const FLASH_FLOOD_DAMAGE = 2;
+export const FLASH_FLOOD_BLOCK = 1;
+
 /** Default main deck composition (D7). Balloon/Treasure (20) and Wild (1) are
  *  fixed; Hit/Miss are a lobby dial (default 20/20). Umbrella/Towel/etc. come from
  *  the shop, so they are NOT in the main deck. */

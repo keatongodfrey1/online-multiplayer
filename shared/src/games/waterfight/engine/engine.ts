@@ -7,7 +7,7 @@
 
 import { advanceLadder, bigStats, currentTarget, openAttack, openTarget } from "./attack.js";
 import { COIN_VALUES, WF_STACK_IDS } from "../constants.js";
-import { DRAW_PER_TURN } from "./data.js";
+import { DRAW_PER_TURN, FLASH_FLOOD_BLOCK, FLASH_FLOOD_DAMAGE } from "./data.js";
 import { discardCard, drawMainCard, flipSplash } from "./deck.js";
 import { rand } from "./rng.js";
 import {
@@ -307,8 +307,8 @@ function cardSwap(s: GameState, a: number, b: number): void {
   }
 }
 
-/** Support card effects. Targeting Mischief cards apply immediately (the Towel
- *  reaction window arrives in B.6); "their choice" discards are randomized here. */
+/** Support card effects (run after any Towel reaction window has passed).
+ *  "Their choice" discards are randomized here; peeks push to s.reveals. */
 function applySupport(s: GameState, seat: number, support: SupportKind, target?: number): void {
   const p = s.players[seat]!;
   switch (support) {
@@ -680,7 +680,11 @@ export function legalResolutions(s: GameState): Resolution[] {
     const redirected = atk ? atk.redirectedSeats : s.pending!.redirectedSeats;
     const canDiscrete = !isSupport && !redirected.includes(seat); // Redirect/Trap: attacks only, once/seat
     if (canDiscrete && handHas(p, "redirect")) {
-      for (const t of livingSeats(s)) if (t !== seat) out.push({ kind: "REACT", action: "redirect", target: t });
+      for (const t of livingSeats(s)) {
+        if (t === seat) continue;
+        if (atk && atk.targets.includes(t)) continue; // mid-attack: no redirect onto an existing splash target
+        out.push({ kind: "REACT", action: "redirect", target: t });
+      }
     }
     // Water Trap bounces to the attacker, so it is unavailable vs a Storm Cloud splash.
     if (canDiscrete && handHas(p, "watertrap") && !s.players[attacker]!.out) {
@@ -810,6 +814,9 @@ function validateResolution(s: GameState, res: Resolution): void {
       if (res.target === undefined || res.target === reactor) throw new Error("invalid Redirect target");
       const t = s.players[res.target];
       if (!t || t.out) throw new Error("Redirect target not a living player");
+      // Mid-attack: never redirect onto a seat already in the splash list (it would
+      // double-soak them); a non-targeted living player or the attacker is fine.
+      if (atk && atk.targets.includes(res.target)) throw new Error("cannot redirect onto an existing splash target");
       return;
     }
     if (!handHas(rp, "watertrap")) throw new Error("no Water Trap in hand");
@@ -884,7 +891,7 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
     spendKind(s, seat, "flashflood");
     const targets = livingSeats(s).filter((t) => t !== seat);
     s.log.push(`seat ${seat} unleashes a Flash Flood on ${targets.length} opponents`);
-    launchAttack(s, seat, targets, "flashflood", 1, 2, false, true);
+    launchAttack(s, seat, targets, "flashflood", FLASH_FLOOD_BLOCK, FLASH_FLOOD_DAMAGE, false, true);
     return { state: s, awaiting: s.awaiting, events };
   }
 
@@ -982,7 +989,10 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
         atk.targets[atk.targetIdx] = atk.attackerSeat; // bounce this instance to the attacker
         s.log.push(`seat ${seat} Water Traps their splash back at ${atk.attackerSeat}`);
       }
+      // The rerouted/bounced victim gets its OWN reaction window (bounded by the
+      // once-per-seat redirectedSeats cap), mirroring the pre-flip pending path.
       s.awaiting = { seats: [currentTarget(atk)], kind: "DEFEND", attack: atk };
+      maybeReactWindow(s);
       return { state: s, awaiting: s.awaiting, events };
     }
     const pa = s.pending!;
@@ -998,10 +1008,10 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
       else afterAttack(s, pa.kind === "PLAY_BIG" ? pa.big! : "basic");
       return { state: s, awaiting: s.awaiting, events };
     }
-    // Redirect / Water Trap: spend the card, drop any spread (the redirected
-    // instance is single-target — R3), re-open the window for the new target.
+    // Redirect / Water Trap on a SINGLE-target pre-flip pending: re-point or bounce
+    // it, then re-open the window for the new target. (Spread attacks never use the
+    // pending path — they open per-target windows directly.)
     pa.redirectedSeats.push(seat);
-    pa.spread = undefined;
     if (res.action === "redirect") {
       spendKind(s, seat, "redirect");
       s.log.push(`seat ${seat} Redirects to ${res.target}`);

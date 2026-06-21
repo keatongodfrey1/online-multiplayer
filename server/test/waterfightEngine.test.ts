@@ -926,6 +926,18 @@ describe("water fight engine: Flash Flood (G5)", () => {
     assert.equal(r.state.players[2]!.lives, 3, "seat 2 blocked it with a Miss");
   });
 
+  it("a Launcher grants an extra throw after a Flash Flood (E4)", () => {
+    const g = game(3, 5);
+    setHand(g, 0, ["flashflood", "launcher", "balloon"]);
+    setHand(g, 1, []);
+    setHand(g, 2, []);
+    let r = applyMove(g, { kind: "FLASH_FLOOD" });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.awaiting.kind, "EXTRA_THROW", "Flash Flood is an attack, so Launcher applies");
+    assert.equal(r.awaiting.seats[0], 0);
+  });
+
   it("deals nothing in Sudden-Death (E9 suppresses table-wide damage)", () => {
     const g = game(3, 5);
     g.phase = "sudden-death";
@@ -981,6 +993,40 @@ describe("water fight engine: full-fidelity AoE (G4)", () => {
     assert.equal(r.state.players[2]!.lives, 3, "seat 2 peeled its own instance — unharmed");
     assert.equal(r.state.players[3]!.lives, 2, "seat 3 soaked");
     assert.equal(r.state.players[0]!.lives, 2, "the attacker took the redirected instance");
+  });
+
+  it("a redirected splash gives the NEW victim its own reaction window (review fix)", () => {
+    const g = game(4, 5);
+    setHand(g, 0, ["balloon", "triplesplash"]);
+    setHand(g, 1, ["redirect"]);
+    setHand(g, 2, []);
+    setHand(g, 3, ["towel"]); // NOT an original target — gets redirected onto
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1, spread: { modifier: "triplesplash", extraTargets: [2] } });
+    assert.equal(r.awaiting.seats[0], 1);
+    r = applyResolution(r.state, { kind: "REACT", action: "redirect", target: 3 }); // seat 1 -> seat 3
+    assert.equal(r.awaiting.kind, "REACT", "the redirected-onto victim gets its OWN window");
+    assert.equal(r.awaiting.seats[0], 3);
+    r = applyResolution(r.state, { kind: "REACT", action: "towel" }); // seat 3 peels the redirected instance
+    assert.equal(r.awaiting.seats[0], 2, "seat 2's own instance still resolves");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 3, "seat 1 redirected away");
+    assert.equal(r.state.players[3]!.lives, 3, "seat 3 Towelled the redirected instance");
+    assert.equal(r.state.players[2]!.lives, 2, "seat 2 still soaked");
+  });
+
+  it("a Redirect cannot target a seat already in the splash (no double-soak — review fix)", () => {
+    const g = game(3, 7);
+    setHand(g, 0, ["balloon", "splashzone"]);
+    setHand(g, 1, ["redirect"]);
+    setHand(g, 2, []);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1, spread: { modifier: "splashzone", extraTargets: [] } });
+    assert.equal(r.awaiting.seats[0], 1);
+    const opts = legalResolutions(r.state).filter((o) => o.kind === "REACT" && o.action === "redirect") as { target: number }[];
+    assert.ok(!opts.some((o) => o.target === 2), "an existing target (seat 2) is NOT offered");
+    assert.ok(opts.some((o) => o.target === 0), "the attacker IS a valid redirect target");
+    assert.throws(() => applyResolution(r.state, { kind: "REACT", action: "redirect", target: 2 }), /existing splash target/);
   });
 
   it("a victim's Water Trap bounces only their instance back at the attacker", () => {

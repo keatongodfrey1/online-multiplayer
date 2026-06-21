@@ -413,6 +413,25 @@ describe("water fight room", () => {
     assert.strictEqual(bReveal, null, "the opponent never receives the peek");
   });
 
+  it("forwards a Sneaky Peek (opponent's hand) to the peeker only", async () => {
+    const { room, clients } = await startedGame(63, 2, (r) => {
+      r.state.eventDensity = 0;
+    });
+    const [a, b] = clients;
+    let aReveal: any = null;
+    let bReveal: any = null;
+    a!.onMessage(WaterFightMsg.REVEAL, (p: unknown) => (aReveal = p));
+    b!.onMessage(WaterFightMsg.REVEAL, (p: unknown) => (bReveal = p));
+    room.engine.players[0]!.hand.push({ id: 10001, kind: "sneakypeek" });
+    room.engine.players[1]!.hand = [{ id: 20001, kind: "miss" }];
+    a!.send(WaterFightMsg.MOVE, { kind: "PLAY_SUPPORT", support: "sneakypeek", target: 1 });
+    await until(() => aReveal !== null);
+    assert.strictEqual(aReveal.kind, "hand");
+    assert.strictEqual(aReveal.ofSeat, 1, "the peeker sees whose hand it is");
+    await sleep(80);
+    assert.strictEqual(bReveal, null, "the peeked opponent receives nothing");
+  });
+
   it("auto-advances a bot seat without any client input", async () => {
     const room = (await colyseus.createRoom(WATER_FIGHT, { seed: 21 })) as unknown as WaterFightRoom;
     const host = await colyseus.connectTo(room, { nickname: "Human" });

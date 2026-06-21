@@ -90,11 +90,20 @@ export function assertInvariants(s: GameState): void {
     if (ap?.out && !stormOk) {
       throw new Error(`awaiting a soaked seat ${seat} (kind ${s.awaiting.kind})`);
     }
-    // An attack in progress must have a CURRENT target that is still alive.
+    // An attack in progress must have a CURRENT target that is still alive, and
+    // the awaited head must be the engine's notion of the acting seat — DEFEND /
+    // mid-attack REACT are the current target; ATTACKER_RESPOND is the attacker.
+    // (This catches a redirected/bounced instance left awaiting the wrong seat.)
     if (s.awaiting.attack) {
       const atk = s.awaiting.attack;
-      const t = s.players[atk.targets[atk.targetIdx]!];
+      const cur = atk.targets[atk.targetIdx]!;
+      const t = s.players[cur];
       if (!t || t.out) throw new Error("attack targets a soaked/absent seat");
+      const expected =
+        s.awaiting.kind === "ATTACKER_RESPOND" ? atk.attackerSeat
+        : s.awaiting.kind === "DEFEND" || s.awaiting.kind === "REACT" ? cur
+        : seat;
+      if (seat !== expected) throw new Error(`await ${s.awaiting.kind} head ${seat} != acting seat ${expected}`);
     }
   }
 }
