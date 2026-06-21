@@ -7,10 +7,12 @@
 import type { Room } from "@colyseus/sdk";
 import {
   type BaseState,
+  COIN_VALUES,
   LobbyMsg,
   Phase,
   WaterFightMsg,
   WF_SETTINGS,
+  WF_STACK_IDS,
   type WaterFightSeat,
   type WaterFightState,
 } from "@backbone/shared";
@@ -85,17 +87,17 @@ function countKind(hand: { kind: string }[], kind: string): number {
   return hand.reduce((n, c) => n + (c.kind === kind ? 1 : 0), 0);
 }
 
-/** Minimal sell to reach `cost` coins (Treasure 2, Balloon 1, Wild 5), or null.
- *  MIRROR of the engine's minimalSell — UI-only (gates which Shop buttons show);
- *  the server recomputes and validates the actual sale. Keep coin values in sync. */
+/** Minimal sell to reach `cost` coins, or null. UI-only MIRROR of the engine's
+ *  minimalSell (gates which Shop buttons show); the server recomputes + validates
+ *  the actual sale. Coin values come from the shared COIN_VALUES (no drift). */
 function minimalSell(hand: { kind: string }[], cost: number): { balloons: number; treasures: number; wild: number } | null {
   const b = countKind(hand, "balloon");
   const t = countKind(hand, "treasure");
   const w = countKind(hand, "wild");
   let coins = 0, sb = 0, st = 0, sw = 0;
-  while (coins < cost && st < t) { st++; coins += 2; }
-  while (coins < cost && sb < b) { sb++; coins += 1; }
-  if (coins < cost && w > 0) { sw = 1; coins += 5; }
+  while (coins < cost && st < t) { st++; coins += COIN_VALUES.treasure; }
+  while (coins < cost && sb < b) { sb++; coins += COIN_VALUES.balloon; }
+  if (coins < cost && w > 0) { sw = 1; coins += COIN_VALUES.wild; }
   return coins >= cost ? { balloons: sb, treasures: st, wild: sw } : null;
 }
 
@@ -349,12 +351,11 @@ export class WaterFightView implements GameView {
         if (!me.noShop) {
           const sell = minimalSell(hand, state.shopCost);
           if (sell) {
-            const stacks: [string, number][] = [["defense", 0], ["mischief", 1], ["attack", 2]];
-            for (const [name, idx] of stacks) {
+            WF_STACK_IDS.forEach((name, idx) => {
               if ((state.stackCounts[idx] ?? 0) > 0) {
                 out.push(btn("shop", `🛒 Buy ${name}`, `data-stack="${name}" data-sell='${JSON.stringify(sell)}'`, true));
               }
-            }
+            });
           }
         }
         out.push(btn("end", "End turn", "", true));

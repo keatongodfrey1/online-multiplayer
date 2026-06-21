@@ -6,6 +6,7 @@
 // win, and the legal-move surface that policies (bots/fuzz) read.
 
 import { advanceLadder, bigStats, currentTarget, openAttack, openTarget } from "./attack.js";
+import { COIN_VALUES, WF_STACK_IDS } from "../constants.js";
 import { DRAW_PER_TURN } from "./data.js";
 import { discardCard, drawMainCard, flipSplash } from "./deck.js";
 import { rand } from "./rng.js";
@@ -27,7 +28,7 @@ import {
   SupportKind,
 } from "./types.js";
 
-const STACK_IDS: readonly StackId[] = ["defense", "mischief", "attack"];
+const STACK_IDS: readonly StackId[] = WF_STACK_IDS;
 
 /** Keep the in-memory log bounded so structuredClone (per reduce) and the save
  *  blob don't grow with game length. Only the last ~80 are ever synced. */
@@ -67,7 +68,7 @@ function handCount(p: PlayerState, kind: CardKind): number {
 }
 
 /** A minimal sell (preferring Treasure/balloons, preserving the Wild) reaching
- *  `cost` coins; null if unaffordable. Balloon=1, Treasure=2, Wild=5 coins. */
+ *  `cost` coins; null if unaffordable. Coin values from COIN_VALUES. */
 function minimalSell(p: PlayerState, cost: number): { balloons: number; treasures: number; wild: number } | null {
   const b = handCount(p, "balloon");
   const t = handCount(p, "treasure");
@@ -78,15 +79,15 @@ function minimalSell(p: PlayerState, cost: number): { balloons: number; treasure
   let sw = 0;
   while (coins < cost && st < t) {
     st += 1;
-    coins += 2;
+    coins += COIN_VALUES.treasure;
   }
   while (coins < cost && sb < b) {
     sb += 1;
-    coins += 1;
+    coins += COIN_VALUES.balloon;
   }
   if (coins < cost && w > 0) {
     sw = 1;
-    coins += 5;
+    coins += COIN_VALUES.wild;
   }
   return coins >= cost ? { balloons: sb, treasures: st, wild: sw } : null;
 }
@@ -680,7 +681,8 @@ function validateMove(s: GameState, move: Move): void {
     if (handCount(p, "balloon") < balloons) throw new Error("not enough balloons to sell");
     if (handCount(p, "treasure") < treasures) throw new Error("not enough Treasure to sell");
     if (handCount(p, "wild") < wild) throw new Error("not enough Wild to sell");
-    if (balloons + treasures * 2 + wild * 5 < move.buy.length * s.options.shopCost) throw new Error("not enough coins");
+    const coins = balloons * COIN_VALUES.balloon + treasures * COIN_VALUES.treasure + wild * COIN_VALUES.wild;
+    if (coins < move.buy.length * s.options.shopCost) throw new Error("not enough coins");
     const need: Record<StackId, number> = { defense: 0, mischief: 0, attack: 0 };
     for (const st of move.buy) need[st] += 1;
     for (const st of STACK_IDS) if (need[st] > s.stacks[st].length) throw new Error(`stack ${st} has too few cards`);

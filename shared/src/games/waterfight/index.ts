@@ -11,6 +11,7 @@ import { ArraySchema, entity, Schema, type, view } from "@colyseus/schema";
 import { BasePlayer, BaseState } from "../../state.js";
 
 export * as WaterFightEngine from "./engine/index.js";
+export * from "./constants.js";
 
 export const WATER_FIGHT = "waterfight";
 

@@ -19,6 +19,7 @@ import {
   WaterFightPlayer,
   WaterFightSeat,
   WaterFightState,
+  WF_STACK_IDS,
   wfSettingByKey,
 } from "@backbone/shared";
 import { BaseGameRoom } from "../../framework/BaseGameRoom.js";
@@ -374,9 +375,9 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
     this.state.splashPileCount = e.splashPile.length;
     this.state.splashDiscardCount = e.splashDiscard.length;
     this.state.usedPileCount = e.usedPile.length;
-    this.state.stackCounts[0] = e.stacks.defense.length;
-    this.state.stackCounts[1] = e.stacks.mischief.length;
-    this.state.stackCounts[2] = e.stacks.attack.length;
+    WF_STACK_IDS.forEach((id, i) => {
+      this.state.stackCounts[i] = e.stacks[id].length;
+    });
 
     e.players.forEach((p, i) => {
       const seat = this.state.seats[i];

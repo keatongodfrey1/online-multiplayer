@@ -1,5 +1,6 @@
 // Game setup: build the initial GameState (decks, players, opening turn).
 
+import { WF_STACK_IDS } from "../constants.js";
 import { buildEventCards, buildMainDeck, buildStacks, ENGINE_VERSION, EVENT_KINDS, EVENT_TOTAL } from "./data.js";
 import { startTurn } from "./engine.js";
 import { shuffleInPlace } from "./rng.js";
@@ -73,7 +74,7 @@ export function createGame(
   }
   shuffleInPlace(s.mainDeck, s);
   shuffleInPlace(s.splashPile, s);
-  for (const id of ["defense", "mischief", "attack"] as const) shuffleInPlace(s.stacks[id], s);
+  for (const id of WF_STACK_IDS) shuffleInPlace(s.stacks[id], s);
   startTurn(s, 0); // deal the opening hand for seat 0
   return s;
 }

@@ -5,13 +5,13 @@
  * The engine then validates LEGALITY; this layer only guarantees a well-typed
  * value so applyMove/applyResolution can't be fed garbage.
  */
-import { WaterFightEngine as WF } from "@backbone/shared";
+import { WaterFightEngine as WF, WF_STACK_IDS } from "@backbone/shared";
 
 type Move = WF.Move;
 type Resolution = WF.Resolution;
 type Spread = WF.Spread;
 
-const STACK_IDS = ["defense", "mischief", "attack"] as const;
+const STACK_IDS = WF_STACK_IDS;
 const BIG_KINDS = ["mega", "giant", "golden"] as const;
 const SPREAD_MODS = ["triplesplash", "splashzone"] as const;
 /** Single source of truth — the engine's exported support list. */

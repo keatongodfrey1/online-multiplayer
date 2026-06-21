@@ -816,6 +816,89 @@ describe("water fight engine: regression gaps (review)", () => {
   });
 });
 
+describe("water fight engine: effects + edges (review)", () => {
+  it("Storm Cloud splash distributes across living targets, and needs a balloon", () => {
+    const seen = new Set<number>();
+    for (let seed = 0; seed < 40; seed++) {
+      const g = game(3, seed);
+      g.players[1]!.lives = 0;
+      g.players[1]!.out = true;
+      g.players[1]!.stormCloud = true;
+      setHand(g, 1, ["balloon"]);
+      g.turnSeat = 1;
+      g.awaiting = { seats: [1], kind: "MOVE" };
+      g.splashPile = ["hit", "hit", "hit"];
+      const r = applyMove(g, { kind: "STORM_THROW" });
+      seen.add(r.awaiting.seats[0]!);
+    }
+    assert.ok(seen.size > 1, "the random splash reaches more than one distinct living seat");
+
+    const g2 = game(3, 5);
+    g2.players[1]!.lives = 0;
+    g2.players[1]!.out = true;
+    g2.players[1]!.stormCloud = true;
+    setHand(g2, 1, ["miss"]); // no balloon
+    g2.turnSeat = 1;
+    g2.awaiting = { seats: [1], kind: "MOVE" };
+    const moves = legalMoves(g2);
+    assert.ok(!moves.some((m) => m.kind === "STORM_THROW"), "no balloon -> no splash offered");
+    assert.ok(moves.some((m) => m.kind === "END_TURN"));
+  });
+
+  it("Lost and Found takes one card from each living opponent (E7)", () => {
+    const g = game(3, 5);
+    setHand(g, 0, ["miss", "miss"]);
+    setHand(g, 1, []);
+    setHand(g, 2, ["hit", "hit"]);
+    injectTopEvent(g, "lostandfound");
+    const r = applyMove(g, { kind: "END_TURN" }); // seat 1 draws it
+    assert.equal(r.state.turnSeat, 1, "seat 1 is the drawer");
+    assert.equal(r.state.players[0]!.hand.length, 1, "seat 0 lost one card");
+    assert.equal(r.state.players[2]!.hand.length, 1, "seat 2 lost one card");
+    assert.ok(r.state.players[1]!.hand.length >= 2, "the drawer gained one from each opponent");
+  });
+
+  it("Card Swap exchanges up to 2 cards each way", () => {
+    const g = game(2, 5);
+    g.players[0]!.hand = [
+      { id: 10001, kind: "cardswap" },
+      { id: 10002, kind: "miss" },
+      { id: 10003, kind: "miss" },
+      { id: 10004, kind: "miss" },
+    ];
+    setHand(g, 1, ["hit", "hit", "hit"]);
+    const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "cardswap", target: 1 });
+    // The swap is random (it can re-pick a just-moved card), so assert the
+    // conservative property: hand sizes hold and no card is lost or duplicated.
+    const h0 = r.state.players[0]!.hand;
+    const h1 = r.state.players[1]!.hand;
+    assert.equal(h0.length, 3, "seat 0 keeps 3 cards");
+    assert.equal(h1.length, 3, "seat 1 keeps 3 cards");
+    const hits = h0.filter((c) => c.kind === "hit").length + h1.filter((c) => c.kind === "hit").length;
+    const misses = h0.filter((c) => c.kind === "miss").length + h1.filter((c) => c.kind === "miss").length;
+    assert.equal(hits, 3, "all 3 hits conserved across the swap");
+    assert.equal(misses, 3, "all 3 misses conserved across the swap");
+  });
+
+  it("Sabotage discards exactly 2 of the target's cards", () => {
+    const g = game(2, 5);
+    g.players[0]!.hand.push({ id: 10001, kind: "sabotage" });
+    setHand(g, 1, ["miss", "hit", "treasure", "wild"]);
+    const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "sabotage", target: 1 });
+    assert.equal(r.state.players[1]!.hand.length, 2, "the target lost exactly 2 cards");
+  });
+
+  it("Hidden Stash pulls up to 2 Treasure out of the discard", () => {
+    const g = game(2, 5);
+    g.players[0]!.hand.push({ id: 10001, kind: "hiddenstash" });
+    g.mainDiscard.push({ id: 9001, kind: "treasure" }, { id: 9002, kind: "treasure" }, { id: 9003, kind: "treasure" });
+    const before = g.players[0]!.hand.filter((c) => c.kind === "treasure").length;
+    const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "hiddenstash" });
+    assert.equal(r.state.players[0]!.hand.filter((c) => c.kind === "treasure").length - before, 2, "took 2 Treasure");
+    assert.equal(r.state.mainDiscard.filter((c) => c.kind === "treasure").length, 1, "one Treasure left in the discard");
+  });
+});
+
 describe("water fight engine: illegal input", () => {
   it("rejects targeting yourself, throwing without a balloon, and illegal blocks", () => {
     const g = game(2, 1);

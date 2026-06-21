@@ -319,6 +319,79 @@ describe("water fight room", () => {
     assert.strictEqual(room.state.shopCost, 4, "CONFIG is ignored once playing");
   });
 
+  it("a defender who disconnects mid-reaction is auto-passed (the table never stalls)", async function () {
+    this.timeout(8000);
+    const { room, clients } = await startedGame(51);
+    const [a, b] = clients;
+    await openDefendLadder(room, a!, [{ id: 10000, kind: "balloon" }], []);
+    assert.strictEqual(room.engine.awaiting.kind, "DEFEND");
+    await b!.leave(false); // the awaited defender drops
+    await until(() => room.engine.players[1]!.lives === 2, 5000); // auto-passed -> the throw lands
+    assert.notStrictEqual(room.engine.awaiting.kind, "DEFEND", "the reaction resolved without the defender");
+  });
+
+  it("saves and resumes a mid-attack (DEFEND) state", async () => {
+    const { room, clients } = await startedGame(53);
+    const [a] = clients;
+    // Give seat 0 a REAL balloon from the deck (preserves conservation) + force a Hit,
+    // so the saved blob passes the validator's assertInvariants gate.
+    const idx = room.engine.mainDeck.findIndex((c) => c.kind === "balloon");
+    room.engine.players[0]!.hand.push(room.engine.mainDeck.splice(idx, 1)[0]!);
+    room.engine.splashPile[room.engine.splashPile.length - 1] = "hit"; // force the flip, keep the count
+    a!.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "DEFEND" && room.engine.awaiting.seats[0] === 1);
+
+    let saved: any = null;
+    a!.onMessage(ServerMsg.SAVE_DATA, (blob: unknown) => (saved = blob));
+    a!.send(LobbyMsg.SAVE, {});
+    await until(() => saved !== null);
+    const parsed = parseSave(saved);
+    assert.ok(parsed, "the mid-attack blob validates");
+    assert.strictEqual(parsed!.engine.awaiting.kind, "DEFEND");
+    assert.ok(parsed!.engine.awaiting.attack, "the open attack is preserved");
+
+    const room2 = (await colyseus.createRoom(WATER_FIGHT, {})) as unknown as WaterFightRoom;
+    const c0 = await colyseus.connectTo(room2, { nickname: "Player0" });
+    await colyseus.connectTo(room2, { nickname: "Player1" });
+    c0.send(LobbyMsg.LOAD, saved);
+    await until(() => room2.state.loadedSave !== "");
+    c0.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+    assert.strictEqual(room2.engine.awaiting.kind, "DEFEND", "resumed mid-ladder");
+    assert.strictEqual(room2.engine.awaiting.seats[0], 1, "the defender is still the awaited seat");
+  });
+
+  it("a game against a bot reaches a winner (the bot self-advances)", async function () {
+    this.timeout(60000);
+    const room = (await colyseus.createRoom(WATER_FIGHT, { seed: 88 })) as unknown as WaterFightRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Human" });
+    host.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 2);
+    room.botDelayMs = 5;
+    room.state.turnSeconds = 0;
+    room.state.reactionSeconds = 0;
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+
+    const policy = new RandomPolicy(3);
+    let guard = 0;
+    while (room.state.phase === Phase.PLAYING && ++guard < 6000) {
+      const prev = room.engine;
+      const seat = prev.awaiting.seats[0] ?? -1;
+      if (seat >= 0 && room.seatOrder[seat] === host.sessionId) {
+        // drive only the human's seat; the bot seat self-advances via the room timer
+        if (prev.awaiting.kind === "MOVE") host.send(WaterFightMsg.MOVE, policy.move(prev));
+        else host.send(WaterFightMsg.RESOLVE, policy.resolve(prev));
+      }
+      await until(() => room.engine !== prev || room.state.phase !== Phase.PLAYING, 4000).catch(() => {});
+    }
+    assert.strictEqual(room.state.phase, Phase.ENDED, "the game reached a winner with the bot self-driving");
+    assert.ok(
+      room.state.endReason.startsWith(EndReason.WIN_PREFIX) || room.state.endReason === EndReason.DRAW,
+      `unexpected endReason ${room.state.endReason}`,
+    );
+  });
+
   it("auto-advances a bot seat without any client input", async () => {
     const room = (await colyseus.createRoom(WATER_FIGHT, { seed: 21 })) as unknown as WaterFightRoom;
     const host = await colyseus.connectTo(room, { nickname: "Human" });
