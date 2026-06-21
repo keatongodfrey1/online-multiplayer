@@ -165,6 +165,9 @@ export class WaterFightView implements GameView {
       case "end":
         room.send(WaterFightMsg.MOVE, { kind: "END_TURN" });
         return;
+      case "flashflood":
+        room.send(WaterFightMsg.MOVE, { kind: "FLASH_FLOOD" });
+        return;
       case "storm":
         room.send(WaterFightMsg.MOVE, { kind: "STORM_THROW" });
         return;
@@ -368,6 +371,7 @@ export class WaterFightView implements GameView {
         for (const big of ["mega", "giant", "golden"]) {
           if (has(big)) for (const t of opponents) out.push(btn("big", `${CARD_LABELS[big]} → ${escapeHtml(t.nickname)}`, `data-big="${big}" data-target="${t.seat}"`));
         }
+        if (has("flashflood") && opponents.length > 0) out.push(btn("flashflood", "🌧 Flash Flood (all, 2 dmg)"));
         for (const sup of UNTARGETED_SUPPORTS) {
           if (has(sup)) out.push(btn("support", SUPPORT_LABELS[sup] ?? sup, `data-support="${sup}"`, true));
         }

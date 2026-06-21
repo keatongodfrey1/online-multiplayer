@@ -908,6 +908,42 @@ describe("water fight engine: effects + edges (review)", () => {
   });
 });
 
+describe("water fight engine: Flash Flood (G5)", () => {
+  it("auto-connects and soaks every opponent for 2 (each can block)", () => {
+    const g = game(3, 5);
+    setHand(g, 0, ["flashflood"]);
+    setHand(g, 1, []); // takes it
+    setHand(g, 2, ["miss"]); // blocks it
+    let r = applyMove(g, { kind: "FLASH_FLOOD" });
+    assert.equal(r.awaiting.kind, "DEFEND");
+    assert.equal(r.awaiting.seats[0], 1, "no flip — straight to each opponent's ladder");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" }); // seat 1 takes 2
+    assert.equal(r.awaiting.seats[0], 2);
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "miss" }); // one block stops a basic-block attack
+    assert.equal(r.awaiting.kind, "ATTACKER_RESPOND");
+    r = applyResolution(r.state, { kind: "ATTACKER_RESPOND", respond: "pass" });
+    assert.equal(r.state.players[1]!.lives, 1, "seat 1 took 2");
+    assert.equal(r.state.players[2]!.lives, 3, "seat 2 blocked it with a Miss");
+  });
+
+  it("deals nothing in Sudden-Death (E9 suppresses table-wide damage)", () => {
+    const g = game(3, 5);
+    g.phase = "sudden-death";
+    g.players[0]!.lives = 1;
+    g.players[1]!.lives = 1;
+    g.players[2]!.lives = 1;
+    setHand(g, 0, ["flashflood"]);
+    setHand(g, 1, []);
+    setHand(g, 2, []);
+    let r = applyMove(g, { kind: "FLASH_FLOOD" });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 1, "suppressed");
+    assert.equal(r.state.players[2]!.lives, 1, "suppressed");
+    assert.equal(r.state.over, false, "no Sudden-Death wipe");
+  });
+});
+
 describe("water fight engine: full-fidelity AoE (G4)", () => {
   it("each splash victim reacts to their OWN instance; one peeling doesn't spare the others (R3)", () => {
     const g = game(3, 7);

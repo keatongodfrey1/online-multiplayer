@@ -48,7 +48,7 @@ const isStr = (x: unknown): x is string => typeof x === "string";
 const isBool = (x: unknown): x is boolean => typeof x === "boolean";
 const intIn = (x: unknown, lo: number, hi: number): x is number => isInt(x) && x >= lo && x <= hi;
 
-const ATTACK_KINDS = new Set(["basic", "mega", "giant", "golden"]);
+const ATTACK_KINDS = new Set(["basic", "flashflood", "mega", "giant", "golden"]);
 const AWAIT_KINDS = new Set(["MOVE", "REACT", "DEFEND", "ATTACKER_RESPOND", "DISCARD", "EXTRA_THROW", "GAME_OVER"]);
 const PENDING_KINDS = new Set(["THROW", "PLAY_BIG", "SUPPORT"]);
 const BIG_KINDS = new Set(["mega", "giant", "golden"]);

@@ -657,6 +657,7 @@ export function legalMoves(s: GameState): Move[] {
   for (const big of ["mega", "giant", "golden"] as const) {
     if (handHas(p, big)) for (const t of opponents) moves.push({ kind: "PLAY_BIG", big, target: t });
   }
+  if (handHas(p, "flashflood") && opponents.length > 0) moves.push({ kind: "FLASH_FLOOD" });
   const sell = minimalSell(p, s.options.shopCost);
   if (sell && !p.statuses.noShop) {
     for (const st of STACK_IDS) if (s.stacks[st].length > 0) moves.push({ kind: "SHOP", sell, buy: [st] });
@@ -727,6 +728,11 @@ function validateMove(s: GameState, move: Move): void {
   }
   if (move.kind === "STORM_THROW") throw new Error("only a Storm Cloud may STORM_THROW");
   if (move.kind === "END_TURN") return;
+  if (move.kind === "FLASH_FLOOD") {
+    if (!handHas(p, "flashflood")) throw new Error("no Flash Flood in hand");
+    if (livingSeats(s).filter((t) => t !== seat).length === 0) throw new Error("no opponents to flood");
+    return;
+  }
   if (move.kind === "PLAY_SUPPORT") {
     if (s.supportUsed) throw new Error("already used a Support this turn");
     if (!SUPPORT_IMPLEMENTED.includes(move.support)) throw new Error(`support ${move.support} not available`);
@@ -868,6 +874,17 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
     s.stormThrowsUsed += 1;
     s.log.push(`Storm Cloud seat ${seat} splashes random target ${target}`);
     startThrow(s, seat, target, false);
+    return { state: s, awaiting: s.awaiting, events };
+  }
+
+  if (move.kind === "FLASH_FLOOD") {
+    // Auto-connects and soaks every opponent for 2 (blockable). Reuses the
+    // multi-target machinery, so each opponent peels its own instance (R3) and
+    // it is suppressed in Sudden-Death (multi-target).
+    spendKind(s, seat, "flashflood");
+    const targets = livingSeats(s).filter((t) => t !== seat);
+    s.log.push(`seat ${seat} unleashes a Flash Flood on ${targets.length} opponents`);
+    launchAttack(s, seat, targets, "flashflood", 1, 2, false, true);
     return { state: s, awaiting: s.awaiting, events };
   }
 

@@ -24,7 +24,8 @@ export type CardKind =
 
 /** Big attacks (Attack Arsenal) — they auto-connect, skipping the Splash flip (E2). */
 export type BigKind = "mega" | "giant" | "golden";
-export type AttackKind = "basic" | BigKind;
+/** Attack kinds in the ladder. "flashflood" is the table-wide Main Action. */
+export type AttackKind = "basic" | "flashflood" | BigKind;
 
 /** Cards played in the Support slot (during your own turn). */
 export type SupportKind =
@@ -231,6 +232,7 @@ export type Move =
   | { kind: "THROW"; target: number; soaker?: boolean; spread?: Spread } // Main Action
   | { kind: "PLAY_BIG"; big: BigKind; target: number; soaker?: boolean; spread?: Spread } // Main Action
   | { kind: "SHOP"; sell: { balloons: number; treasures: number; wild: number }; buy: StackId[] } // Main Action
+  | { kind: "FLASH_FLOOD" } // Main Action: auto-connects, soaks every opponent for 2 (blockable)
   | { kind: "STORM_THROW" } // a Storm Cloud's sideline splash (engine picks a random living target)
   | { kind: "END_TURN" }; // Main Action (pass)
 

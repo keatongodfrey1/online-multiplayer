@@ -46,6 +46,8 @@ export function parseMove(payload: unknown): Move | null {
   switch (payload.kind) {
     case "END_TURN":
       return { kind: "END_TURN" };
+    case "FLASH_FLOOD":
+      return { kind: "FLASH_FLOOD" };
     case "STORM_THROW":
       return { kind: "STORM_THROW" };
     case "PLAY_SUPPORT": {
