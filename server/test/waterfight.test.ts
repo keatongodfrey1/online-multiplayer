@@ -140,6 +140,97 @@ describe("water fight room", () => {
     assert.strictEqual(room.state.currentTurn, a.sessionId, "seat 0 starts again");
   });
 
+  // ---- Phase D: the reaction sub-phase over the wire ----
+
+  /** Drive seat 0 into a guaranteed-Hit basic throw at seat 1, opening the
+   *  defender's DEFEND ladder. Returns once the engine awaits seat 1's DEFEND. */
+  async function openDefendLadder(
+    room: WaterFightRoom,
+    a: { send: (t: string, p: unknown) => void },
+    attackerHand: { id: number; kind: string }[],
+    defenderHand: { id: number; kind: string }[],
+  ): Promise<void> {
+    room.engine.players[0]!.hand = attackerHand as never;
+    room.engine.players[1]!.hand = defenderHand as never;
+    room.engine.splashPile = ["hit", "hit", "hit"];
+    a.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "DEFEND" && room.engine.awaiting.seats[0] === 1);
+  }
+
+  it("accepts a reaction ONLY from the awaited (non-current) seat", async () => {
+    const { room, clients } = await startedGame(31, 3);
+    const [a, b, c] = clients as [typeof clients[0], typeof clients[0], typeof clients[0]];
+    await openDefendLadder(room, a!, [{ id: 10000, kind: "balloon" }], [{ id: 10001, kind: "miss" }]);
+
+    const before = room.engine;
+    a!.send(WaterFightMsg.RESOLVE, { kind: "DEFEND", defense: "miss" }); // attacker, not awaited
+    c!.send(WaterFightMsg.RESOLVE, { kind: "DEFEND", defense: "miss" }); // bystander, not awaited
+    await sleep(120);
+    assert.strictEqual(room.engine, before, "only the awaited defender may resolve");
+
+    b!.send(WaterFightMsg.RESOLVE, { kind: "DEFEND", defense: "miss" }); // the awaited defender
+    await until(() => room.engine !== before);
+    assert.strictEqual(room.engine.awaiting.kind, "ATTACKER_RESPOND", "the ladder advanced to the attacker");
+    assert.strictEqual(room.engine.awaiting.seats[0], 0);
+  });
+
+  it("runs the full alternating ladder over the wire", async () => {
+    const { room, clients } = await startedGame(33);
+    const [a, b] = clients;
+    await openDefendLadder(room, a!, [{ id: 10000, kind: "balloon" }, { id: 10002, kind: "hit" }], [{ id: 10001, kind: "miss" }]);
+
+    b!.send(WaterFightMsg.RESOLVE, { kind: "DEFEND", defense: "miss" });
+    await until(() => room.engine.awaiting.kind === "ATTACKER_RESPOND");
+    a!.send(WaterFightMsg.RESOLVE, { kind: "ATTACKER_RESPOND", respond: "hit" });
+    await until(() => room.engine.awaiting.kind === "DEFEND");
+    b!.send(WaterFightMsg.RESOLVE, { kind: "DEFEND", defense: "pass" });
+    await until(() => room.engine.players[1]!.lives === 2);
+    assert.strictEqual(room.engine.players[1]!.lives, 2, "Hit cancelled the block -> the throw landed");
+  });
+
+  it("opens a Towel window; only the target may cancel", async () => {
+    const { room, clients } = await startedGame(35, 3);
+    const [a, b, c] = clients as [typeof clients[0], typeof clients[0], typeof clients[0]];
+    room.engine.players[0]!.hand = [{ id: 10000, kind: "balloon" }] as never;
+    room.engine.players[1]!.hand = [{ id: 10001, kind: "towel" }] as never;
+    room.engine.splashPile = ["hit", "hit"];
+    a!.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "REACT" && room.engine.awaiting.seats[0] === 1);
+
+    const before = room.engine;
+    c!.send(WaterFightMsg.RESOLVE, { kind: "REACT", action: "towel" }); // bystander cannot
+    await sleep(100);
+    assert.strictEqual(room.engine, before, "only the target may react");
+
+    b!.send(WaterFightMsg.RESOLVE, { kind: "REACT", action: "towel" });
+    await until(() => room.engine.awaiting.kind !== "REACT");
+    assert.strictEqual(room.engine.players[1]!.lives, 3, "Towel cancelled the throw — no damage");
+  });
+
+  it("the reaction timer auto-passes an idle defender", async function () {
+    this.timeout(8000);
+    const { room, clients } = await startedGame(37);
+    const [a] = clients;
+    room.state.reactionSeconds = 1; // 1s auto-pass
+    await openDefendLadder(room, a!, [{ id: 10000, kind: "balloon" }], []);
+    // The defender never responds; the room auto-passes after ~1s.
+    await until(() => room.engine.players[1]!.lives === 2, 5000);
+    assert.strictEqual(room.engine.turnSeat, 1, "the throw landed and the turn advanced, unattended");
+  });
+
+  it("keeps the defender's hand private during a reaction", async () => {
+    const { room, clients } = await startedGame(39);
+    const [a, b] = clients;
+    await openDefendLadder(room, a!, [{ id: 10000, kind: "balloon" }], [{ id: 10001, kind: "miss" }]);
+    type SeatsView = { seats: { hand: { length: number; at(i: number): { kind: string } | undefined }; handCount: number }[] };
+    const aState = () => a!.state as unknown as SeatsView;
+    const bState = () => b!.state as unknown as SeatsView;
+    await until(() => (bState().seats?.at(1)?.hand?.length ?? 0) === 1, 3000);
+    assert.strictEqual(bState().seats.at(1)!.hand.at(0)!.kind ?? "", "miss", "the defender sees their own Miss");
+    assert.strictEqual(aState().seats.at(1)!.hand?.length ?? 0, 0, "the attacker cannot see the defender's hand");
+    assert.ok((aState().seats.at(1)!.handCount ?? 0) >= 1, "but knows the size");
+  });
+
   it("auto-advances a bot seat without any client input", async () => {
     const room = (await colyseus.createRoom(WATER_FIGHT, { seed: 21 })) as unknown as WaterFightRoom;
     const host = await colyseus.connectTo(room, { nickname: "Human" });
