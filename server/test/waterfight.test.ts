@@ -131,7 +131,10 @@ describe("water fight room", () => {
   });
 
   it("hides each hand from opponents, including across a refresh", async () => {
-    const { room, clients } = await startedGame(11);
+    // Events off so seat 0's opening draw is deterministically 2 cards.
+    const { room, clients } = await startedGame(11, 2, (r) => {
+      r.state.eventDensity = 0;
+    });
     const a = clients[0]!;
     const b = clients[1]!;
     const aState = () => a.state as unknown as { seats: { hand: { length: number }; handCount: number }[] };

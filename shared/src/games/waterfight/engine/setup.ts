@@ -65,6 +65,16 @@ export function createGame(
     log: [],
   };
 
+  // Shuffle the 81 main cards, then deal each NON-first player a 1-card opening
+  // cushion (#6) from the still-event-free deck — so the first player draws their
+  // normal 2 on turn one while everyone else starts with a card to defend with,
+  // and a starting hand can never hold an Event.
+  shuffleInPlace(s.mainDeck, s);
+  for (let seat = 1; seat < playerCount; seat++) {
+    const card = s.mainDeck.pop();
+    if (card) s.players[seat]!.hand.push(card);
+  }
+
   // Seed a random subset of the 19 Events (D3): shuffle the roster, take the
   // first `eventDensity`, and mix those event cards into the main deck.
   if (opts.eventDensity > 0) {
@@ -75,6 +85,6 @@ export function createGame(
   shuffleInPlace(s.mainDeck, s);
   shuffleInPlace(s.splashPile, s);
   for (const id of WF_STACK_IDS) shuffleInPlace(s.stacks[id], s);
-  startTurn(s, 0); // deal the opening hand for seat 0
+  startTurn(s, 0); // the first player draws their normal 2
   return s;
 }

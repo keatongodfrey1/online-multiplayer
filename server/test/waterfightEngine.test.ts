@@ -32,6 +32,11 @@ function game(pc: number, seed: number, opts?: Partial<WF.GameOptions>): GameSta
   return createGame(pc, seed, { eventDensity: 0, ...(opts ?? {}) });
 }
 function setHand(g: GameState, seat: number, kinds: CardKind[]): void {
+  // Return any displaced REAL cards (e.g. the opening cushion) to the deck so
+  // conservation still holds for the few tests that assert it after setHand.
+  for (const c of g.players[seat]!.hand) {
+    if (c.id >= 1 && c.id <= MAIN_DECK_SIZE) g.mainDeck.push(c);
+  }
   g.players[seat]!.hand = kinds.map((kind, i) => ({ id: 10000 + seat * 100 + i, kind }));
 }
 /** Force the NEXT splash flip (flipSplash pops the end of the array). */
@@ -63,8 +68,10 @@ describe("water fight engine: setup", () => {
     for (const p of g.players) assert.equal(p.lives, 3);
     assert.equal(g.options.splashHit + g.options.splashMiss, 20);
     assert.equal(g.splashPile.length, 20);
-    assert.equal(g.players[0]!.hand.length, 2, "seat 0 drew its opening hand");
-    assert.equal(g.players[1]!.hand.length, 0, "later seats draw on their turn");
+    assert.equal(g.players[0]!.hand.length, 2, "the first player draws its normal 2");
+    assert.equal(g.players[1]!.hand.length, 1, "later seats start with a 1-card cushion (#6)");
+    assert.equal(g.players[3]!.hand.length, 1, "every non-first seat gets the cushion");
+    assert.ok(g.players[1]!.hand.every((c) => c.kind !== "event"), "the cushion is never an Event");
     assert.equal(g.turnSeat, 0);
     assert.equal(g.awaiting.kind, "MOVE");
     assertInvariants(g);
@@ -344,6 +351,7 @@ describe("water fight engine: support/mischief effects (B.4)", () => {
 
   it("Freeze Out: target draws only 1 next turn (status consumed)", () => {
     const g = game(2, 5);
+    setHand(g, 1, []); // clear the opening cushion so we count just the frozen draw
     g.players[0]!.hand.push({ id: 10001, kind: "freezeout" });
     let r = applyMove(g, { kind: "PLAY_SUPPORT", support: "freezeout", target: 1 });
     assert.equal(r.state.players[1]!.statuses.freezeOut, true);
@@ -591,6 +599,7 @@ describe("water fight engine: events (B.7)", () => {
 
   it("an Event resolves on draw, counts as a draw, and goes to the main discard (D3/E5)", () => {
     const g = game(2, 5);
+    setHand(g, 1, []); // clear the opening cushion so we count just the two draws
     injectTopEvent(g, "calmwaters"); // a dud — isolates the draw mechanics
     const r = applyMove(g, { kind: "END_TURN" }); // seat 1's opening draw resolves it
     assert.equal(r.state.turnSeat, 1);
