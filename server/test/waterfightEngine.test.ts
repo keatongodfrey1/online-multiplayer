@@ -463,6 +463,112 @@ describe("water fight engine: modifiers (B.5)", () => {
   });
 });
 
+describe("water fight engine: reactions (B.6)", () => {
+  it("no reaction window opens when the target holds no reaction card", () => {
+    const g = createGame(2, 5);
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, ["miss"]); // Miss is a ladder card, not a reaction
+    forceSplash(g, "hit");
+    const r = applyMove(g, { kind: "THROW", target: 1 });
+    assert.equal(r.awaiting.kind, "DEFEND", "went straight to the flip + ladder");
+  });
+
+  it("Towel cancels a basic throw BEFORE the flip (E10/E11)", () => {
+    const g = createGame(2, 5);
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, ["towel"]);
+    forceSplash(g, "hit");
+    const splashBefore = g.splashPile.length;
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    assert.equal(r.awaiting.kind, "REACT", "the target gets a reaction window");
+    assert.equal(r.awaiting.seats[0], 1);
+    r = applyResolution(r.state, { kind: "REACT", action: "towel" });
+    assert.equal(r.state.players[1]!.lives, 3, "cancelled — no damage");
+    assert.equal(r.state.splashPile.length, splashBefore, "Towel fired pre-flip; the Splash Pile never flipped");
+    assert.equal(r.state.awaiting.kind, "MOVE");
+    assert.equal(r.state.turnSeat, 1, "the attacker's turn ended");
+  });
+
+  it("Towel cancels a targeting Support too (E11)", () => {
+    const g = createGame(2, 5);
+    g.players[0]!.hand.push({ id: 10001, kind: "sabotage" });
+    setHand(g, 1, ["towel", "miss", "hit"]);
+    let r = applyMove(g, { kind: "PLAY_SUPPORT", support: "sabotage", target: 1 });
+    assert.equal(r.awaiting.kind, "REACT");
+    // Only Towel / pass on a Support reaction — Redirect/Water Trap are attack-only
+    const opts = legalResolutions(r.state);
+    assert.ok(!opts.some((o) => o.kind === "REACT" && (o.action === "redirect" || o.action === "watertrap")));
+    r = applyResolution(r.state, { kind: "REACT", action: "towel" });
+    assert.deepEqual(r.state.players[1]!.hand.map((c) => c.kind).sort(), ["hit", "miss"], "Sabotage cancelled — nothing discarded");
+    assert.equal(r.state.awaiting.kind, "MOVE", "the attacker keeps their turn");
+    assert.equal(r.state.turnSeat, 0);
+  });
+
+  it("Redirect shifts the hit to another player (R3/E6)", () => {
+    const g = createGame(3, 7);
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, ["redirect"]);
+    setHand(g, 2, []);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    assert.equal(r.awaiting.kind, "REACT");
+    r = applyResolution(r.state, { kind: "REACT", action: "redirect", target: 2 });
+    assert.equal(r.awaiting.kind, "DEFEND", "the redirected target now defends");
+    assert.equal(r.awaiting.seats[0], 2);
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 3, "the original target is unharmed");
+    assert.equal(r.state.players[2]!.lives, 2, "the redirected target took it");
+  });
+
+  it("Water Trap bounces the throw back at the attacker (role-flip)", () => {
+    const g = createGame(2, 5);
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, ["watertrap"]);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    r = applyResolution(r.state, { kind: "REACT", action: "watertrap" });
+    assert.equal(r.awaiting.kind, "DEFEND", "the attacker is now the defender");
+    assert.equal(r.awaiting.seats[0], 0);
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[0]!.lives, 2, "the attacker took their own throw");
+    assert.equal(r.state.players[1]!.lives, 3, "the Water-Trapper is unharmed");
+  });
+
+  it("a discrete reaction is capped at once per seat per attack", () => {
+    const g = createGame(3, 7);
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, ["redirect", "redirect"]);
+    setHand(g, 2, ["redirect"]);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    r = applyResolution(r.state, { kind: "REACT", action: "redirect", target: 2 }); // seat 1 -> seat 2
+    r = applyResolution(r.state, { kind: "REACT", action: "redirect", target: 1 }); // seat 2 -> seat 1
+    assert.equal(r.awaiting.kind, "REACT");
+    assert.equal(r.awaiting.seats[0], 1, "seat 1 is the target again");
+    const opts = legalResolutions(r.state);
+    assert.ok(opts.some((o) => o.kind === "REACT" && o.action === "pass"));
+    assert.ok(
+      !opts.some((o) => o.kind === "REACT" && o.action === "redirect"),
+      "seat 1 already redirected once — cannot redirect again",
+    );
+  });
+
+  it("Lifeguard automatically saves a player from a soak, once (-> 1 life)", () => {
+    const g = createGame(2, 9);
+    g.players[1]!.lives = 1;
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, ["lifeguard"]); // automatic, not a chosen reaction
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    assert.equal(r.awaiting.kind, "DEFEND", "Lifeguard is not a reaction-window card");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.out, false, "not soaked");
+    assert.equal(r.state.players[1]!.lives, 1, "Lifeguard kept them at 1 life");
+    assert.ok(!r.state.players[1]!.hand.some((c) => c.kind === "lifeguard"), "Lifeguard consumed");
+    assert.equal(r.state.over, false, "game continues");
+  });
+});
+
 describe("water fight engine: illegal input", () => {
   it("rejects targeting yourself, throwing without a balloon, and illegal blocks", () => {
     const g = createGame(2, 1);

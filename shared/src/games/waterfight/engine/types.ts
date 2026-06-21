@@ -85,7 +85,23 @@ export const DEFAULT_OPTIONS: GameOptions = {
 /** Who/what the engine is waiting on. Phase A kinds; `seats` is an array for
  *  forward-compat with multi-target (Phase B) but holds exactly one seat here. */
 export type AwaitKind =
-  | "MOVE" | "DEFEND" | "ATTACKER_RESPOND" | "DISCARD" | "EXTRA_THROW" | "GAME_OVER";
+  | "MOVE" | "REACT" | "DEFEND" | "ATTACKER_RESPOND" | "DISCARD" | "EXTRA_THROW" | "GAME_OVER";
+
+/** A targeting card committed but not yet resolved — held during the pre-effect
+ *  reaction window (E10/E11). On pass it resolves; Towel cancels it; Redirect /
+ *  Water Trap re-point or bounce it (attacks only). The played card(s) are
+ *  already spent; only the spread is dropped if a discrete reaction fires (R3). */
+export interface PendingAction {
+  kind: "THROW" | "PLAY_BIG" | "SUPPORT";
+  attacker: number; // the seat whose hits resolve in the ladder (swapped by Water Trap)
+  target: number; // the current (possibly redirected) target
+  big?: BigKind;
+  soaker?: boolean;
+  spread?: Spread;
+  support?: SupportKind;
+  /** Seats that already spent a discrete reaction (Redirect/Water Trap) — caps the chain. */
+  redirectedSeats: number[];
+}
 
 /** The dedicated attack state machine's persistent state (Issue 1bA). */
 export interface AttackState {
@@ -134,6 +150,8 @@ export interface GameState {
   turnSeat: number;
   /** Whether the active player has used their one Support card this turn. */
   supportUsed: boolean;
+  /** A committed targeting action awaiting its reaction window (null otherwise). */
+  pending: PendingAction | null;
   awaiting: Awaiting;
   turnCount: number;
   over: boolean;
@@ -159,7 +177,11 @@ export type Move =
 // ---- Resolutions (out-of-turn ladder responses, discard, extra throw) ----
 export type Defense = "miss" | "umbrella" | "wild_miss" | "pass";
 export type Respond = "hit" | "wild_hit" | "pass";
+/** Pre-effect reaction (E10/E11): pass · Towel (cancel) · Redirect (re-point) ·
+ *  Water Trap (bounce to attacker). Redirect/Water Trap apply to attacks only. */
+export type ReactAction = "pass" | "towel" | "redirect" | "watertrap";
 export type Resolution =
+  | { kind: "REACT"; action: ReactAction; target?: number }
   | { kind: "DEFEND"; defense: Defense }
   | { kind: "ATTACKER_RESPOND"; respond: Respond }
   | { kind: "DISCARD"; cardIds: number[] }

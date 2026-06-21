@@ -52,6 +52,7 @@ export function createGame(
     splashDiscard: [],
     turnSeat: 0,
     supportUsed: false,
+    pending: null,
     awaiting: { seats: [0], kind: "MOVE" },
     turnCount: 0,
     over: false,

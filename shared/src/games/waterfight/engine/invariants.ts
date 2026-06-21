@@ -53,6 +53,14 @@ export function assertInvariants(s: GameState): void {
     if (p.out !== (p.lives <= 0)) throw new Error(`seat ${p.seat} out flag mismatch (lives=${p.lives}, out=${p.out})`);
   }
 
+  // --- pending action / reaction window consistency ---
+  if (s.awaiting.kind === "REACT") {
+    if (!s.pending) throw new Error("REACT window without a pending action");
+    if (s.players[s.pending.target]?.out) throw new Error("reaction targets a soaked seat");
+  } else if (s.pending) {
+    throw new Error("pending action set outside a REACT window");
+  }
+
   // --- living / over consistency (the soft-lock detector) ---
   const living = livingSeats(s);
   if (!s.over && living.length <= 1) throw new Error(`<= 1 living but game not over (living=${living.length})`);

@@ -17,6 +17,7 @@ import {
   GameEvent,
   GameState,
   Move,
+  PendingAction,
   PlayerState,
   Resolution,
   Spread,
@@ -185,11 +186,12 @@ function applySupport(s: GameState, seat: number, support: SupportKind, target?:
   }
 }
 
-/** End the active player's turn: discard down to the hand limit, then advance. */
+/** End the active player's turn: discard down to the hand limit, then advance.
+ *  If the turn player soaked themselves (a bounced Water Trap), skip the discard. */
 function endActiveTurn(s: GameState): void {
   if (s.over) return;
   const seat = s.turnSeat;
-  if (s.players[seat]!.hand.length > s.options.handLimit) {
+  if (!s.players[seat]!.out && s.players[seat]!.hand.length > s.options.handLimit) {
     s.awaiting = { seats: [seat], kind: "DISCARD" };
     return;
   }
@@ -249,16 +251,20 @@ function buildSpreadTargets(s: GameState, attacker: number, primary: number, spr
 }
 
 /** After the whole attack resolves: Golden's draw, then an extra throw window
- *  (Launcher / Rapid Fire — E4) or end the turn. */
-function afterAttack(s: GameState, attacker: number, kind: AttackKind): void {
-  if (kind === "golden") {
-    drawCards(s, attacker, 2); // Golden draws 2 whether it hit or missed (E2)
-    s.log.push(`seat ${attacker} draws 2 (Golden)`);
+ *  (Launcher / Rapid Fire — E4) or end the turn. Bookkeeping belongs to the TURN
+ *  player (who spent the Main Action), not the ladder attacker — a Water Trap may
+ *  have swapped the ladder roles, but the turn and its extra throw still belong
+ *  to the original mover. */
+function afterAttack(s: GameState, kind: AttackKind): void {
+  const owner = s.turnSeat;
+  if (kind === "golden" && !s.players[owner]!.out) {
+    drawCards(s, owner, 2); // Golden draws 2 whether it hit or missed (E2)
+    s.log.push(`seat ${owner} draws 2 (Golden)`);
   }
   s.awaiting = { seats: [], kind: "GAME_OVER" }; // clears the attack
-  const p = s.players[attacker]!;
+  const p = s.players[owner]!;
   if (!p.out && (handHas(p, "launcher") || handHas(p, "rapidfire")) && handHas(p, "balloon")) {
-    s.awaiting = { seats: [attacker], kind: "EXTRA_THROW" }; // E4: optional extra basic throw
+    s.awaiting = { seats: [owner], kind: "EXTRA_THROW" }; // E4: optional extra basic throw
     return;
   }
   endActiveTurn(s);
@@ -273,8 +279,14 @@ function resolveTarget(s: GameState, hit: boolean): void {
     t.lives = Math.max(0, t.lives - atk.damage);
     s.log.push(`seat ${tSeat} hit for ${atk.damage} -> ${t.lives} lives`);
     if (t.lives <= 0) {
-      t.out = true;
-      s.log.push(`seat ${tSeat} is SOAKED`);
+      if (handHas(t, "lifeguard")) {
+        spendKind(s, tSeat, "lifeguard"); // automatic save at 0 lives (once)
+        t.lives = 1;
+        s.log.push(`seat ${tSeat} saved by Lifeguard (-> 1 life)`);
+      } else {
+        t.out = true;
+        s.log.push(`seat ${tSeat} is SOAKED`);
+      }
     }
   } else {
     s.log.push(`attack on seat ${tSeat} missed`);
@@ -290,18 +302,38 @@ function resolveTarget(s: GameState, hit: boolean): void {
     openTarget(s);
     return;
   }
-  afterAttack(s, atk.attackerSeat, atk.kind);
+  afterAttack(s, atk.kind);
 }
 
-/** Throw a basic Water Balloon: spend balloon + Soaker, flip, then resolve a Miss
- *  or open the ladder (spending the spread modifier only on a Hit — E3). */
-function startThrow(s: GameState, attacker: number, target: number, soaker: boolean, spread?: Spread): void {
-  spendKind(s, attacker, "balloon");
-  if (soaker) spendKind(s, attacker, "soaker"); // R2: declared pre-flip (wasted on a Miss)
+const REACTION_CARDS: CardKind[] = ["towel", "redirect", "watertrap"];
+
+/** Whether the target holds a reaction that COULD affect this action (Towel works
+ *  on anything targeting; Redirect / Water Trap only on attacks). Lets the engine
+ *  auto-pass (no window) when there is genuinely nothing to react with. */
+function hasUsefulReaction(p: PlayerState, kind: PendingAction["kind"]): boolean {
+  if (handHas(p, "towel")) return true;
+  return kind !== "SUPPORT" && (handHas(p, "redirect") || handHas(p, "watertrap"));
+}
+
+/** Open the pre-effect reaction window for the target (E10/E11), or resolve the
+ *  action immediately when the target has nothing to react with (auto-pass). */
+function offerReaction(s: GameState, pending: PendingAction): void {
+  s.pending = pending;
+  const t = s.players[pending.target]!;
+  if (!t.out && hasUsefulReaction(t, pending.kind)) {
+    s.awaiting = { seats: [pending.target], kind: "REACT" };
+    return;
+  }
+  resolvePending(s);
+}
+
+/** Flip the Splash Pile for a (possibly redirected) basic throw, then resolve a
+ *  Miss or open the ladder (spread consumed only on a Hit — E3). */
+function resolveThrowFlip(s: GameState, attacker: number, target: number, soaker: boolean, spread?: Spread): void {
   const verdict = flipSplash(s);
   s.log.push(`seat ${attacker} throws at ${target}: splash ${verdict}`);
   if (verdict === "miss") {
-    afterAttack(s, attacker, "basic");
+    afterAttack(s, "basic");
     return;
   }
   let targets = [target];
@@ -312,17 +344,41 @@ function startThrow(s: GameState, attacker: number, target: number, soaker: bool
   openAttack(s, attacker, targets, "basic", 1, 1, soaker);
 }
 
-/** Play a big attack (auto-connect, E2): spend the card + Soaker + spread. */
+/** Execute the committed pending action now that the reaction window has passed. */
+function resolvePending(s: GameState): void {
+  const pa = s.pending!;
+  s.pending = null;
+  if (pa.kind === "SUPPORT") {
+    applySupport(s, pa.attacker, pa.support!, pa.target);
+    s.awaiting = { seats: [pa.attacker], kind: "MOVE" }; // Support does not end the turn
+    return;
+  }
+  if (pa.kind === "THROW") {
+    resolveThrowFlip(s, pa.attacker, pa.target, !!pa.soaker, pa.spread);
+    return;
+  }
+  // PLAY_BIG auto-connects (E2)
+  const { blockNumber, damage } = bigStats(pa.big!);
+  let targets = [pa.target];
+  if (pa.spread) {
+    spendKind(s, pa.attacker, pa.spread.modifier);
+    targets = buildSpreadTargets(s, pa.attacker, pa.target, pa.spread);
+  }
+  openAttack(s, pa.attacker, targets, pa.big!, blockNumber, damage, !!pa.soaker);
+}
+
+/** Commit a basic throw (spend balloon + Soaker), then open the reaction window. */
+function startThrow(s: GameState, attacker: number, target: number, soaker: boolean, spread?: Spread): void {
+  spendKind(s, attacker, "balloon");
+  if (soaker) spendKind(s, attacker, "soaker"); // R2: declared pre-flip (wasted on a Miss)
+  offerReaction(s, { kind: "THROW", attacker, target, soaker, spread, redirectedSeats: [] });
+}
+
+/** Commit a big attack (spend the card + Soaker), then open the reaction window. */
 function startBig(s: GameState, attacker: number, target: number, big: BigKind, soaker: boolean, spread?: Spread): void {
   spendKind(s, attacker, big);
   if (soaker) spendKind(s, attacker, "soaker");
-  const { blockNumber, damage } = bigStats(big);
-  let targets = [target];
-  if (spread) {
-    spendKind(s, attacker, spread.modifier);
-    targets = buildSpreadTargets(s, attacker, target, spread);
-  }
-  openAttack(s, attacker, targets, big, blockNumber, damage, soaker);
+  offerReaction(s, { kind: "PLAY_BIG", attacker, target, big, soaker, spread, redirectedSeats: [] });
 }
 
 // ---- legal surface ----------------------------------------------------------
@@ -373,6 +429,17 @@ export function legalResolutions(s: GameState): Resolution[] {
   const seat = actingSeat(s);
   if (seat < 0) return [];
   const p = s.players[seat]!;
+  if (s.awaiting.kind === "REACT") {
+    const pa = s.pending!;
+    const out: Resolution[] = [{ kind: "REACT", action: "pass" }];
+    if (handHas(p, "towel")) out.push({ kind: "REACT", action: "towel" });
+    const canDiscrete = pa.kind !== "SUPPORT" && !pa.redirectedSeats.includes(seat); // Redirect/Trap: attacks only, once/seat
+    if (canDiscrete && handHas(p, "redirect")) {
+      for (const t of livingSeats(s)) if (t !== seat) out.push({ kind: "REACT", action: "redirect", target: t });
+    }
+    if (canDiscrete && handHas(p, "watertrap")) out.push({ kind: "REACT", action: "watertrap" });
+    return out;
+  }
   if (s.awaiting.kind === "DEFEND") {
     const out: Resolution[] = [{ kind: "DEFEND", defense: "pass" }];
     if (!s.awaiting.attack?.soaker && handHas(p, "miss")) out.push({ kind: "DEFEND", defense: "miss" }); // R2: Soaker negates hand-Miss
@@ -460,6 +527,29 @@ function validateResolution(s: GameState, res: Resolution): void {
     return;
   }
   if (res.kind === "DISCARD") throw new Error("not awaiting a discard");
+  if (s.awaiting.kind === "REACT") {
+    if (res.kind !== "REACT") throw new Error("must react");
+    const reactor = actingSeat(s);
+    const rp = s.players[reactor]!;
+    const pa = s.pending!;
+    if (res.action === "pass") return;
+    if (res.action === "towel") {
+      if (!handHas(rp, "towel")) throw new Error("no Towel in hand");
+      return;
+    }
+    if (pa.kind === "SUPPORT") throw new Error("Redirect/Water Trap apply to attacks only");
+    if (pa.redirectedSeats.includes(reactor)) throw new Error("already used a discrete reaction this attack");
+    if (res.action === "redirect") {
+      if (!handHas(rp, "redirect")) throw new Error("no Redirect in hand");
+      if (res.target === undefined || res.target === reactor) throw new Error("invalid Redirect target");
+      const t = s.players[res.target];
+      if (!t || t.out) throw new Error("Redirect target not a living player");
+      return;
+    }
+    if (!handHas(rp, "watertrap")) throw new Error("no Water Trap in hand");
+    return;
+  }
+  if (res.kind === "REACT") throw new Error("not awaiting a reaction");
   if (s.awaiting.kind === "EXTRA_THROW") {
     if (res.kind !== "EXTRA") throw new Error("must resolve the extra throw");
     if (res.action === "pass") return;
@@ -512,9 +602,14 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
     const supIdx = supHand.findIndex((c) => c.kind === move.support);
     const [supCard] = supHand.splice(supIdx, 1);
     discardCard(s, supCard!);
-    applySupport(s, seat, move.support, move.target);
     s.supportUsed = true;
-    s.awaiting = { seats: [seat], kind: "MOVE" }; // Support does NOT end the turn
+    if (move.target !== undefined && TARGETED_SUPPORTS.has(move.support)) {
+      // E11: a targeting Support opens a Towel window before it resolves.
+      offerReaction(s, { kind: "SUPPORT", attacker: seat, target: move.target, support: move.support, redirectedSeats: [] });
+    } else {
+      applySupport(s, seat, move.support, move.target);
+      s.awaiting = { seats: [seat], kind: "MOVE" }; // Support does NOT end the turn
+    }
     return { state: s, awaiting: s.awaiting, events };
   }
 
@@ -561,6 +656,37 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
       discardCard(s, card!);
     }
     advanceTurn(s);
+    return { state: s, awaiting: s.awaiting, events };
+  }
+  if (res.kind === "REACT") {
+    const pa = s.pending!;
+    if (res.action === "pass") {
+      resolvePending(s);
+      return { state: s, awaiting: s.awaiting, events };
+    }
+    if (res.action === "towel") {
+      spendKind(s, seat, "towel"); // E11: cancel the targeting card outright
+      s.log.push(`seat ${seat} Towels the ${pa.kind}`);
+      s.pending = null;
+      if (pa.kind === "SUPPORT") s.awaiting = { seats: [pa.attacker], kind: "MOVE" };
+      else afterAttack(s, pa.kind === "PLAY_BIG" ? pa.big! : "basic");
+      return { state: s, awaiting: s.awaiting, events };
+    }
+    // Redirect / Water Trap: spend the card, drop any spread (the redirected
+    // instance is single-target — R3), re-open the window for the new target.
+    pa.redirectedSeats.push(seat);
+    pa.spread = undefined;
+    if (res.action === "redirect") {
+      spendKind(s, seat, "redirect");
+      s.log.push(`seat ${seat} Redirects to ${res.target}`);
+      pa.target = res.target!;
+    } else {
+      spendKind(s, seat, "watertrap");
+      s.log.push(`seat ${seat} Water Traps -> bounces to ${pa.attacker}`);
+      pa.target = pa.attacker; // the original attacker must now defend
+      pa.attacker = seat; // the trapper's Hits resolve in the ladder
+    }
+    offerReaction(s, pa);
     return { state: s, awaiting: s.awaiting, events };
   }
   if (res.kind === "EXTRA") {
