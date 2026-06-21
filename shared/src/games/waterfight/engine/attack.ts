@@ -1,82 +1,124 @@
 // The dedicated attack state machine (Issue 1bA). The single most complex,
-// genuinely-novel piece of the engine lives here, isolated and exhaustively
-// tested. It MUTATES the (already-cloned) state — flipping the Splash Pile,
-// setting `awaiting`, and discarding played cards — but it does NOT apply damage
-// or advance the turn. It returns an AttackOutcome; engine.ts owns the
-// consequences (damage/soak/win/advance). That one-way dependency
-// (engine -> attack -> deck) keeps the two modules acyclic.
+// genuinely-novel piece of the engine, isolated and exhaustively tested. It
+// MUTATES the (already-cloned) state — flipping the Splash Pile, setting
+// `awaiting`, discarding played cards — but does NOT apply damage or advance the
+// turn. It returns an AttackOutcome; engine.ts owns the consequences. That
+// one-way dependency (engine -> attack -> deck) keeps the modules acyclic.
 //
-//   THROW ──flip Splash──> [miss] ───────────────────────> attack ends, no damage
-//                          [hit]  ─> DEFEND (target)
-//                                     ├─ pass ─────────────────────> HIT  (damage)
-//                                     ├─ Miss ─> ATTACKER_RESPOND (attacker)
-//                                     │             ├─ pass ─> MISS (no damage)
-//                                     │             ├─ Hit ──> back to DEFEND
-//                                     │             └─ Wild ─> HIT  (damage)
-//                                     ├─ Umbrella ─────────────────> MISS (no damage)
-//                                     └─ Wild ─────────────────────> MISS (no damage)
+//   THROW ──flip Splash──> [miss] ──────────────────────────> attack ends, no damage
+//   PLAY_BIG (Mega/Giant/Golden) ──auto-connect (no flip)──┐
+//   [hit] ─────────────────────────────────────────────────┴─> DEFEND (target)
+//        DEFEND (target needs `blockNumber` blocks):
+//          ├─ pass (under-blocked) ───────────────────────────> HIT (damage)
+//          ├─ Miss  ─> missBlocks++; if < blockNumber stay DEFEND, else ATTACKER_RESPOND
+//          ├─ Umbrella ─> basic: uncancelable MISS │ Mega: full block -> ATTACKER_RESPOND (R1)
+//          └─ Wild (as miss) ─────────────────────────────────> MISS (unblockable)
+//        ATTACKER_RESPOND (attacker chips the block):
+//          ├─ pass (block stands) ────────────────────────────> MISS
+//          ├─ Hit  ─> removes ONE block (a Miss, or the whole Umbrella — R1); back to DEFEND
+//          └─ Wild (as hit) ──────────────────────────────────> HIT (unblockable)
 //
-// The Miss/Hit alternation is unbounded (D2) but self-limiting: every step
-// consumes a card from a hand. MAX_ATTACK_ROUNDS is a pure backstop against bugs.
+// The Miss/Hit alternation is unbounded (D2) but self-limiting (every step
+// consumes a hand card). MAX_ATTACK_ROUNDS is a pure backstop against bugs.
 
 import { MAX_ATTACK_ROUNDS } from "./data.js";
-import { flipSplash } from "./deck.js";
-import type { AttackState, CardKind, GameState, Resolution } from "./types.js";
+import { discardCard, flipSplash } from "./deck.js";
+import type { AttackState, BigKind, CardKind, GameState, Resolution } from "./types.js";
 
 export type AttackOutcome = { resolved: true; hit: boolean } | { resolved: false };
 
-/** Remove the first card of `kind` from a seat's hand into the main discard.
- *  Throws if the seat does not hold one (callers validate legality first). */
+/** Remove the first card of `kind` from a seat's hand to the right discard pile. */
 function discardOne(s: GameState, seat: number, kind: CardKind): void {
   const hand = s.players[seat]!.hand;
   const idx = hand.findIndex((c) => c.kind === kind);
   if (idx < 0) throw new Error(`seat ${seat} has no ${kind} to play`);
   const [card] = hand.splice(idx, 1);
-  s.mainDiscard.push(card!);
+  discardCard(s, card!);
 }
 
-/** Begin a basic Water Balloon attack: flip the Splash Pile and either resolve a
- *  Miss immediately or open the defender's ladder. */
-export function startAttack(s: GameState, attackerSeat: number, targetSeat: number): AttackOutcome {
+function isBlocked(atk: AttackState): boolean {
+  return atk.umbrellaBlock || atk.missBlocks >= atk.blockNumber;
+}
+
+function bigStats(big: BigKind): { blockNumber: number; damage: number } {
+  switch (big) {
+    case "mega":
+      return { blockNumber: 2, damage: 1 };
+    case "giant":
+      return { blockNumber: 1, damage: 2 };
+    case "golden":
+      return { blockNumber: 1, damage: 1 };
+  }
+}
+
+function openLadder(
+  s: GameState,
+  attackerSeat: number,
+  targetSeat: number,
+  kind: AttackState["kind"],
+  blockNumber: number,
+  damage: number,
+): void {
   const attack: AttackState = {
     attackerSeat,
     targetSeat,
-    blockNumber: 1,
-    damage: 1,
-    blocked: false,
+    kind,
+    blockNumber,
+    damage,
+    missBlocks: 0,
+    umbrellaBlock: false,
     rounds: 0,
   };
+  s.awaiting = { seats: [targetSeat], kind: "DEFEND", attack };
+}
+
+/** Begin a basic Water Balloon attack: flip the Splash Pile, then either resolve
+ *  a Miss or open the defender's ladder on a Hit. */
+export function startAttack(s: GameState, attackerSeat: number, targetSeat: number): AttackOutcome {
   const verdict = flipSplash(s);
   s.log.push(`seat ${attackerSeat} throws at seat ${targetSeat}: splash ${verdict}`);
-  // Always set `attack` so finishAttack has its context. On a Miss the transient
-  // DEFEND await is cleared immediately by finishAttack (within the same applyMove).
-  s.awaiting = { seats: [targetSeat], kind: "DEFEND", attack };
+  openLadder(s, attackerSeat, targetSeat, "basic", 1, 1);
   return verdict === "miss" ? { resolved: true, hit: false } : { resolved: false };
+}
+
+/** Begin a big attack (Mega/Giant/Golden): auto-connect, no Splash flip (E2). */
+export function startBigAttack(
+  s: GameState,
+  attackerSeat: number,
+  targetSeat: number,
+  big: BigKind,
+): AttackOutcome {
+  const { blockNumber, damage } = bigStats(big);
+  s.log.push(`seat ${attackerSeat} plays ${big} at seat ${targetSeat} (auto-connect)`);
+  openLadder(s, attackerSeat, targetSeat, big, blockNumber, damage);
+  return { resolved: false };
 }
 
 /** Advance the ladder with one DEFEND or ATTACKER_RESPOND resolution. */
 export function advanceAttack(s: GameState, res: Resolution): AttackOutcome {
   const atk = s.awaiting.attack;
   if (!atk) throw new Error("no attack in progress");
-  if (++atk.rounds > MAX_ATTACK_ROUNDS) return { resolved: true, hit: !atk.blocked };
+  if (++atk.rounds > MAX_ATTACK_ROUNDS) return { resolved: true, hit: !isBlocked(atk) };
 
   if (s.awaiting.kind === "DEFEND" && res.kind === "DEFEND") {
     switch (res.defense) {
       case "miss":
         discardOne(s, atk.targetSeat, "miss");
-        atk.blocked = true;
-        s.awaiting = { seats: [atk.attackerSeat], kind: "ATTACKER_RESPOND", attack: atk };
+        atk.missBlocks += 1;
+        // Fully blocked -> attacker may chip it; otherwise the defender adds more.
+        if (isBlocked(atk)) s.awaiting = { seats: [atk.attackerSeat], kind: "ATTACKER_RESPOND", attack: atk };
         return { resolved: false };
       case "umbrella":
         discardOne(s, atk.targetSeat, "umbrella");
-        return { resolved: true, hit: false };
+        atk.umbrellaBlock = true;
+        if (atk.blockNumber === 1) return { resolved: true, hit: false }; // R1: uncancelable vs a normal balloon
+        s.awaiting = { seats: [atk.attackerSeat], kind: "ATTACKER_RESPOND", attack: atk }; // R1: Hit-cancelable vs Mega
+        return { resolved: false };
       case "wild_miss":
         discardOne(s, atk.targetSeat, "wild");
         return { resolved: true, hit: false };
       case "pass":
-        // No block stands (a played Miss switches us to ATTACKER_RESPOND, so
-        // `blocked` is always false here) -> the balloon lands.
-        return { resolved: true, hit: true };
+        return { resolved: true, hit: !isBlocked(atk) };
     }
   }
 
@@ -84,14 +126,18 @@ export function advanceAttack(s: GameState, res: Resolution): AttackOutcome {
     switch (res.respond) {
       case "hit":
         discardOne(s, atk.attackerSeat, "hit");
-        atk.blocked = false;
+        if (atk.umbrellaBlock) {
+          atk.umbrellaBlock = false; // R1: one Hit cancels the whole Umbrella; defender re-blocks to full
+          atk.missBlocks = 0;
+        } else {
+          atk.missBlocks = Math.max(0, atk.missBlocks - 1);
+        }
         s.awaiting = { seats: [atk.targetSeat], kind: "DEFEND", attack: atk };
         return { resolved: false };
       case "wild_hit":
         discardOne(s, atk.attackerSeat, "wild");
         return { resolved: true, hit: true };
       case "pass":
-        // The defender's un-cancelled Miss stands -> the balloon misses.
         return { resolved: true, hit: false };
     }
   }

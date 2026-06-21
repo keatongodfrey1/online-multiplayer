@@ -4,9 +4,9 @@
 // attack.ts; this module owns the turn flow, draws, damage/soak/win, and the
 // legal-move surface that policies (bots/fuzz) read.
 
-import { advanceAttack, startAttack, type AttackOutcome } from "./attack.js";
+import { advanceAttack, startAttack, startBigAttack, type AttackOutcome } from "./attack.js";
 import { DRAW_PER_TURN } from "./data.js";
-import { drawMainCard } from "./deck.js";
+import { discardCard, drawMainCard } from "./deck.js";
 import {
   ApplyResult,
   Awaiting,
@@ -100,6 +100,10 @@ function finishAttack(s: GameState, hit: boolean): void {
   } else {
     s.log.push(`attack on seat ${atk.targetSeat} missed`);
   }
+  if (atk.kind === "golden") {
+    drawCards(s, atk.attackerSeat, 2); // Golden draws 2 whether it hits or misses
+    s.log.push(`seat ${atk.attackerSeat} draws 2 (Golden)`);
+  }
   s.awaiting = { seats: [], kind: "GAME_OVER" }; // cleared; reset by advanceTurn unless over
   const living = livingSeats(s);
   if (living.length <= 1) {
@@ -115,9 +119,11 @@ export function legalMoves(s: GameState): Move[] {
   if (s.over || s.awaiting.kind !== "MOVE") return [];
   const seat = s.turnSeat;
   const p = s.players[seat]!;
+  const opponents = livingSeats(s).filter((t) => t !== seat);
   const moves: Move[] = [{ kind: "END_TURN" }];
-  if (handHas(p, "balloon")) {
-    for (const t of livingSeats(s)) if (t !== seat) moves.push({ kind: "THROW", target: t });
+  if (handHas(p, "balloon")) for (const t of opponents) moves.push({ kind: "THROW", target: t });
+  for (const big of ["mega", "giant", "golden"] as const) {
+    if (handHas(p, big)) for (const t of opponents) moves.push({ kind: "PLAY_BIG", big, target: t });
   }
   return moves;
 }
@@ -151,11 +157,14 @@ function validateMove(s: GameState, move: Move): void {
   const seat = s.turnSeat;
   const p = s.players[seat]!;
   if (move.kind === "END_TURN") return;
-  // THROW
   if (move.target === seat) throw new Error("cannot target yourself");
   const t = s.players[move.target];
   if (!t || t.out) throw new Error("target not a living player");
-  if (!handHas(p, "balloon")) throw new Error("no Water Balloon in hand");
+  if (move.kind === "THROW") {
+    if (!handHas(p, "balloon")) throw new Error("no Water Balloon in hand");
+  } else if (!handHas(p, move.big)) {
+    throw new Error(`no ${move.big} in hand`);
+  }
 }
 
 function validateResolution(s: GameState, res: Resolution): void {
@@ -194,12 +203,16 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
     return { state: s, awaiting: s.awaiting, events };
   }
 
-  // THROW: spend the balloon, then run the attack state machine.
+  // THROW / PLAY_BIG: spend the card, then run the attack state machine.
   const hand = s.players[seat]!.hand;
-  const idx = hand.findIndex((c) => c.kind === "balloon");
-  const [balloon] = hand.splice(idx, 1);
-  s.mainDiscard.push(balloon!);
-  const outcome: AttackOutcome = startAttack(s, seat, move.target);
+  const cardKind = move.kind === "THROW" ? "balloon" : move.big;
+  const idx = hand.findIndex((c) => c.kind === cardKind);
+  const [card] = hand.splice(idx, 1);
+  discardCard(s, card!);
+  const outcome: AttackOutcome =
+    move.kind === "THROW"
+      ? startAttack(s, seat, move.target)
+      : startBigAttack(s, seat, move.target, move.big);
   if (outcome.resolved) finishAttack(s, outcome.hit);
   return { state: s, awaiting: s.awaiting, events };
 }

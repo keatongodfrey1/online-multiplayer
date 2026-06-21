@@ -154,6 +154,68 @@ describe("water fight engine: combat", () => {
   });
 });
 
+describe("water fight engine: big attacks (auto-connect)", () => {
+  it("Mega auto-connects (no Splash flip) and 1 Miss is not enough to stop it", () => {
+    const g = createGame(2, 5);
+    setHand(g, 0, ["mega"]);
+    setHand(g, 1, ["miss"]);
+    const splashBefore = g.splashPile.length;
+    let r = applyMove(g, { kind: "PLAY_BIG", big: "mega", target: 1 });
+    assert.equal(r.state.splashPile.length, splashBefore, "big attacks never flip the Splash Pile");
+    assert.equal(r.awaiting.kind, "DEFEND");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "miss" });
+    assert.equal(r.awaiting.kind, "DEFEND", "Mega needs 2 blocks — still defending");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 2, "under-blocked -> lands");
+  });
+
+  it("Mega: two Miss stop it (attacker passes -> miss)", () => {
+    const g = createGame(2, 5);
+    setHand(g, 0, ["mega"]);
+    setHand(g, 1, ["miss", "miss"]);
+    let r = applyMove(g, { kind: "PLAY_BIG", big: "mega", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "miss" });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "miss" });
+    assert.equal(r.awaiting.kind, "ATTACKER_RESPOND", "2 Miss = fully blocked");
+    r = applyResolution(r.state, { kind: "ATTACKER_RESPOND", respond: "pass" });
+    assert.equal(r.state.players[1]!.lives, 3);
+  });
+
+  it("R1: Umbrella vs Mega is Hit-cancelable -> one Hit forces a full re-block", () => {
+    const g = createGame(2, 5);
+    setHand(g, 0, ["mega", "hit"]);
+    setHand(g, 1, ["umbrella"]);
+    let r = applyMove(g, { kind: "PLAY_BIG", big: "mega", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "umbrella" });
+    assert.equal(r.awaiting.kind, "ATTACKER_RESPOND", "vs Mega the Umbrella can be Hit");
+    r = applyResolution(r.state, { kind: "ATTACKER_RESPOND", respond: "hit" });
+    assert.equal(r.awaiting.kind, "DEFEND", "umbrella cancelled -> defender must re-block to full");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 2, "no re-block available -> lands");
+  });
+
+  it("Giant deals 2 damage", () => {
+    const g = createGame(2, 5);
+    setHand(g, 0, ["giant"]);
+    setHand(g, 1, []);
+    let r = applyMove(g, { kind: "PLAY_BIG", big: "giant", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 1);
+  });
+
+  it("Golden draws 2 whether it hits or misses; conservation holds", () => {
+    const g = createGame(3, 5); // 3p so soaking 1 does not end the game
+    g.players[0]!.hand.push({ id: 10000, kind: "golden" }); // keep seat 0's opening hand
+    setHand(g, 1, ["umbrella"]); // seat 1's opening hand was empty
+    const before = g.players[0]!.hand.length;
+    let r = applyMove(g, { kind: "PLAY_BIG", big: "golden", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "umbrella" });
+    assert.equal(r.state.players[1]!.lives, 3, "Umbrella vs Golden (blockNumber 1) is uncancelable");
+    assert.equal(r.state.players[0]!.hand.length, before - 1 + 2, "spent Golden (-1), drew 2");
+    assertInvariants(r.state);
+  });
+});
+
 describe("water fight engine: illegal input", () => {
   it("rejects targeting yourself, throwing without a balloon, and illegal blocks", () => {
     const g = createGame(2, 1);

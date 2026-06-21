@@ -8,7 +8,20 @@
 /** Every card kind in the game. Phase A only seeds balloon/miss/hit/treasure/wild
  *  into the main deck; umbrella (a shop card) is modeled so the ladder is complete
  *  and tests can inject one. */
-export type CardKind = "balloon" | "miss" | "hit" | "treasure" | "wild" | "umbrella";
+export type CardKind =
+  | "balloon"
+  | "miss"
+  | "hit"
+  | "treasure"
+  | "wild"
+  | "umbrella"
+  | "mega"
+  | "giant"
+  | "golden";
+
+/** Big attacks (Attack Arsenal) — they auto-connect, skipping the Splash flip (E2). */
+export type BigKind = "mega" | "giant" | "golden";
+export type AttackKind = "basic" | BigKind;
 
 export interface Card {
   id: number;
@@ -51,10 +64,13 @@ export type AwaitKind = "MOVE" | "DEFEND" | "ATTACKER_RESPOND" | "GAME_OVER";
 export interface AttackState {
   attackerSeat: number;
   targetSeat: number;
-  blockNumber: number; // basic = 1 (Mega = 2 in Phase B)
-  damage: number; // basic = 1 (Giant = 2 in Phase B)
-  /** A defender's un-cancelled Miss currently stands. */
-  blocked: boolean;
+  kind: AttackKind;
+  blockNumber: number; // basic/giant/golden = 1, mega = 2
+  damage: number; // basic/mega/golden = 1, giant = 2
+  /** Miss cards currently placed toward blockNumber. */
+  missBlocks: number;
+  /** An active Umbrella full-block (uncancelable vs a normal balloon; Hit-cancelable vs Mega — R1). */
+  umbrellaBlock: boolean;
   /** MAX_ATTACK_ROUNDS backstop counter. */
   rounds: number;
 }
@@ -76,6 +92,8 @@ export interface GameState {
   players: PlayerState[];
   mainDeck: Card[]; // SECRET, shuffled
   mainDiscard: Card[];
+  /** Played non-main cards (shop/big) — removed from circulation, never reshuffled. */
+  usedPile: Card[];
   splashPile: SplashCard[]; // SECRET, shuffled
   splashDiscard: SplashCard[];
   /** The active player (whose Main Action it is). */
@@ -88,8 +106,11 @@ export interface GameState {
   log: string[];
 }
 
-// ---- Moves (the active player's Main Action — Phase A subset) ----
-export type Move = { kind: "THROW"; target: number } | { kind: "END_TURN" };
+// ---- Moves (the active player's Main Action) ----
+export type Move =
+  | { kind: "THROW"; target: number }
+  | { kind: "PLAY_BIG"; big: BigKind; target: number }
+  | { kind: "END_TURN" };
 
 // ---- Resolutions (out-of-turn ladder responses) ----
 export type Defense = "miss" | "umbrella" | "wild_miss" | "pass";

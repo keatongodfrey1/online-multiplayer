@@ -45,6 +45,7 @@ export function createGame(
     players,
     mainDeck: buildMainDeck(),
     mainDiscard: [],
+    usedPile: [],
     splashPile,
     splashDiscard: [],
     turnSeat: 0,

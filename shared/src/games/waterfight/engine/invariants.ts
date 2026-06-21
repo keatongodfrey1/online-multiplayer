@@ -8,25 +8,24 @@ import { livingSeats } from "./engine.js";
 import type { GameState } from "./types.js";
 
 export function assertInvariants(s: GameState): void {
-  // --- main card conservation (deck + discard + all hands) + unique ids ---
+  // --- main card conservation: count only main-deck cards (ids 1..MAIN_DECK_SIZE)
+  //     across deck + discard + hands. Shop/big/injected cards (other ids) are a
+  //     separate pool and are intentionally ignored here. ---
   const ids = new Set<number>();
   let mainCount = 0;
-  for (const c of s.mainDeck) {
-    mainCount++;
-    ids.add(c.id);
-  }
-  for (const c of s.mainDiscard) {
-    mainCount++;
-    ids.add(c.id);
-  }
-  for (const p of s.players) {
-    for (const c of p.hand) {
+  const countMain = (c: { id: number }): void => {
+    if (c.id >= 1 && c.id <= MAIN_DECK_SIZE) {
       mainCount++;
       ids.add(c.id);
     }
-  }
+  };
+  for (const c of s.mainDeck) countMain(c);
+  for (const c of s.mainDiscard) countMain(c);
+  for (const p of s.players) for (const c of p.hand) countMain(c);
   if (mainCount !== MAIN_DECK_SIZE) throw new Error(`main card conservation: ${mainCount} != ${MAIN_DECK_SIZE}`);
-  if (ids.size !== MAIN_DECK_SIZE) throw new Error(`duplicate or missing card ids: ${ids.size} != ${MAIN_DECK_SIZE}`);
+  if (ids.size !== MAIN_DECK_SIZE) throw new Error(`duplicate or missing main card ids: ${ids.size} != ${MAIN_DECK_SIZE}`);
+  // The main deck itself must never hold a non-main card (a reshuffle mis-route).
+  for (const c of s.mainDeck) if (c.id < 1 || c.id > MAIN_DECK_SIZE) throw new Error(`non-main card ${c.id} in main deck`);
 
   // --- splash conservation (pile + discard) ---
   const splashCount = s.splashPile.length + s.splashDiscard.length;
