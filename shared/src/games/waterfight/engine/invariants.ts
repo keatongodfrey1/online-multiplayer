@@ -3,7 +3,7 @@
 // catches an attack-state-machine soft-lock (the failure mode the eng review
 // flagged as critical).
 
-import { MAIN_DECK_SIZE } from "./data.js";
+import { MAIN_DECK_SIZE, SHOP_ID_BASE, SHOP_TOTAL } from "./data.js";
 import { livingSeats } from "./engine.js";
 import type { GameState } from "./types.js";
 
@@ -31,6 +31,21 @@ export function assertInvariants(s: GameState): void {
   const splashCount = s.splashPile.length + s.splashDiscard.length;
   const splashTotal = s.options.splashHit + s.options.splashMiss;
   if (splashCount !== splashTotal) throw new Error(`splash conservation: ${splashCount} != ${splashTotal}`);
+
+  // --- shop conservation: shop-id cards across stacks + hands + usedPile ---
+  const shopIds = new Set<number>();
+  let shopCount = 0;
+  const countShop = (c: { id: number }): void => {
+    if (c.id >= SHOP_ID_BASE && c.id < SHOP_ID_BASE + SHOP_TOTAL) {
+      shopCount++;
+      shopIds.add(c.id);
+    }
+  };
+  for (const st of ["defense", "mischief", "attack"] as const) for (const c of s.stacks[st]) countShop(c);
+  for (const p of s.players) for (const c of p.hand) countShop(c);
+  for (const c of s.usedPile) countShop(c);
+  if (shopCount !== SHOP_TOTAL) throw new Error(`shop card conservation: ${shopCount} != ${SHOP_TOTAL}`);
+  if (shopIds.size !== SHOP_TOTAL) throw new Error(`duplicate or missing shop ids: ${shopIds.size} != ${SHOP_TOTAL}`);
 
   // --- per-player ---
   for (const p of s.players) {

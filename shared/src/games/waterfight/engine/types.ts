@@ -35,6 +35,9 @@ export const SUPPORT_KINDS: readonly SupportKind[] = [
   "cardswap", "freezeout", "hiddenstash", "lemonadespill", "sneakypeek", "switcheroo",
 ];
 
+/** The three blind shop stacks. */
+export type StackId = "defense" | "mischief" | "attack";
+
 export interface Card {
   id: number;
   kind: CardKind;
@@ -59,6 +62,8 @@ export interface GameOptions {
   splashMiss: number; // default 7
   /** Discard down to this many cards at end of turn. */
   handLimit: number; // default 8
+  /** Coins to buy one card from a shop stack. */
+  shopCost: number; // default 4
   /** Backstop so a pathological game still terminates. */
   turnCap: number;
 }
@@ -68,6 +73,7 @@ export const DEFAULT_OPTIONS: GameOptions = {
   splashHit: 13,
   splashMiss: 7,
   handLimit: 8,
+  shopCost: 4,
   turnCap: 4000,
 };
 
@@ -109,6 +115,8 @@ export interface GameState {
   mainDiscard: Card[];
   /** Played non-main cards (shop/big) — removed from circulation, never reshuffled. */
   usedPile: Card[];
+  /** The three blind shop stacks (SECRET; never reshuffle when empty). */
+  stacks: Record<StackId, Card[]>;
   splashPile: SplashCard[]; // SECRET, shuffled
   splashDiscard: SplashCard[];
   /** The active player (whose Main Action it is). */
@@ -128,6 +136,7 @@ export type Move =
   | { kind: "PLAY_SUPPORT"; support: SupportKind; target?: number } // Support slot (does not end the turn)
   | { kind: "THROW"; target: number } // Main Action
   | { kind: "PLAY_BIG"; big: BigKind; target: number } // Main Action
+  | { kind: "SHOP"; sell: { balloons: number; treasures: number; wild: number }; buy: StackId[] } // Main Action
   | { kind: "END_TURN" }; // Main Action (pass)
 
 // ---- Resolutions (out-of-turn ladder responses + end-of-turn discard) ----

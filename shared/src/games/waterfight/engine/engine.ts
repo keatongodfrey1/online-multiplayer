@@ -16,8 +16,11 @@ import {
   Move,
   PlayerState,
   Resolution,
+  StackId,
   SupportKind,
 } from "./types.js";
+
+const STACK_IDS: readonly StackId[] = ["defense", "mischief", "attack"];
 
 function clone<T>(x: T): T {
   return structuredClone(x);
@@ -33,6 +36,35 @@ export function livingSeats(s: GameState): number[] {
 
 function handHas(p: PlayerState, kind: CardKind): boolean {
   return p.hand.some((c) => c.kind === kind);
+}
+
+function handCount(p: PlayerState, kind: CardKind): number {
+  return p.hand.reduce((n, c) => n + (c.kind === kind ? 1 : 0), 0);
+}
+
+/** A minimal sell (preferring Treasure/balloons, preserving the Wild) reaching
+ *  `cost` coins; null if unaffordable. Balloon=1, Treasure=2, Wild=5 coins. */
+function minimalSell(p: PlayerState, cost: number): { balloons: number; treasures: number; wild: number } | null {
+  const b = handCount(p, "balloon");
+  const t = handCount(p, "treasure");
+  const w = handCount(p, "wild");
+  let coins = 0;
+  let sb = 0;
+  let st = 0;
+  let sw = 0;
+  while (coins < cost && st < t) {
+    st += 1;
+    coins += 2;
+  }
+  while (coins < cost && sb < b) {
+    sb += 1;
+    coins += 1;
+  }
+  if (coins < cost && w > 0) {
+    sw = 1;
+    coins += 5;
+  }
+  return coins >= cost ? { balloons: sb, treasures: st, wild: sw } : null;
 }
 
 function actingSeat(s: GameState): number {
@@ -162,6 +194,10 @@ export function legalMoves(s: GameState): Move[] {
   for (const big of ["mega", "giant", "golden"] as const) {
     if (handHas(p, big)) for (const t of opponents) moves.push({ kind: "PLAY_BIG", big, target: t });
   }
+  const sell = minimalSell(p, s.options.shopCost);
+  if (sell) {
+    for (const st of STACK_IDS) if (s.stacks[st].length > 0) moves.push({ kind: "SHOP", sell, buy: [st] });
+  }
   return moves;
 }
 
@@ -198,6 +234,18 @@ function validateMove(s: GameState, move: Move): void {
     if (s.supportUsed) throw new Error("already used a Support this turn");
     if (!SUPPORT_IMPLEMENTED.includes(move.support)) throw new Error(`support ${move.support} not available`);
     if (!handHas(p, move.support)) throw new Error(`no ${move.support} in hand`);
+    return;
+  }
+  if (move.kind === "SHOP") {
+    const { balloons, treasures, wild } = move.sell;
+    if (balloons < 0 || treasures < 0 || wild < 0 || wild > 1) throw new Error("invalid sell");
+    if (handCount(p, "balloon") < balloons) throw new Error("not enough balloons to sell");
+    if (handCount(p, "treasure") < treasures) throw new Error("not enough Treasure to sell");
+    if (handCount(p, "wild") < wild) throw new Error("not enough Wild to sell");
+    if (balloons + treasures * 2 + wild * 5 < move.buy.length * s.options.shopCost) throw new Error("not enough coins");
+    const need: Record<StackId, number> = { defense: 0, mischief: 0, attack: 0 };
+    for (const st of move.buy) need[st] += 1;
+    for (const st of STACK_IDS) if (need[st] > s.stacks[st].length) throw new Error(`stack ${st} has too few cards`);
     return;
   }
   // THROW / PLAY_BIG (targeted)
@@ -266,6 +314,27 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
     applySupport(s, seat, move.support);
     s.supportUsed = true;
     s.awaiting = { seats: [seat], kind: "MOVE" }; // Support does NOT end the turn
+    return { state: s, awaiting: s.awaiting, events };
+  }
+
+  if (move.kind === "SHOP") {
+    const hand = s.players[seat]!.hand;
+    const sellKind = (kind: CardKind, n: number): void => {
+      for (let i = 0; i < n; i++) {
+        const idx = hand.findIndex((c) => c.kind === kind);
+        const [c] = hand.splice(idx, 1);
+        discardCard(s, c!);
+      }
+    };
+    sellKind("balloon", move.sell.balloons);
+    sellKind("treasure", move.sell.treasures);
+    sellKind("wild", move.sell.wild);
+    for (const st of move.buy) {
+      const card = s.stacks[st].pop();
+      if (card) hand.push(card);
+    }
+    s.log.push(`seat ${seat} shops -> buys [${move.buy.join(", ")}]`);
+    endActiveTurn(s);
     return { state: s, awaiting: s.awaiting, events };
   }
 

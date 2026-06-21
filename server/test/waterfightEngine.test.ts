@@ -32,6 +32,13 @@ function forceSplash(g: GameState, verdict: SplashCard): void {
   if (g.splashPile.length === 0) g.splashPile.push(verdict);
   else g.splashPile[g.splashPile.length - 1] = verdict;
 }
+/** Move `n` cards of a kind from the deck into a seat's hand (preserves conservation). */
+function moveFromDeck(g: GameState, seat: number, kind: CardKind, n: number): void {
+  for (let i = 0; i < n; i++) {
+    const idx = g.mainDeck.findIndex((c) => c.kind === kind);
+    g.players[seat]!.hand.push(g.mainDeck.splice(idx, 1)[0]!);
+  }
+}
 
 describe("water fight engine: setup", () => {
   it("createGame is deterministic for a given seed", () => {
@@ -258,6 +265,40 @@ describe("water fight engine: turn structure (Support + hand limit)", () => {
     r = applyResolution(r.state, { kind: "DISCARD", cardIds: ids });
     assert.equal(r.state.players[0]!.hand.length, 3);
     assert.equal(r.state.turnSeat, 1, "turn advanced after the discard");
+  });
+});
+
+describe("water fight engine: shop (D4)", () => {
+  it("builds + shuffles the 3 stacks to the right sizes", () => {
+    const g = createGame(2, 5);
+    assert.equal(g.stacks.defense.length, 16);
+    assert.equal(g.stacks.mischief.length, 19);
+    assert.equal(g.stacks.attack.length, 18, "Attack Arsenal has Soaker x3");
+    assertInvariants(g);
+  });
+
+  it("sell Treasure for coins and buy a card into hand; SHOP ends the turn", () => {
+    const g = createGame(2, 5, { shopCost: 4 });
+    moveFromDeck(g, 0, "treasure", 2); // 2 Treasure = 4 coins
+    const handBefore = g.players[0]!.hand.length;
+    const r = applyMove(g, { kind: "SHOP", sell: { balloons: 0, treasures: 2, wild: 0 }, buy: ["defense"] });
+    assert.equal(r.state.players[0]!.hand.length, handBefore - 2 + 1, "sold 2, bought 1");
+    assert.equal(r.state.stacks.defense.length, 15, "stack lost a card");
+    assert.equal(r.state.turnSeat, 1, "SHOP is a Main Action — turn ends");
+    assertInvariants(r.state);
+  });
+
+  it("rejects buying without enough coins", () => {
+    const g = createGame(2, 5, { shopCost: 4 });
+    assert.throws(
+      () => applyMove(g, { kind: "SHOP", sell: { balloons: 0, treasures: 0, wild: 0 }, buy: ["defense"] }),
+      /not enough coins/,
+    );
+    moveFromDeck(g, 0, "treasure", 1); // 2 coins, still short of 4
+    assert.throws(
+      () => applyMove(g, { kind: "SHOP", sell: { balloons: 0, treasures: 1, wild: 0 }, buy: ["attack"] }),
+      /not enough coins/,
+    );
   });
 });
 

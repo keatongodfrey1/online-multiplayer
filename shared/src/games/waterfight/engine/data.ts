@@ -1,6 +1,6 @@
 // Card data + tuning constants for the Water Fight engine.
 
-import type { Card, CardKind } from "./types.js";
+import type { Card, CardKind, StackId } from "./types.js";
 
 export const ENGINE_VERSION = "0.1.0";
 
@@ -35,4 +35,42 @@ export function buildMainDeck(): Card[] {
     for (let i = 0; i < (count ?? 0); i++) deck.push({ id: id++, kind: kind as CardKind });
   }
   return deck;
+}
+
+// ---- Shop stacks (D4; Soaker x3 per the user's tweak) ----
+// Shop card ids start at SHOP_ID_BASE so they never collide with main-deck ids
+// (1..MAIN_DECK_SIZE) and are routed to the usedPile when played.
+export const SHOP_ID_BASE = 1000;
+
+type Comp = Partial<Record<CardKind, number>>;
+
+const DEFENSE_DEPOT: Comp = { umbrella: 3, backpack: 3, firstaid: 3, towel: 2, goggles: 2, needle: 2, lifeguard: 1 };
+const MISCHIEF_MARKET: Comp = {
+  pickpocket: 3, sabotage: 3, cardswap: 2, freezeout: 2, hiddenstash: 2,
+  redirect: 2, lemonadespill: 2, sneakypeek: 1, watertrap: 1, switcheroo: 1,
+};
+const ATTACK_ARSENAL: Comp = {
+  mega: 3, launcher: 3, triplesplash: 2, golden: 2, rapidfire: 2, splashzone: 1, giant: 1, soaker: 3, flashflood: 1,
+};
+
+export const STACK_COMPOSITIONS: Record<StackId, Comp> = {
+  defense: DEFENSE_DEPOT,
+  mischief: MISCHIEF_MARKET,
+  attack: ATTACK_ARSENAL,
+};
+
+const compSize = (c: Comp): number => Object.values(c).reduce((a, b) => a + (b ?? 0), 0);
+export const SHOP_TOTAL: number = compSize(DEFENSE_DEPOT) + compSize(MISCHIEF_MARKET) + compSize(ATTACK_ARSENAL);
+
+/** Build the three ordered (unshuffled) shop stacks with unique ids. */
+export function buildStacks(): Record<StackId, Card[]> {
+  let id = SHOP_ID_BASE;
+  const build = (comp: Comp): Card[] => {
+    const arr: Card[] = [];
+    for (const [kind, count] of Object.entries(comp)) {
+      for (let i = 0; i < (count ?? 0); i++) arr.push({ id: id++, kind: kind as CardKind });
+    }
+    return arr;
+  };
+  return { defense: build(DEFENSE_DEPOT), mischief: build(MISCHIEF_MARKET), attack: build(ATTACK_ARSENAL) };
 }

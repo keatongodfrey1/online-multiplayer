@@ -1,6 +1,6 @@
 // Game setup: build the initial GameState (decks, players, opening turn).
 
-import { buildMainDeck, ENGINE_VERSION } from "./data.js";
+import { buildMainDeck, buildStacks, ENGINE_VERSION } from "./data.js";
 import { startTurn } from "./engine.js";
 import { shuffleInPlace } from "./rng.js";
 import {
@@ -46,6 +46,7 @@ export function createGame(
     mainDeck: buildMainDeck(),
     mainDiscard: [],
     usedPile: [],
+    stacks: buildStacks(),
     splashPile,
     splashDiscard: [],
     turnSeat: 0,
@@ -60,6 +61,7 @@ export function createGame(
 
   shuffleInPlace(s.mainDeck, s);
   shuffleInPlace(s.splashPile, s);
+  for (const id of ["defense", "mischief", "attack"] as const) shuffleInPlace(s.stacks[id], s);
   startTurn(s, 0); // deal the opening hand for seat 0
   return s;
 }
