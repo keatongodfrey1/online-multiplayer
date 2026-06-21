@@ -16,11 +16,16 @@ import {
   Move,
   PlayerState,
   Resolution,
+  SupportKind,
 } from "./types.js";
 
 function clone<T>(x: T): T {
   return structuredClone(x);
 }
+
+/** Support cards whose effect is implemented (grows each Phase B slice). Only
+ *  these are offered by legalMoves, so a bot/fuzz never plays an unimplemented one. */
+const SUPPORT_IMPLEMENTED: SupportKind[] = ["firstaid", "backpack"];
 
 export function livingSeats(s: GameState): number[] {
   return s.players.filter((p) => !p.out).map((p) => p.seat);
@@ -45,11 +50,40 @@ function drawCards(s: GameState, seat: number, n: number): void {
   }
 }
 
-/** Begin a seat's turn: draw, then await their Main Action. */
+/** Begin a seat's turn: draw, then await their Support/Main Action. */
 export function startTurn(s: GameState, seat: number): void {
   s.turnSeat = seat;
+  s.supportUsed = false;
   drawCards(s, seat, DRAW_PER_TURN);
   s.awaiting = { seats: [seat], kind: "MOVE" };
+}
+
+/** Support card effects (self-targeting subset; targeting Mischief cards land in B.4). */
+function applySupport(s: GameState, seat: number, support: SupportKind): void {
+  const p = s.players[seat]!;
+  switch (support) {
+    case "firstaid":
+      p.lives = Math.min(s.options.startingLives, p.lives + 1); // E8: cap at starting lives
+      s.log.push(`seat ${seat} First Aid -> ${p.lives} lives`);
+      return;
+    case "backpack":
+      drawCards(s, seat, 2);
+      s.log.push(`seat ${seat} Waterproof Backpack: draw 2`);
+      return;
+    default:
+      throw new Error(`support ${support} not implemented yet`);
+  }
+}
+
+/** End the active player's turn: discard down to the hand limit, then advance. */
+function endActiveTurn(s: GameState): void {
+  if (s.over) return;
+  const seat = s.turnSeat;
+  if (s.players[seat]!.hand.length > s.options.handLimit) {
+    s.awaiting = { seats: [seat], kind: "DISCARD" };
+    return;
+  }
+  advanceTurn(s);
 }
 
 function leaderByLives(s: GameState): number | null {
@@ -110,7 +144,7 @@ function finishAttack(s: GameState, hit: boolean): void {
     endGame(s, living[0] ?? null, "last-standing");
     return;
   }
-  advanceTurn(s);
+  endActiveTurn(s);
 }
 
 // ---- legal surface ----------------------------------------------------------
@@ -121,6 +155,9 @@ export function legalMoves(s: GameState): Move[] {
   const p = s.players[seat]!;
   const opponents = livingSeats(s).filter((t) => t !== seat);
   const moves: Move[] = [{ kind: "END_TURN" }];
+  if (!s.supportUsed) {
+    for (const sup of SUPPORT_IMPLEMENTED) if (handHas(p, sup)) moves.push({ kind: "PLAY_SUPPORT", support: sup });
+  }
   if (handHas(p, "balloon")) for (const t of opponents) moves.push({ kind: "THROW", target: t });
   for (const big of ["mega", "giant", "golden"] as const) {
     if (handHas(p, big)) for (const t of opponents) moves.push({ kind: "PLAY_BIG", big, target: t });
@@ -157,6 +194,13 @@ function validateMove(s: GameState, move: Move): void {
   const seat = s.turnSeat;
   const p = s.players[seat]!;
   if (move.kind === "END_TURN") return;
+  if (move.kind === "PLAY_SUPPORT") {
+    if (s.supportUsed) throw new Error("already used a Support this turn");
+    if (!SUPPORT_IMPLEMENTED.includes(move.support)) throw new Error(`support ${move.support} not available`);
+    if (!handHas(p, move.support)) throw new Error(`no ${move.support} in hand`);
+    return;
+  }
+  // THROW / PLAY_BIG (targeted)
   if (move.target === seat) throw new Error("cannot target yourself");
   const t = s.players[move.target];
   if (!t || t.out) throw new Error("target not a living player");
@@ -169,6 +213,17 @@ function validateMove(s: GameState, move: Move): void {
 
 function validateResolution(s: GameState, res: Resolution): void {
   if (s.over) throw new Error("game over");
+  if (s.awaiting.kind === "DISCARD") {
+    if (res.kind !== "DISCARD") throw new Error("must discard");
+    const seat = actingSeat(s);
+    const hand = s.players[seat]!.hand;
+    const need = hand.length - s.options.handLimit;
+    if (res.cardIds.length !== need) throw new Error(`must discard exactly ${need}`);
+    if (new Set(res.cardIds).size !== res.cardIds.length) throw new Error("duplicate discard id");
+    for (const id of res.cardIds) if (!hand.some((c) => c.id === id)) throw new Error(`card ${id} not in hand`);
+    return;
+  }
+  if (res.kind === "DISCARD") throw new Error("not awaiting a discard");
   const allowed = legalResolutions(s);
   const ok = allowed.some((r) =>
     r.kind === res.kind &&
@@ -199,7 +254,18 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
   const events: GameEvent[] = [{ type: move.kind, seat, detail: move }];
 
   if (move.kind === "END_TURN") {
-    advanceTurn(s);
+    endActiveTurn(s);
+    return { state: s, awaiting: s.awaiting, events };
+  }
+
+  if (move.kind === "PLAY_SUPPORT") {
+    const supHand = s.players[seat]!.hand;
+    const supIdx = supHand.findIndex((c) => c.kind === move.support);
+    const [supCard] = supHand.splice(supIdx, 1);
+    discardCard(s, supCard!);
+    applySupport(s, seat, move.support);
+    s.supportUsed = true;
+    s.awaiting = { seats: [seat], kind: "MOVE" }; // Support does NOT end the turn
     return { state: s, awaiting: s.awaiting, events };
   }
 
@@ -222,6 +288,16 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
   const s = clone(state);
   const seat = actingSeat(s);
   const events: GameEvent[] = [{ type: res.kind, seat, detail: res }];
+  if (res.kind === "DISCARD") {
+    const hand = s.players[seat]!.hand;
+    for (const id of res.cardIds) {
+      const idx = hand.findIndex((c) => c.id === id);
+      const [card] = hand.splice(idx, 1);
+      discardCard(s, card!);
+    }
+    advanceTurn(s);
+    return { state: s, awaiting: s.awaiting, events };
+  }
   const outcome = advanceAttack(s, res);
   if (outcome.resolved) finishAttack(s, outcome.hit);
   return { state: s, awaiting: s.awaiting, events };

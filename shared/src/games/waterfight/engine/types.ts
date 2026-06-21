@@ -9,19 +9,31 @@
  *  into the main deck; umbrella (a shop card) is modeled so the ladder is complete
  *  and tests can inject one. */
 export type CardKind =
-  | "balloon"
-  | "miss"
-  | "hit"
-  | "treasure"
-  | "wild"
-  | "umbrella"
-  | "mega"
-  | "giant"
-  | "golden";
+  // main deck
+  | "balloon" | "miss" | "hit" | "treasure" | "wild"
+  // Defense Depot (shop)
+  | "umbrella" | "backpack" | "firstaid" | "towel" | "goggles" | "needle" | "lifeguard"
+  // Mischief Market (shop)
+  | "pickpocket" | "sabotage" | "cardswap" | "freezeout" | "hiddenstash"
+  | "redirect" | "lemonadespill" | "sneakypeek" | "watertrap" | "switcheroo"
+  // Attack Arsenal (shop)
+  | "mega" | "launcher" | "triplesplash" | "golden" | "rapidfire"
+  | "splashzone" | "giant" | "soaker" | "flashflood";
 
 /** Big attacks (Attack Arsenal) — they auto-connect, skipping the Splash flip (E2). */
 export type BigKind = "mega" | "giant" | "golden";
 export type AttackKind = "basic" | BigKind;
+
+/** Cards played in the Support slot (during your own turn). */
+export type SupportKind =
+  | "firstaid" | "backpack" | "goggles" | "needle"
+  | "pickpocket" | "sabotage" | "cardswap" | "freezeout"
+  | "hiddenstash" | "lemonadespill" | "sneakypeek" | "switcheroo";
+
+export const SUPPORT_KINDS: readonly SupportKind[] = [
+  "firstaid", "backpack", "goggles", "needle", "pickpocket", "sabotage",
+  "cardswap", "freezeout", "hiddenstash", "lemonadespill", "sneakypeek", "switcheroo",
+];
 
 export interface Card {
   id: number;
@@ -45,6 +57,8 @@ export interface GameOptions {
   /** Splash Pile composition (the lobby "splash odds" dial). */
   splashHit: number; // default 13
   splashMiss: number; // default 7
+  /** Discard down to this many cards at end of turn. */
+  handLimit: number; // default 8
   /** Backstop so a pathological game still terminates. */
   turnCap: number;
 }
@@ -53,12 +67,13 @@ export const DEFAULT_OPTIONS: GameOptions = {
   startingLives: 3,
   splashHit: 13,
   splashMiss: 7,
+  handLimit: 8,
   turnCap: 4000,
 };
 
 /** Who/what the engine is waiting on. Phase A kinds; `seats` is an array for
  *  forward-compat with multi-target (Phase B) but holds exactly one seat here. */
-export type AwaitKind = "MOVE" | "DEFEND" | "ATTACKER_RESPOND" | "GAME_OVER";
+export type AwaitKind = "MOVE" | "DEFEND" | "ATTACKER_RESPOND" | "DISCARD" | "GAME_OVER";
 
 /** The dedicated attack state machine's persistent state (Issue 1bA). */
 export interface AttackState {
@@ -98,6 +113,8 @@ export interface GameState {
   splashDiscard: SplashCard[];
   /** The active player (whose Main Action it is). */
   turnSeat: number;
+  /** Whether the active player has used their one Support card this turn. */
+  supportUsed: boolean;
   awaiting: Awaiting;
   turnCount: number;
   over: boolean;
@@ -106,18 +123,20 @@ export interface GameState {
   log: string[];
 }
 
-// ---- Moves (the active player's Main Action) ----
+// ---- Moves: one optional Support card + one Main Action per turn ----
 export type Move =
-  | { kind: "THROW"; target: number }
-  | { kind: "PLAY_BIG"; big: BigKind; target: number }
-  | { kind: "END_TURN" };
+  | { kind: "PLAY_SUPPORT"; support: SupportKind; target?: number } // Support slot (does not end the turn)
+  | { kind: "THROW"; target: number } // Main Action
+  | { kind: "PLAY_BIG"; big: BigKind; target: number } // Main Action
+  | { kind: "END_TURN" }; // Main Action (pass)
 
-// ---- Resolutions (out-of-turn ladder responses) ----
+// ---- Resolutions (out-of-turn ladder responses + end-of-turn discard) ----
 export type Defense = "miss" | "umbrella" | "wild_miss" | "pass";
 export type Respond = "hit" | "wild_hit" | "pass";
 export type Resolution =
   | { kind: "DEFEND"; defense: Defense }
-  | { kind: "ATTACKER_RESPOND"; respond: Respond };
+  | { kind: "ATTACKER_RESPOND"; respond: Respond }
+  | { kind: "DISCARD"; cardIds: number[] };
 
 export interface GameEvent {
   type: string;

@@ -19,6 +19,14 @@ function lcg(seed: number): () => number {
   };
 }
 
+/** End-of-turn forced discard: drop the first `need` cards (any valid set works). */
+function discardResolution(s: GameState): Resolution {
+  const seat = s.awaiting.seats[0]!;
+  const hand = s.players[seat]!.hand;
+  const need = hand.length - s.options.handLimit;
+  return { kind: "DISCARD", cardIds: hand.slice(0, need).map((c) => c.id) };
+}
+
 /** Picks uniformly at random among legal options. */
 export class RandomPolicy implements Policy {
   private rng: () => number;
@@ -32,6 +40,7 @@ export class RandomPolicy implements Policy {
     return this.pick(legalMoves(s));
   }
   resolve(s: GameState): Resolution {
+    if (s.awaiting.kind === "DISCARD") return discardResolution(s);
     return this.pick(legalResolutions(s));
   }
 }
@@ -51,6 +60,7 @@ export class GreedyPolicy implements Policy {
     return throws.length > 0 ? this.pick(throws) : { kind: "END_TURN" };
   }
   resolve(s: GameState): Resolution {
+    if (s.awaiting.kind === "DISCARD") return discardResolution(s);
     const res = legalResolutions(s);
     const aggressive = res.filter(
       (r) =>

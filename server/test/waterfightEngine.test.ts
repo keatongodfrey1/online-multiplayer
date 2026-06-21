@@ -216,6 +216,51 @@ describe("water fight engine: big attacks (auto-connect)", () => {
   });
 });
 
+describe("water fight engine: turn structure (Support + hand limit)", () => {
+  it("First Aid heals, capped at starting lives (E8); Support does not end the turn", () => {
+    const g = createGame(2, 5);
+    g.players[0]!.lives = 1;
+    g.players[0]!.hand.push({ id: 10001, kind: "firstaid" });
+    const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "firstaid" });
+    assert.equal(r.state.players[0]!.lives, 2);
+    assert.equal(r.state.supportUsed, true);
+    assert.equal(r.awaiting.kind, "MOVE", "still the same player's turn");
+
+    const g2 = createGame(2, 5); // full lives -> heal is a no-op (cap)
+    g2.players[0]!.hand.push({ id: 10001, kind: "firstaid" });
+    const r2 = applyMove(g2, { kind: "PLAY_SUPPORT", support: "firstaid" });
+    assert.equal(r2.state.players[0]!.lives, 3, "cannot exceed starting lives");
+  });
+
+  it("Waterproof Backpack draws 2", () => {
+    const g = createGame(2, 5);
+    g.players[0]!.hand.push({ id: 10002, kind: "backpack" });
+    const before = g.players[0]!.hand.length;
+    const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "backpack" });
+    assert.equal(r.state.players[0]!.hand.length, before - 1 + 2);
+  });
+
+  it("only one Support per turn", () => {
+    const g = createGame(2, 5);
+    g.players[0]!.hand.push({ id: 10001, kind: "firstaid" }, { id: 10002, kind: "backpack" });
+    const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "firstaid" });
+    assert.throws(() => applyMove(r.state, { kind: "PLAY_SUPPORT", support: "backpack" }), /already used a Support/);
+  });
+
+  it("hand limit: end of turn over the limit forces a discard, then advances", () => {
+    const g = createGame(2, 5, { handLimit: 3 });
+    setHand(g, 0, ["miss", "hit", "treasure", "miss", "hit"]);
+    let r = applyMove(g, { kind: "END_TURN" });
+    assert.equal(r.awaiting.kind, "DISCARD");
+    assert.equal(r.awaiting.seats[0], 0);
+    const ids = r.state.players[0]!.hand.slice(0, 2).map((c) => c.id);
+    assert.throws(() => applyResolution(r.state, { kind: "DISCARD", cardIds: [ids[0]!] }), /exactly 2/);
+    r = applyResolution(r.state, { kind: "DISCARD", cardIds: ids });
+    assert.equal(r.state.players[0]!.hand.length, 3);
+    assert.equal(r.state.turnSeat, 1, "turn advanced after the discard");
+  });
+});
+
 describe("water fight engine: illegal input", () => {
   it("rejects targeting yourself, throwing without a balloon, and illegal blocks", () => {
     const g = createGame(2, 1);
