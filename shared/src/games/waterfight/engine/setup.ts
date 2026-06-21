@@ -29,6 +29,7 @@ export function createGame(
       lives: opts.startingLives,
       hand: [],
       out: false,
+      statuses: { freezeOut: false, noShop: false },
     });
   }
 

@@ -302,6 +302,61 @@ describe("water fight engine: shop (D4)", () => {
   });
 });
 
+describe("water fight engine: support/mischief effects (B.4)", () => {
+  it("Pickpocket steals a Treasure; Needle discards the target's balloons", () => {
+    const g = createGame(2, 5);
+    g.players[0]!.hand.push({ id: 10001, kind: "pickpocket" });
+    moveFromDeck(g, 1, "treasure", 1);
+    let r = applyMove(g, { kind: "PLAY_SUPPORT", support: "pickpocket", target: 1 });
+    assert.equal(r.state.players[1]!.hand.filter((c) => c.kind === "treasure").length, 0, "treasure stolen");
+    assert.ok(r.state.players[0]!.hand.some((c) => c.kind === "treasure"), "thief gained it");
+    assert.equal(r.awaiting.kind, "MOVE", "Support does not end the turn");
+
+    const g2 = createGame(2, 5);
+    g2.players[0]!.hand.push({ id: 10002, kind: "needle" });
+    setHand(g2, 1, ["balloon", "balloon", "miss"]);
+    const r2 = applyMove(g2, { kind: "PLAY_SUPPORT", support: "needle", target: 1 });
+    assert.equal(r2.state.players[1]!.hand.filter((c) => c.kind === "balloon").length, 0);
+    assert.equal(r2.state.players[1]!.hand.length, 1, "only the Miss remains");
+  });
+
+  it("Switcheroo swaps entire hands", () => {
+    const g = createGame(2, 5);
+    g.players[0]!.hand = [{ id: 10001, kind: "switcheroo" }, { id: 10002, kind: "miss" }];
+    g.players[1]!.hand = [{ id: 10003, kind: "hit" }, { id: 10004, kind: "hit" }, { id: 10005, kind: "hit" }];
+    const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "switcheroo", target: 1 });
+    assert.equal(r.state.players[0]!.hand.length, 3);
+    assert.ok(r.state.players[0]!.hand.every((c) => c.kind === "hit"));
+    assert.deepEqual(r.state.players[1]!.hand.map((c) => c.kind), ["miss"]);
+  });
+
+  it("Freeze Out: target draws only 1 next turn (status consumed)", () => {
+    const g = createGame(2, 5);
+    g.players[0]!.hand.push({ id: 10001, kind: "freezeout" });
+    let r = applyMove(g, { kind: "PLAY_SUPPORT", support: "freezeout", target: 1 });
+    assert.equal(r.state.players[1]!.statuses.freezeOut, true);
+    r = applyMove(r.state, { kind: "END_TURN" });
+    assert.equal(r.state.turnSeat, 1);
+    assert.equal(r.state.players[1]!.hand.length, 1, "drew only 1");
+    assert.equal(r.state.players[1]!.statuses.freezeOut, false, "consumed");
+  });
+
+  it("Lemonade Spill: target discards 1 and cannot Shop next turn", () => {
+    const g = createGame(2, 5);
+    g.players[0]!.hand.push({ id: 10001, kind: "lemonadespill" });
+    setHand(g, 1, ["miss", "hit"]);
+    let r = applyMove(g, { kind: "PLAY_SUPPORT", support: "lemonadespill", target: 1 });
+    assert.equal(r.state.players[1]!.hand.length, 1, "target discarded 1");
+    assert.equal(r.state.players[1]!.statuses.noShop, true);
+    r = applyMove(r.state, { kind: "END_TURN" }); // -> seat 1's turn, noShop active
+    moveFromDeck(r.state, 1, "treasure", 2);
+    assert.throws(
+      () => applyMove(r.state, { kind: "SHOP", sell: { balloons: 0, treasures: 2, wild: 0 }, buy: ["defense"] }),
+      /Lemonade Spill/,
+    );
+  });
+});
+
 describe("water fight engine: illegal input", () => {
   it("rejects targeting yourself, throwing without a balloon, and illegal blocks", () => {
     const g = createGame(2, 1);

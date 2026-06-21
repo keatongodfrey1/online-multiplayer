@@ -7,6 +7,7 @@
 import { advanceAttack, startAttack, startBigAttack, type AttackOutcome } from "./attack.js";
 import { DRAW_PER_TURN } from "./data.js";
 import { discardCard, drawMainCard } from "./deck.js";
+import { rand } from "./rng.js";
 import {
   ApplyResult,
   Awaiting,
@@ -27,8 +28,16 @@ function clone<T>(x: T): T {
 }
 
 /** Support cards whose effect is implemented (grows each Phase B slice). Only
- *  these are offered by legalMoves, so a bot/fuzz never plays an unimplemented one. */
-const SUPPORT_IMPLEMENTED: SupportKind[] = ["firstaid", "backpack"];
+ *  these are offered by legalMoves, so a bot/fuzz never plays an unimplemented one.
+ *  Deferred (need a peek/choose sub-decision): goggles, sneakypeek. */
+const SUPPORT_IMPLEMENTED: SupportKind[] = [
+  "firstaid", "backpack", "hiddenstash",
+  "needle", "pickpocket", "sabotage", "cardswap", "freezeout", "lemonadespill", "switcheroo",
+];
+/** Supports that require an opponent target. */
+const TARGETED_SUPPORTS = new Set<SupportKind>([
+  "needle", "pickpocket", "sabotage", "cardswap", "freezeout", "lemonadespill", "switcheroo",
+]);
 
 export function livingSeats(s: GameState): number[] {
   return s.players.filter((p) => !p.out).map((p) => p.seat);
@@ -82,26 +91,92 @@ function drawCards(s: GameState, seat: number, n: number): void {
   }
 }
 
-/** Begin a seat's turn: draw, then await their Support/Main Action. */
+/** Begin a seat's turn: apply pending statuses, draw, await their action. */
 export function startTurn(s: GameState, seat: number): void {
   s.turnSeat = seat;
   s.supportUsed = false;
-  drawCards(s, seat, DRAW_PER_TURN);
+  const p = s.players[seat]!;
+  const draw = p.statuses.freezeOut ? 1 : DRAW_PER_TURN; // Freeze Out
+  p.statuses.freezeOut = false;
+  drawCards(s, seat, draw);
   s.awaiting = { seats: [seat], kind: "MOVE" };
 }
 
-/** Support card effects (self-targeting subset; targeting Mischief cards land in B.4). */
-function applySupport(s: GameState, seat: number, support: SupportKind): void {
+/** Discard `n` random cards from a seat's hand (uses the game RNG). */
+function discardRandom(s: GameState, seat: number, n: number): void {
+  const hand = s.players[seat]!.hand;
+  for (let i = 0; i < n && hand.length > 0; i++) {
+    discardCard(s, hand.splice(Math.floor(rand(s) * hand.length), 1)[0]!);
+  }
+}
+
+/** Swap up to 2 random cards each way between two hands (Card Swap). */
+function cardSwap(s: GameState, a: number, b: number): void {
+  const ha = s.players[a]!.hand;
+  const hb = s.players[b]!.hand;
+  for (let i = 0; i < 2; i++) {
+    if (ha.length === 0 || hb.length === 0) break;
+    const ca = ha.splice(Math.floor(rand(s) * ha.length), 1)[0]!;
+    const cb = hb.splice(Math.floor(rand(s) * hb.length), 1)[0]!;
+    ha.push(cb);
+    hb.push(ca);
+  }
+}
+
+/** Support card effects. Targeting Mischief cards apply immediately (the Towel
+ *  reaction window arrives in B.6); "their choice" discards are randomized here. */
+function applySupport(s: GameState, seat: number, support: SupportKind, target?: number): void {
   const p = s.players[seat]!;
   switch (support) {
     case "firstaid":
       p.lives = Math.min(s.options.startingLives, p.lives + 1); // E8: cap at starting lives
-      s.log.push(`seat ${seat} First Aid -> ${p.lives} lives`);
       return;
     case "backpack":
       drawCards(s, seat, 2);
-      s.log.push(`seat ${seat} Waterproof Backpack: draw 2`);
       return;
+    case "hiddenstash": {
+      let taken = 0; // search the discard, take up to 2 Treasure
+      for (let i = s.mainDiscard.length - 1; i >= 0 && taken < 2; i--) {
+        if (s.mainDiscard[i]!.kind === "treasure") {
+          p.hand.push(s.mainDiscard.splice(i, 1)[0]!);
+          taken += 1;
+        }
+      }
+      return;
+    }
+    case "needle": {
+      const t = s.players[target!]!;
+      const balloons = t.hand.filter((c) => c.kind === "balloon");
+      t.hand = t.hand.filter((c) => c.kind !== "balloon");
+      for (const c of balloons) discardCard(s, c);
+      return;
+    }
+    case "pickpocket": {
+      const t = s.players[target!]!;
+      const idx = t.hand.findIndex((c) => c.kind === "treasure");
+      if (idx >= 0) p.hand.push(t.hand.splice(idx, 1)[0]!);
+      return;
+    }
+    case "sabotage":
+      discardRandom(s, target!, 2);
+      return;
+    case "lemonadespill":
+      discardRandom(s, target!, 1);
+      s.players[target!]!.statuses.noShop = true;
+      return;
+    case "freezeout":
+      s.players[target!]!.statuses.freezeOut = true;
+      return;
+    case "cardswap":
+      cardSwap(s, seat, target!);
+      return;
+    case "switcheroo": {
+      const t = s.players[target!]!;
+      const tmp = p.hand;
+      p.hand = t.hand;
+      t.hand = tmp;
+      return;
+    }
     default:
       throw new Error(`support ${support} not implemented yet`);
   }
@@ -138,6 +213,7 @@ function endGame(s: GameState, winner: number | null, reason: GameState["endReas
 /** End the active player's turn and pass to the next living seat. */
 function advanceTurn(s: GameState): void {
   if (s.over) return;
+  s.players[s.turnSeat]!.statuses.noShop = false; // the finishing player's Lemonade Spill lifts
   s.turnCount += 1;
   if (s.turnCount > s.options.turnCap) {
     endGame(s, leaderByLives(s), "cap");
@@ -188,14 +264,21 @@ export function legalMoves(s: GameState): Move[] {
   const opponents = livingSeats(s).filter((t) => t !== seat);
   const moves: Move[] = [{ kind: "END_TURN" }];
   if (!s.supportUsed) {
-    for (const sup of SUPPORT_IMPLEMENTED) if (handHas(p, sup)) moves.push({ kind: "PLAY_SUPPORT", support: sup });
+    for (const sup of SUPPORT_IMPLEMENTED) {
+      if (!handHas(p, sup)) continue;
+      if (TARGETED_SUPPORTS.has(sup)) {
+        for (const t of opponents) moves.push({ kind: "PLAY_SUPPORT", support: sup, target: t });
+      } else {
+        moves.push({ kind: "PLAY_SUPPORT", support: sup });
+      }
+    }
   }
   if (handHas(p, "balloon")) for (const t of opponents) moves.push({ kind: "THROW", target: t });
   for (const big of ["mega", "giant", "golden"] as const) {
     if (handHas(p, big)) for (const t of opponents) moves.push({ kind: "PLAY_BIG", big, target: t });
   }
   const sell = minimalSell(p, s.options.shopCost);
-  if (sell) {
+  if (sell && !p.statuses.noShop) {
     for (const st of STACK_IDS) if (s.stacks[st].length > 0) moves.push({ kind: "SHOP", sell, buy: [st] });
   }
   return moves;
@@ -234,9 +317,15 @@ function validateMove(s: GameState, move: Move): void {
     if (s.supportUsed) throw new Error("already used a Support this turn");
     if (!SUPPORT_IMPLEMENTED.includes(move.support)) throw new Error(`support ${move.support} not available`);
     if (!handHas(p, move.support)) throw new Error(`no ${move.support} in hand`);
+    if (TARGETED_SUPPORTS.has(move.support)) {
+      if (move.target === undefined || move.target === seat) throw new Error("invalid Support target");
+      const t = s.players[move.target];
+      if (!t || t.out) throw new Error("target not a living player");
+    }
     return;
   }
   if (move.kind === "SHOP") {
+    if (p.statuses.noShop) throw new Error("cannot Shop this turn (Lemonade Spill)");
     const { balloons, treasures, wild } = move.sell;
     if (balloons < 0 || treasures < 0 || wild < 0 || wild > 1) throw new Error("invalid sell");
     if (handCount(p, "balloon") < balloons) throw new Error("not enough balloons to sell");
@@ -311,7 +400,7 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
     const supIdx = supHand.findIndex((c) => c.kind === move.support);
     const [supCard] = supHand.splice(supIdx, 1);
     discardCard(s, supCard!);
-    applySupport(s, seat, move.support);
+    applySupport(s, seat, move.support, move.target);
     s.supportUsed = true;
     s.awaiting = { seats: [seat], kind: "MOVE" }; // Support does NOT end the turn
     return { state: s, awaiting: s.awaiting, events };

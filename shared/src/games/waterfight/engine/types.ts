@@ -53,6 +53,11 @@ export interface PlayerState {
   hand: Card[];
   /** Soaked: lives reached 0. (Phase A: removed from rotation; Storm Cloud is Phase B.) */
   out: boolean;
+  /** Pending status effects (set by opponents' cards; applied on this player's next turn). */
+  statuses: {
+    freezeOut: boolean; // Freeze Out: draw only 1 next turn
+    noShop: boolean; // Lemonade Spill: may not Shop next turn
+  };
 }
 
 export interface GameOptions {
