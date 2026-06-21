@@ -4,10 +4,13 @@
  * fire both on the rising edge of "this player must act now" — see
  * ADDING_A_GAME.md and the Splendor/Catan views for the pattern.
  *
- * Browsers only allow audio after a user gesture; the AudioContext is
- * created lazily and resumed on demand, so the first chime after a fresh
- * page load may be silent if no click happened yet (fine - there is
- * nothing to nudge a player about before they have interacted).
+ * Browsers only allow audio after a user gesture (the autoplay policy), so
+ * resuming the AudioContext from a turn callback - which fires on a network
+ * message, not a click - is rejected and logs a console warning. We instead
+ * unlock it once on the player's first real gesture (see the listener below),
+ * so every chime from then on is reliable and silent-warning-free. A chime
+ * that fires before the player has interacted at all is still skipped (there
+ * is nothing to nudge them about yet), which is fine.
  */
 const MUTE_KEY = "fw-muted";
 /** Pre-framework Splendor preference; read as a fallback, never written. */
@@ -40,6 +43,19 @@ function context(): AudioContext | undefined {
   } catch {
     return undefined;
   }
+}
+
+// Unlock the AudioContext on the player's FIRST real gesture so resume() runs
+// inside a trusted click/key/tap (which the autoplay policy honors), instead
+// of from a turn callback (which it rejects, logging a warning). One-shot:
+// the first gesture wakes the context and tears down all the listeners.
+if (typeof window !== "undefined") {
+  const GESTURES = ["pointerdown", "keydown", "touchstart"] as const;
+  const unlock = (): void => {
+    context();
+    for (const evt of GESTURES) window.removeEventListener(evt, unlock);
+  };
+  for (const evt of GESTURES) window.addEventListener(evt, unlock);
 }
 
 /** One soft sine note, `at` seconds from now. */
