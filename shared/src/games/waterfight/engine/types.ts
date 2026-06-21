@@ -210,6 +210,8 @@ export interface GameState {
   winner: number | null;
   endReason: EndReason | null;
   log: string[];
+  /** Private peek output of the LAST reduce (forwarded to one seat, not synced). */
+  reveals: Reveal[];
 }
 
 /** Multi-target spread, pre-declared on a throw; only consumed if the throw lands
@@ -244,6 +246,16 @@ export interface GameEvent {
   type: string;
   seat: number;
   detail?: unknown;
+}
+
+/** A one-shot private reveal (Goggles peek the deck top, Sneaky Peek an opponent's
+ *  hand). Produced by a reduce, forwarded by the room to `seat` ONLY — never synced
+ *  to everyone. Ephemeral: cleared at the start of the next reduce. */
+export interface Reveal {
+  seat: number; // who may see it (the peeker)
+  kind: "deck-top" | "hand";
+  cards: Card[];
+  ofSeat?: number; // for kind "hand": whose hand was peeked
 }
 
 export interface ApplyResult {

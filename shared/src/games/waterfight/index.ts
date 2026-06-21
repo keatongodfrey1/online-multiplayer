@@ -22,6 +22,9 @@ export const WaterFightMsg = {
   RESOLVE: "waterfight/resolve",
   /** Host-only, lobby-only. Payload: { key: string, value: number } (see WF_SETTINGS). */
   CONFIG: "waterfight/config",
+  /** Server -> ONE client: a private peek (Goggles / Sneaky Peek). Payload:
+   *  { kind: "deck-top" | "hand", ofSeat: number, cards: {id,kind}[] }. */
+  REVEAL: "waterfight/reveal",
 } as const;
 
 /**

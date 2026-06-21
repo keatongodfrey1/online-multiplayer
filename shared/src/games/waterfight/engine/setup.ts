@@ -67,6 +67,7 @@ export function createGame(
     winner: null,
     endReason: null,
     log: [],
+    reveals: [],
   };
 
   // Shuffle the 81 main cards, then deal each NON-first player a 1-card opening

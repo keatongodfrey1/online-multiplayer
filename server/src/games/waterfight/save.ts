@@ -212,6 +212,7 @@ function rebuildEngine(e: unknown): GameState {
     winner: (e.winner ?? null) as number | null,
     endReason: (e.endReason ?? null) as GameState["endReason"],
     log: (e.log as unknown[]).filter(isStr).slice(-200) as string[],
+    reveals: [], // peeks are ephemeral; never resumed from a save
   } as unknown as GameState;
   return state;
 }

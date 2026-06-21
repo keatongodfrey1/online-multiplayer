@@ -57,6 +57,8 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
   private seedOption?: number;
   /** The @view() hand array each session currently has granted. */
   private grantedHands = new Map<string, ReturnType<() => WaterFightSeat["hand"]>>();
+  /** Last private peek per session, re-sent on reconnect (Goggles / Sneaky Peek). */
+  private lastReveal = new Map<string, object>();
 
   protected createPlayer(): WaterFightPlayer {
     return new WaterFightPlayer();
@@ -235,12 +237,30 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
   // ---- the funnel ---------------------------------------------------------
 
   private afterApply(): void {
+    this.forwardReveals();
     this.syncFromEngine();
     if (this.engine.over) {
       this.finishGame();
       return;
     }
     this.scheduleAuto();
+  }
+
+  /** Deliver this reduce's private peeks to their owners only (Goggles / Sneaky
+   *  Peek), then clear them so a later non-apply afterApply can't re-send a stale one. */
+  private forwardReveals(): void {
+    for (const reveal of this.engine.reveals) {
+      const sid = this.seatOrder[reveal.seat];
+      if (!sid) continue;
+      const payload = {
+        kind: reveal.kind,
+        ofSeat: reveal.ofSeat ?? -1,
+        cards: reveal.cards.map((c) => ({ id: c.id, kind: c.kind })),
+      };
+      this.lastReveal.set(sid, payload);
+      this.clients.getById(sid)?.send(WaterFightMsg.REVEAL, payload);
+    }
+    this.engine.reveals = [];
   }
 
   private finishGame(): void {
@@ -467,6 +487,13 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
     this.scheduleAuto();
   }
 
+  /** Re-send the last private peek to a client that just reconnected (its hand
+   *  @view() is restored via schema; a one-shot Reveal message is not). */
+  protected override syncPrivate(client: Client): void {
+    const payload = this.lastReveal.get(client.sessionId);
+    if (payload) client.send(WaterFightMsg.REVEAL, payload);
+  }
+
   protected override onPlayerLeftForGood(player: WaterFightPlayer): void {
     this.grantedHands.delete(player.sessionId);
     this.botBrains.delete(player.sessionId);
@@ -503,6 +530,7 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
   protected override onGameEnded(): void {
     this.autoTimer?.clear();
     this.autoTimer = undefined;
+    this.lastReveal.clear();
     this.state.actionDeadline = 0;
     this.state.currentTurn = "";
     this.state.awaitingKind = "";

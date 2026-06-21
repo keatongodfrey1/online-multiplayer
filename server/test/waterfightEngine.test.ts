@@ -908,6 +908,44 @@ describe("water fight engine: effects + edges (review)", () => {
   });
 });
 
+describe("water fight engine: peeks (G3)", () => {
+  it("Goggles reveals the top 3 of the draw pile to the peeker (a peek, not a draw)", () => {
+    const g = game(2, 5);
+    g.players[0]!.hand.push({ id: 10001, kind: "goggles" });
+    const deckBefore = g.mainDeck.length;
+    const top3 = g.mainDeck.slice(-3).reverse().map((c) => c.kind);
+    const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "goggles" });
+    assert.equal(r.state.mainDeck.length, deckBefore, "Goggles does not draw");
+    assert.equal(r.state.reveals.length, 1);
+    assert.equal(r.state.reveals[0]!.seat, 0, "only the peeker sees it");
+    assert.equal(r.state.reveals[0]!.kind, "deck-top");
+    assert.deepEqual(r.state.reveals[0]!.cards.map((c) => c.kind), top3, "the top 3 in draw order");
+    assert.equal(r.state.awaiting.kind, "MOVE", "Support does not end the turn");
+  });
+
+  it("Sneaky Peek reveals a chosen opponent's hand", () => {
+    const g = game(2, 5);
+    g.players[0]!.hand.push({ id: 10001, kind: "sneakypeek" });
+    setHand(g, 1, ["miss", "umbrella", "balloon"]);
+    const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "sneakypeek", target: 1 });
+    assert.equal(r.state.reveals.length, 1);
+    assert.equal(r.state.reveals[0]!.seat, 0);
+    assert.equal(r.state.reveals[0]!.kind, "hand");
+    assert.equal(r.state.reveals[0]!.ofSeat, 1);
+    assert.deepEqual(r.state.reveals[0]!.cards.map((c) => c.kind).sort(), ["balloon", "miss", "umbrella"]);
+  });
+
+  it("Sneaky Peek can be Towelled away — no peek (E11)", () => {
+    const g = game(2, 5);
+    g.players[0]!.hand.push({ id: 10001, kind: "sneakypeek" });
+    setHand(g, 1, ["towel"]);
+    let r = applyMove(g, { kind: "PLAY_SUPPORT", support: "sneakypeek", target: 1 });
+    assert.equal(r.state.awaiting.kind, "REACT", "the target gets a Towel window first");
+    r = applyResolution(r.state, { kind: "REACT", action: "towel" });
+    assert.equal(r.state.reveals.length, 0, "cancelled — nothing peeked");
+  });
+});
+
 describe("water fight engine: new dials (G2)", () => {
   it("the main-deck Hit/Miss dial resizes the deck, conserves, and plays", () => {
     const g = createGame(3, 5, { mainHit: 5, mainMiss: 5, eventDensity: 0 });

@@ -29,19 +29,21 @@ const wfTurnLabel = (blob: any): number => (blob?.engine?.turnCount ?? 0) + 1;
 // hand-copy purely to pick which buttons to show. Keep in sync; the server still
 // validates, so drift only mis-renders, never mis-applies.
 const TARGETED_SUPPORTS = new Set([
-  "needle", "pickpocket", "sabotage", "cardswap", "freezeout", "lemonadespill", "switcheroo",
+  "needle", "pickpocket", "sabotage", "cardswap", "freezeout", "lemonadespill", "sneakypeek", "switcheroo",
 ]);
-const UNTARGETED_SUPPORTS = ["firstaid", "backpack", "hiddenstash"];
+const UNTARGETED_SUPPORTS = ["firstaid", "backpack", "hiddenstash", "goggles"];
 const SUPPORT_LABELS: Record<string, string> = {
   firstaid: "First Aid (+1 life)",
   backpack: "Backpack (draw 2)",
   hiddenstash: "Hidden Stash (treasure)",
+  goggles: "Goggles (peek deck)",
   needle: "Needle",
   pickpocket: "Pickpocket",
   sabotage: "Sabotage",
   cardswap: "Card Swap",
   freezeout: "Freeze Out",
   lemonadespill: "Lemonade Spill",
+  sneakypeek: "Sneaky Peek",
   switcheroo: "Switcheroo",
 };
 const CARD_LABELS: Record<string, string> = {
@@ -60,6 +62,8 @@ const STYLE = `
 .wf-banner { padding: 8px 12px; border-radius: 8px; background: #eef3ff; font-weight: 600; }
 .wf-banner.act { background: #d6f5d6; }
 .wf-banner.sudden { background: #ffe0e0; }
+.wf-reveal { padding: 8px 12px; border-radius: 8px; background: #fff7d6; border: 1px solid #e0c060; font-size: 13px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.wf-reveal button { padding: 2px 8px; }
 .wf-seats { display: flex; flex-wrap: wrap; gap: 8px; }
 .wf-seat { border: 1px solid #ccd; border-radius: 8px; padding: 8px 10px; min-width: 120px; background: #fafbff; }
 .wf-seat.turn { border-color: #4a80ff; box-shadow: 0 0 0 2px #4a80ff33; }
@@ -109,6 +113,8 @@ export class WaterFightView implements GameView {
   private readonly onClick = (ev: Event) => this.handleClick(ev);
   private wasMyMoment = false;
   private discardSel = new Set<number>();
+  /** The last private peek (Goggles / Sneaky Peek), shown until dismissed/acted. */
+  private reveal?: { kind: string; ofSeat: number; cards: { id: number; kind: string }[] };
 
   mount(root: HTMLElement, room: Room<any, BaseState>, ctx: GameViewContext): void {
     this.root = root;
@@ -117,6 +123,11 @@ export class WaterFightView implements GameView {
     root.innerHTML = `<style>${STYLE}</style><div class="wf"></div>`;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
+    this.room.onMessage(WaterFightMsg.REVEAL, (payload: { kind: string; ofSeat: number; cards: { id: number; kind: string }[] }) => {
+      if (!this.root) return; // ignore if this view has since unmounted
+      this.reveal = payload;
+      this.render();
+    });
     hookSaveData(this.room, WF_SAVES_KEY, wfTurnLabel, () => flashToast(root, "Saved ✓"));
     this.render();
   }
@@ -146,6 +157,10 @@ export class WaterFightView implements GameView {
         return;
       case "save":
         room.send(LobbyMsg.SAVE, {});
+        return;
+      case "dismiss-reveal":
+        this.reveal = undefined;
+        this.render();
         return;
       case "end":
         room.send(WaterFightMsg.MOVE, { kind: "END_TURN" });
@@ -224,6 +239,7 @@ export class WaterFightView implements GameView {
         isHost ? `<button class="wf-mute" data-act="save" title="Save game">💾</button>` : ""
       }<button class="wf-mute" data-act="mute" title="Sound">${isMuted() ? "🔕" : "🔔"}</button></div>`,
       this.renderBanner(state, mySeat, myMoment),
+      this.renderReveal(seats),
       this.renderSeats(state, seats, mySeat),
       this.renderDecks(state),
       this.renderHand(state, seats, mySeat, myMoment),
@@ -242,6 +258,16 @@ export class WaterFightView implements GameView {
       case "DISCARD": return "Discard down";
       default: return "Your move";
     }
+  }
+
+  private renderReveal(seats: WaterFightSeat[]): string {
+    if (!this.reveal) return "";
+    const cards = this.reveal.cards.map((c) => CARD_LABELS[c.kind] ?? escapeHtml(c.kind)).join(" · ");
+    const who =
+      this.reveal.kind === "hand"
+        ? `${escapeHtml(seats.find((s) => s.seat === this.reveal!.ofSeat)?.nickname ?? "Opponent")}'s hand`
+        : "Top of the draw pile";
+    return `<div class="wf-reveal">👀 <b>${who}:</b> ${cards || "(empty)"} <button data-act="dismiss-reveal" class="ghost">dismiss</button></div>`;
   }
 
   private renderBanner(state: WaterFightState, mySeat: number, myMoment: boolean): string {

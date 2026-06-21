@@ -43,16 +43,15 @@ function trimLog(s: GameState): void {
   if (s.log.length > ENGINE_LOG_CAP) s.log.splice(0, s.log.length - ENGINE_LOG_CAP);
 }
 
-/** Support cards whose effect is implemented (grows each Phase B slice). Only
- *  these are offered by legalMoves, so a bot/fuzz never plays an unimplemented one.
- *  Deferred (need a peek/choose sub-decision): goggles, sneakypeek. */
+/** Support cards whose effect is implemented. Only these are offered by
+ *  legalMoves, so a bot/fuzz never plays an unimplemented one. */
 const SUPPORT_IMPLEMENTED: SupportKind[] = [
-  "firstaid", "backpack", "hiddenstash",
-  "needle", "pickpocket", "sabotage", "cardswap", "freezeout", "lemonadespill", "switcheroo",
+  "firstaid", "backpack", "hiddenstash", "goggles",
+  "needle", "pickpocket", "sabotage", "cardswap", "freezeout", "lemonadespill", "sneakypeek", "switcheroo",
 ];
 /** Supports that require an opponent target. */
 const TARGETED_SUPPORTS = new Set<SupportKind>([
-  "needle", "pickpocket", "sabotage", "cardswap", "freezeout", "lemonadespill", "switcheroo",
+  "needle", "pickpocket", "sabotage", "cardswap", "freezeout", "lemonadespill", "sneakypeek", "switcheroo",
 ]);
 
 export function livingSeats(s: GameState): number[] {
@@ -360,6 +359,16 @@ function applySupport(s: GameState, seat: number, support: SupportKind, target?:
       const tmp = p.hand;
       p.hand = t.hand;
       t.hand = tmp;
+      return;
+    }
+    case "goggles": {
+      // Peek the top 3 of the draw pile (a peek, never a draw — Events don't fire,
+      // and the cards stay on top for the next drawer). Reveal in draw order.
+      s.reveals.push({ seat, kind: "deck-top", cards: s.mainDeck.slice(-3).reverse().map((c) => ({ ...c })) });
+      return;
+    }
+    case "sneakypeek": {
+      s.reveals.push({ seat, kind: "hand", ofSeat: target!, cards: s.players[target!]!.hand.map((c) => ({ ...c })) });
       return;
     }
     default:
@@ -795,6 +804,7 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
   validateMove(state, move);
   const s = clone(state);
   trimLog(s);
+  s.reveals = []; // a fresh reduce produces its own peeks
   const seat = s.turnSeat;
   const events: GameEvent[] = [{ type: move.kind, seat, detail: move }];
 
@@ -870,6 +880,7 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
   validateResolution(state, res);
   const s = clone(state);
   trimLog(s);
+  s.reveals = [];
   const seat = actingSeat(s);
   const events: GameEvent[] = [{ type: res.kind, seat, detail: res }];
   if (res.kind === "DISCARD") {

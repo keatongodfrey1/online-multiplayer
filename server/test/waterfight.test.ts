@@ -395,6 +395,24 @@ describe("water fight room", () => {
     );
   });
 
+  it("forwards a Goggles peek to the peeker only", async () => {
+    const { room, clients } = await startedGame(61, 2, (r) => {
+      r.state.eventDensity = 0;
+    });
+    const [a, b] = clients;
+    let aReveal: any = null;
+    let bReveal: any = null;
+    a!.onMessage(WaterFightMsg.REVEAL, (p: unknown) => (aReveal = p));
+    b!.onMessage(WaterFightMsg.REVEAL, (p: unknown) => (bReveal = p));
+    room.engine.players[0]!.hand.push({ id: 10001, kind: "goggles" });
+    a!.send(WaterFightMsg.MOVE, { kind: "PLAY_SUPPORT", support: "goggles" });
+    await until(() => aReveal !== null);
+    assert.strictEqual(aReveal.kind, "deck-top");
+    assert.strictEqual(aReveal.cards.length, 3, "the peeker sees the top 3");
+    await sleep(80);
+    assert.strictEqual(bReveal, null, "the opponent never receives the peek");
+  });
+
   it("auto-advances a bot seat without any client input", async () => {
     const room = (await colyseus.createRoom(WATER_FIGHT, { seed: 21 })) as unknown as WaterFightRoom;
     const host = await colyseus.connectTo(room, { nickname: "Human" });
