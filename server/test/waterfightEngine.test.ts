@@ -938,6 +938,38 @@ describe("water fight engine: Flash Flood (G5)", () => {
     assert.equal(r.awaiting.seats[0], 0);
   });
 
+  it("a Flash Flood that drops an opponent to 0 soaks them into a Storm Cloud", () => {
+    const g = game(3, 9);
+    g.players[1]!.lives = 1; // seat 2 stays at the default starting lives
+    setHand(g, 0, ["flashflood"]);
+    setHand(g, 1, []);
+    setHand(g, 2, []);
+    let r = applyMove(g, { kind: "FLASH_FLOOD" });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" }); // seat 1: -2 -> soaked
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" }); // seat 2: -2 -> 1
+    assert.equal(r.state.players[1]!.out, true, "seat 1 soaked by the flood");
+    assert.equal(r.state.players[1]!.stormCloud, true, "soaked in normal play -> Storm Cloud");
+    assert.equal(r.state.players[2]!.lives, 1);
+    assert.equal(r.state.over, false, "seat 2 survived");
+  });
+
+  it("a Water Trap during a Flash Flood bounces only that instance back at the attacker", () => {
+    const g = game(3, 13);
+    setHand(g, 0, ["flashflood"]);
+    setHand(g, 1, []);
+    setHand(g, 2, ["watertrap"]);
+    let r = applyMove(g, { kind: "FLASH_FLOOD" }); // targets [1, 2], 2 damage each
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" }); // seat 1 takes 2
+    assert.equal(r.awaiting.kind, "REACT", "seat 2 (holding a Water Trap) gets a window");
+    assert.equal(r.awaiting.seats[0], 2);
+    r = applyResolution(r.state, { kind: "REACT", action: "watertrap" });
+    assert.equal(r.awaiting.seats[0], 0, "the attacker now defends the bounced flood instance");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 1, "seat 1 took the flood");
+    assert.equal(r.state.players[2]!.lives, 3, "seat 2 bounced its instance — unharmed");
+    assert.equal(r.state.players[0]!.lives, 1, "the attacker took the bounced 2");
+  });
+
   it("deals nothing in Sudden-Death (E9 suppresses table-wide damage)", () => {
     const g = game(3, 5);
     g.phase = "sudden-death";
@@ -1045,6 +1077,56 @@ describe("water fight engine: full-fidelity AoE (G4)", () => {
     assert.equal(r.state.players[2]!.lives, 3, "seat 2 bounced its own instance — unharmed");
     assert.equal(r.state.players[0]!.lives, 2, "the attacker took the bounce");
   });
+
+  it("a Mega WITH a spread opens per-target windows and runs the 2-block ladder for each", () => {
+    const g = game(3, 5);
+    setHand(g, 0, ["mega", "splashzone"]);
+    setHand(g, 1, ["miss", "miss"]); // two blocks fully stop a Mega
+    setHand(g, 2, []);
+    let r = applyMove(g, { kind: "PLAY_BIG", big: "mega", target: 1, spread: { modifier: "splashzone", extraTargets: [] } });
+    assert.equal(r.awaiting.seats[0], 1);
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "miss" });
+    assert.equal(r.awaiting.kind, "DEFEND", "Mega needs 2 blocks — still on seat 1");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "miss" });
+    r = applyResolution(r.state, { kind: "ATTACKER_RESPOND", respond: "pass" });
+    assert.equal(r.awaiting.seats[0], 2, "the next victim's own ladder opens");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 3, "seat 1 fully blocked the Mega");
+    assert.equal(r.state.players[2]!.lives, 2, "seat 2 took 1 (Mega damage)");
+  });
+
+  it("Soaker + spread negates each victim's hand-Miss across the splash (R2)", () => {
+    const g = game(3, 5);
+    setHand(g, 0, ["balloon", "splashzone", "soaker"]);
+    setHand(g, 1, ["miss"]); // would block, but Soaker negates it
+    setHand(g, 2, []);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1, soaker: true, spread: { modifier: "splashzone", extraTargets: [] } });
+    assert.equal(r.awaiting.seats[0], 1);
+    assert.ok(
+      !legalResolutions(r.state).some((o) => o.kind === "DEFEND" && o.defense === "miss"),
+      "Soaker removes the Miss option for a splash victim",
+    );
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 2, "Soaker negated seat 1's Miss");
+    assert.equal(r.state.players[2]!.lives, 2);
+  });
+
+  it("MAX_REACTIONS caps each splash target's ladder independently (resets per target)", () => {
+    const g = game(3, 5, { maxReactions: 2 });
+    setHand(g, 0, ["balloon", "splashzone", "hit"]);
+    setHand(g, 1, ["miss", "miss"]);
+    setHand(g, 2, []);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1, spread: { modifier: "splashzone", extraTargets: [] } });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "miss" }); // round 1
+    r = applyResolution(r.state, { kind: "ATTACKER_RESPOND", respond: "hit" }); // round 2
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "miss" }); // round 3 > cap -> seat 1 resolves
+    assert.equal(r.awaiting.seats[0], 2, "seat 2's instance opens with a fresh (reset) cap");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.ok(["MOVE", "DISCARD", "GAME_OVER"].includes(r.state.awaiting.kind) || r.state.over, "the AoE finished cleanly");
+  });
 });
 
 describe("water fight engine: peeks (G3)", () => {
@@ -1082,6 +1164,20 @@ describe("water fight engine: peeks (G3)", () => {
     assert.equal(r.state.awaiting.kind, "REACT", "the target gets a Towel window first");
     r = applyResolution(r.state, { kind: "REACT", action: "towel" });
     assert.equal(r.state.reveals.length, 0, "cancelled — nothing peeked");
+  });
+
+  it("Goggles near deck-out reveals only what remains (no error)", () => {
+    const g = game(2, 5);
+    g.players[0]!.hand.push({ id: 10001, kind: "goggles" });
+    g.mainDeck = [{ id: 5, kind: "balloon" }]; // one card left
+    const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "goggles" });
+    assert.equal(r.state.reveals[0]!.cards.length, 1, "reveals just the remaining card");
+
+    const g2 = game(2, 7);
+    g2.players[0]!.hand.push({ id: 10001, kind: "goggles" });
+    g2.mainDeck = [];
+    const r2 = applyMove(g2, { kind: "PLAY_SUPPORT", support: "goggles" });
+    assert.equal(r2.state.reveals[0]!.cards.length, 0, "empty deck -> empty reveal, no throw");
   });
 });
 
@@ -1143,6 +1239,66 @@ describe("water fight engine: new dials (G2)", () => {
     r = applyResolution(r.state, { kind: "DEFEND", defense: "miss" }); // round 3 > cap -> resolves
     assert.notEqual(r.state.awaiting.kind, "DEFEND", "the cap ended the ladder");
     assert.notEqual(r.state.awaiting.kind, "ATTACKER_RESPOND");
+  });
+
+  it("a Storm Cloud's SECOND throw can end the game mid-multi-throw", () => {
+    const g = game(4, 11, { stormThrows: 2 });
+    g.players[3]!.lives = 0;
+    g.players[3]!.out = true;
+    g.players[3]!.stormCloud = true;
+    setHand(g, 3, ["balloon", "balloon"]);
+    for (const seat of [0, 1, 2]) {
+      g.players[seat]!.lives = 1;
+      setHand(g, seat, []);
+    }
+    g.turnSeat = 3;
+    g.awaiting = { seats: [3], kind: "MOVE" };
+    g.splashPile = ["hit", "hit", "hit", "hit", "hit", "hit"];
+    let r = applyMove(g, { kind: "STORM_THROW" }); // soaks one of {0,1,2}
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.awaiting.kind, "MOVE", "two living remain -> the Storm Cloud throws again");
+    assert.equal(r.state.over, false);
+    r = applyMove(r.state, { kind: "STORM_THROW" }); // soaks a second -> one living left
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.over, true, "the second throw soaked the second-to-last -> game ends");
+    assert.equal(r.state.players[r.state.winner!]!.out, false, "the winner is the lone survivor");
+  });
+
+  it("a Storm Cloud's drawn Event is voided and still consumes a draw slot", () => {
+    const g = game(3, 5, { stormDraw: 2 });
+    g.players[2]!.lives = 0;
+    g.players[2]!.out = true;
+    g.players[2]!.stormCloud = true;
+    setHand(g, 2, []);
+    injectTopEvent(g, "mudslide"); // drawn first; a Storm Cloud's Event has no effect
+    g.turnSeat = 1;
+    g.awaiting = { seats: [1], kind: "MOVE" };
+    const r = applyMove(g, { kind: "END_TURN" }); // -> seat 2's Storm Cloud turn
+    assert.equal(r.state.turnSeat, 2);
+    assert.equal(r.state.players[0]!.lives, 3, "the voided Event dealt no table damage");
+    assert.equal(r.state.players[1]!.lives, 3);
+    assert.equal(r.state.players[2]!.hand.length, 1, "stormDraw 2: the Event ate a slot, only 1 real card drawn");
+  });
+
+  it("a custom-deck game reshuffles its discard against the dialed mainIdMax", () => {
+    const g = createGame(2, 5, { mainHit: 5, mainMiss: 5, eventDensity: 0 });
+    g.mainDiscard.push(...g.mainDeck.splice(0)); // drain the deck into the discard
+    assert.equal(g.mainDeck.length, 0);
+    const drawn = drawMainCard(g); // forces a reshuffle
+    assert.ok(drawn, "reshuffled the dialed discard into a fresh deck");
+    g.players[0]!.hand.push(drawn!); // keep conservation (the drawn card now lives in a hand)
+    assertInvariants(g); // conserves against mainIdMax = 51, not the default
+  });
+
+  it("the deck dial accepts 0 Hit (or 0 Miss) hand-cards", () => {
+    const g0 = createGame(3, 5, { mainHit: 0, eventDensity: 0 });
+    assert.equal(g0.mainIdMax, 61, "20 balloon + 20 miss + 0 hit + 20 treasure + 1 wild");
+    const hits = [...g0.mainDeck, ...g0.players.flatMap((p) => p.hand)].filter((c) => c.kind === "hit").length;
+    assert.equal(hits, 0, "no Hit hand-cards exist when the dial is 0");
+    assertInvariants(g0);
+    const g1 = createGame(3, 7, { mainMiss: 0, eventDensity: 0 });
+    assert.equal(g1.mainIdMax, 61);
+    assertInvariants(g1);
   });
 });
 

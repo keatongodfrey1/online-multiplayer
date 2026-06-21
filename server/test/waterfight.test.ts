@@ -364,6 +364,64 @@ describe("water fight room", () => {
     assert.strictEqual(room2.engine.awaiting.seats[0], 1, "the defender is still the awaited seat");
   });
 
+  it("re-sends the last peek to a reconnecting peeker (syncPrivate)", async () => {
+    const { room, clients } = await startedGame(64, 2, (r) => {
+      r.state.eventDensity = 0;
+    });
+    const a = clients[0]!;
+    let reveals = 0;
+    a.onMessage(WaterFightMsg.REVEAL, () => (reveals += 1));
+    room.engine.players[0]!.hand.push({ id: 10001, kind: "goggles" });
+    a.send(WaterFightMsg.MOVE, { kind: "PLAY_SUPPORT", support: "goggles" });
+    await until(() => reveals === 1);
+
+    // Refresh-style reconnect: the peeker should re-receive its last peek.
+    const token = a.reconnectionToken;
+    const aSessionId = a.sessionId;
+    await a.leave(false);
+    await until(() => room.state.players.get(aSessionId)?.connected === false);
+    const a2 = await colyseus.sdk.reconnect(token);
+    let re: any = null;
+    a2.onMessage(WaterFightMsg.REVEAL, (p: unknown) => (re = p));
+    await until(() => re !== null, 5000);
+    assert.strictEqual(re.kind, "deck-top", "the reconnecting peeker re-receives its last peek");
+    assert.strictEqual(re.cards.length, 3);
+  });
+
+  it("saves and resumes a mid-AoE (per-target reaction) state", async () => {
+    const { room, clients } = await startedGame(57, 3);
+    const a = clients[0]!;
+    // Move a real Splash Zone (shop) + balloon (deck) into seat 0 — both conservation-preserving,
+    // so the saved blob passes the validator's assertInvariants gate.
+    const sz = room.engine.stacks.attack.findIndex((c) => c.kind === "splashzone");
+    room.engine.players[0]!.hand.push(room.engine.stacks.attack.splice(sz, 1)[0]!);
+    const bi = room.engine.mainDeck.findIndex((c) => c.kind === "balloon");
+    room.engine.players[0]!.hand.push(room.engine.mainDeck.splice(bi, 1)[0]!);
+    room.engine.splashPile[room.engine.splashPile.length - 1] = "hit"; // force the flip, keep the count
+    a.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1, spread: { modifier: "splashzone", extraTargets: [] } });
+    await until(() => room.engine.awaiting.attack?.perTargetReactions === true);
+
+    let saved: any = null;
+    a.onMessage(ServerMsg.SAVE_DATA, (blob: unknown) => (saved = blob));
+    a.send(LobbyMsg.SAVE, {});
+    await until(() => saved !== null);
+    const parsed = parseSave(saved);
+    assert.ok(parsed, "the mid-AoE blob validates");
+    assert.strictEqual(parsed!.engine.awaiting.attack!.perTargetReactions, true, "the per-target flag survives");
+    assert.ok(Array.isArray(parsed!.engine.awaiting.attack!.redirectedSeats), "redirectedSeats restored");
+
+    const room2 = (await colyseus.createRoom(WATER_FIGHT, {})) as unknown as WaterFightRoom;
+    const c0 = await colyseus.connectTo(room2, { nickname: "Player0" });
+    await colyseus.connectTo(room2, { nickname: "Player1" });
+    await colyseus.connectTo(room2, { nickname: "Player2" });
+    c0.send(LobbyMsg.LOAD, saved);
+    await until(() => room2.state.loadedSave !== "");
+    c0.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+    assert.strictEqual(room2.engine.awaiting.attack!.perTargetReactions, true, "resumed the multi-target attack");
+    assert.strictEqual(room2.engine.awaiting.attack!.targets.length, 2, "both splash targets preserved");
+  });
+
   it("a game against a bot reaches a winner (the bot self-advances)", async function () {
     this.timeout(60000);
     const room = (await colyseus.createRoom(WATER_FIGHT, { seed: 88 })) as unknown as WaterFightRoom;
