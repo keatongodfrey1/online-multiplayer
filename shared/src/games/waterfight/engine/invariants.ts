@@ -66,8 +66,9 @@ export function assertInvariants(s: GameState): void {
 
   // --- pending action / reaction window consistency ---
   if (s.awaiting.kind === "REACT") {
-    if (!s.pending) throw new Error("REACT window without a pending action");
-    if (s.players[s.pending.target]?.out) throw new Error("reaction targets a soaked seat");
+    // Either a pre-flip pending action OR a mid-attack per-target reaction.
+    if (!s.pending && !s.awaiting.attack) throw new Error("REACT window without a pending action or attack");
+    if (s.pending && s.players[s.pending.target]?.out) throw new Error("reaction targets a soaked seat");
   } else if (s.pending) {
     throw new Error("pending action set outside a REACT window");
   }

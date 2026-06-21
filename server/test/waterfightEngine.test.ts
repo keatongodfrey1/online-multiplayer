@@ -908,6 +908,63 @@ describe("water fight engine: effects + edges (review)", () => {
   });
 });
 
+describe("water fight engine: full-fidelity AoE (G4)", () => {
+  it("each splash victim reacts to their OWN instance; one peeling doesn't spare the others (R3)", () => {
+    const g = game(3, 7);
+    setHand(g, 0, ["balloon", "splashzone"]);
+    setHand(g, 1, ["towel"]); // seat 1 Towels its own splash
+    setHand(g, 2, []); // seat 2 has nothing — gets soaked
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1, spread: { modifier: "splashzone", extraTargets: [] } });
+    assert.equal(r.awaiting.kind, "REACT", "the first victim gets its own reaction window");
+    assert.equal(r.awaiting.seats[0], 1);
+    r = applyResolution(r.state, { kind: "REACT", action: "towel" }); // peels seat 1 only
+    assert.equal(r.awaiting.kind, "DEFEND", "the next victim still has to defend");
+    assert.equal(r.awaiting.seats[0], 2);
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 3, "seat 1 Towelled its splash — unharmed");
+    assert.equal(r.state.players[2]!.lives, 2, "seat 2 still got soaked");
+  });
+
+  it("a victim's Redirect peels only their instance and reroutes it", () => {
+    const g = game(4, 5);
+    setHand(g, 0, ["balloon", "splashzone"]);
+    setHand(g, 1, []);
+    setHand(g, 2, ["redirect"]); // seat 2 redirects its splash to the attacker
+    setHand(g, 3, []);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1, spread: { modifier: "splashzone", extraTargets: [] } });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" }); // seat 1 soaked
+    assert.equal(r.awaiting.seats[0], 2, "seat 2's reaction window");
+    r = applyResolution(r.state, { kind: "REACT", action: "redirect", target: 0 }); // -> the attacker
+    assert.equal(r.awaiting.seats[0], 0, "the attacker now defends seat 2's instance");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.awaiting.seats[0], 3, "seat 3's own instance still lands");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 2, "seat 1 soaked");
+    assert.equal(r.state.players[2]!.lives, 3, "seat 2 peeled its own instance — unharmed");
+    assert.equal(r.state.players[3]!.lives, 2, "seat 3 soaked");
+    assert.equal(r.state.players[0]!.lives, 2, "the attacker took the redirected instance");
+  });
+
+  it("a victim's Water Trap bounces only their instance back at the attacker", () => {
+    const g = game(3, 9);
+    setHand(g, 0, ["balloon", "splashzone"]);
+    setHand(g, 1, []);
+    setHand(g, 2, ["watertrap"]);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1, spread: { modifier: "splashzone", extraTargets: [] } });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" }); // seat 1 soaked
+    assert.equal(r.awaiting.seats[0], 2);
+    r = applyResolution(r.state, { kind: "REACT", action: "watertrap" });
+    assert.equal(r.awaiting.seats[0], 0, "the attacker now defends the bounced instance");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 2, "seat 1 soaked");
+    assert.equal(r.state.players[2]!.lives, 3, "seat 2 bounced its own instance — unharmed");
+    assert.equal(r.state.players[0]!.lives, 2, "the attacker took the bounce");
+  });
+});
+
 describe("water fight engine: peeks (G3)", () => {
   it("Goggles reveals the top 3 of the draw pile to the peeker (a peek, not a draw)", () => {
     const g = game(2, 5);

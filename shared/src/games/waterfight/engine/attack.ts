@@ -49,7 +49,9 @@ export function bigStats(big: BigKind): { blockNumber: number; damage: number } 
   }
 }
 
-/** Set up an attack against its target list and open the first target's ladder. */
+/** Set up an attack against its target list and open the first target's ladder.
+ *  engine.ts wraps this to insert a per-target reaction window when
+ *  perTargetReactions is set (multi-target). */
 export function openAttack(
   s: GameState,
   attackerSeat: number,
@@ -58,6 +60,7 @@ export function openAttack(
   blockNumber: number,
   damage: number,
   soaker: boolean,
+  perTargetReactions: boolean,
 ): void {
   const attack: AttackState = {
     attackerSeat,
@@ -67,6 +70,8 @@ export function openAttack(
     blockNumber,
     damage,
     soaker,
+    perTargetReactions,
+    redirectedSeats: [],
     missBlocks: 0,
     umbrellaBlock: false,
     rounds: 0,

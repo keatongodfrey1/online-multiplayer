@@ -172,15 +172,19 @@ function rebuildEngine(e: unknown): GameState {
   if (awaiting.kind === "MOVE") {
     need(head === (e.turnSeat as number), "a MOVE await must head the turn seat");
   }
+  // DEFEND/ATTACKER_RESPOND always have an attack; REACT may (mid-attack per-target
+  // reaction) or may not (pre-flip pending); other kinds never do.
   if (awaiting.kind === "DEFEND" || awaiting.kind === "ATTACKER_RESPOND") {
     need(awaiting.attack, "a ladder await needs an attack");
-    need(alive(awaiting.attack!.attackerSeat), "the attacker is soaked");
-    need(alive(awaiting.attack!.targets[awaiting.attack!.targetIdx]), "the ladder target is soaked");
-  } else {
+  } else if (awaiting.kind !== "REACT") {
     need(!awaiting.attack, "an attack is present without a ladder await");
   }
+  if (awaiting.attack) {
+    need(alive(awaiting.attack.attackerSeat), "the attacker is soaked");
+    need(alive(awaiting.attack.targets[awaiting.attack.targetIdx]), "the ladder/reaction target is soaked");
+  }
   if (awaiting.kind === "REACT") {
-    need(pending, "a REACT await needs a pending action");
+    need(pending || awaiting.attack, "a REACT await needs a pending action or an attack");
   } else {
     need(!pending, "a pending action is present without a REACT await");
   }
@@ -242,6 +246,8 @@ function rebuildAttack(a: unknown, n: number): NonNullable<GameState["awaiting"]
     blockNumber: a.blockNumber as number,
     damage: a.damage as number,
     soaker: a.soaker as boolean,
+    perTargetReactions: a.perTargetReactions === true,
+    redirectedSeats: Array.isArray(a.redirectedSeats) ? (a.redirectedSeats as unknown[]).filter((v) => intIn(v, 0, n - 1)) : [],
     missBlocks: Math.max(0, a.missBlocks as number),
     umbrellaBlock: a.umbrellaBlock as boolean,
     rounds: Math.max(0, a.rounds as number),

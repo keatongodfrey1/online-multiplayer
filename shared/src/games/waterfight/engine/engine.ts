@@ -474,14 +474,38 @@ function afterAttack(s: GameState, kind: AttackKind): void {
   endActiveTurn(s);
 }
 
-/** Apply the current target's result, then advance to the next target or finish. */
-function resolveTarget(s: GameState, hit: boolean): void {
+/** Open an attack; for a multi-target attack, give the first target its own
+ *  reaction window (each victim peels only its own instance — R3). */
+function launchAttack(
+  s: GameState,
+  attacker: number,
+  targets: number[],
+  kind: AttackKind,
+  blockNumber: number,
+  damage: number,
+  soaker: boolean,
+  perTarget: boolean,
+): void {
+  openAttack(s, attacker, targets, kind, blockNumber, damage, soaker, perTarget);
+  maybeReactWindow(s);
+}
+
+/** Convert the current target's DEFEND into a per-instance reaction window when
+ *  it's a multi-target attack and that target can still peel (Towel/Redirect/
+ *  Water Trap). Single-target attacks already reacted pre-flip, so this no-ops. */
+function maybeReactWindow(s: GameState): void {
+  const atk = s.awaiting.attack;
+  if (!atk || !atk.perTargetReactions) return;
+  const target = currentTarget(atk);
+  if (!atk.redirectedSeats.includes(target) && hasUsefulReaction(s.players[target]!, "THROW")) {
+    s.awaiting = { seats: [target], kind: "REACT", attack: atk };
+  }
+}
+
+/** Advance to the next still-living target (its reaction window then ladder), or
+ *  finish the attack. Win-checks after each target. */
+function nextTargetOrFinish(s: GameState): void {
   const atk = s.awaiting.attack!;
-  const tSeat = currentTarget(atk);
-  // E9: in Sudden-Death, multi-target attacks deal no damage (single-target only).
-  const suppressed = s.phase === "sudden-death" && atk.targets.length > 1;
-  if (hit && !suppressed) damageSeat(s, tSeat, atk.damage);
-  else s.log.push(`attack on seat ${tSeat} ${hit ? "suppressed (Sudden-Death AoE)" : "missed"}`);
   const living = livingSeats(s);
   if (living.length <= 1) {
     endGame(s, living[0] ?? null, "last-standing");
@@ -491,9 +515,21 @@ function resolveTarget(s: GameState, hit: boolean): void {
   while (atk.targetIdx < atk.targets.length && s.players[atk.targets[atk.targetIdx]!]!.out) atk.targetIdx += 1;
   if (atk.targetIdx < atk.targets.length) {
     openTarget(s);
+    maybeReactWindow(s);
     return;
   }
   afterAttack(s, atk.kind);
+}
+
+/** Apply the current target's ladder result, then move on. */
+function resolveTarget(s: GameState, hit: boolean): void {
+  const atk = s.awaiting.attack!;
+  const tSeat = currentTarget(atk);
+  // E9: in Sudden-Death, multi-target attacks deal no damage (single-target only).
+  const suppressed = s.phase === "sudden-death" && atk.targets.length > 1;
+  if (hit && !suppressed) damageSeat(s, tSeat, atk.damage);
+  else s.log.push(`attack on seat ${tSeat} ${hit ? "suppressed (Sudden-Death AoE)" : "missed"}`);
+  nextTargetOrFinish(s);
 }
 
 const REACTION_CARDS: CardKind[] = ["towel", "redirect", "watertrap"];
@@ -518,24 +554,25 @@ function offerReaction(s: GameState, pending: PendingAction): void {
   resolvePending(s);
 }
 
-/** Flip the Splash Pile for a (possibly redirected) basic throw, then resolve a
- *  Miss or open the ladder (spread consumed only on a Hit — E3). */
+/** Flip the Splash Pile for a basic throw, then resolve a Miss or open the ladder.
+ *  A spread is consumed only on a Hit (E3) and opens per-target reaction windows. */
 function resolveThrowFlip(s: GameState, attacker: number, target: number, soaker: boolean, spread?: Spread): void {
   const verdict = flipSplash(s);
   s.log.push(`seat ${attacker} throws at ${target}: splash ${verdict}`);
   if (verdict === "miss") {
-    afterAttack(s, "basic");
+    afterAttack(s, "basic"); // spread NOT consumed on a Miss
     return;
   }
-  let targets = [target];
   if (spread) {
     spendKind(s, attacker, spread.modifier);
-    targets = buildSpreadTargets(s, attacker, target, spread);
+    launchAttack(s, attacker, buildSpreadTargets(s, attacker, target, spread), "basic", 1, 1, soaker, true);
+  } else {
+    launchAttack(s, attacker, [target], "basic", 1, 1, soaker, false);
   }
-  openAttack(s, attacker, targets, "basic", 1, 1, soaker);
 }
 
-/** Execute the committed pending action now that the reaction window has passed. */
+/** Execute a committed SINGLE-target action after its pre-flip reaction window
+ *  passed (spread attacks skip pending — they open per-target windows instead). */
 function resolvePending(s: GameState): void {
   const pa = s.pending!;
   s.pending = null;
@@ -545,31 +582,35 @@ function resolvePending(s: GameState): void {
     return;
   }
   if (pa.kind === "THROW") {
-    resolveThrowFlip(s, pa.attacker, pa.target, !!pa.soaker, pa.spread);
+    resolveThrowFlip(s, pa.attacker, pa.target, !!pa.soaker);
     return;
   }
-  // PLAY_BIG auto-connects (E2)
+  // PLAY_BIG auto-connects (E2), single target
   const { blockNumber, damage } = bigStats(pa.big!);
-  let targets = [pa.target];
-  if (pa.spread) {
-    spendKind(s, pa.attacker, pa.spread.modifier);
-    targets = buildSpreadTargets(s, pa.attacker, pa.target, pa.spread);
-  }
-  openAttack(s, pa.attacker, targets, pa.big!, blockNumber, damage, !!pa.soaker);
+  launchAttack(s, pa.attacker, [pa.target], pa.big!, blockNumber, damage, !!pa.soaker, false);
 }
 
-/** Commit a basic throw (spend balloon + Soaker), then open the reaction window. */
+/** Commit a basic throw. Single-target: a pre-flip reaction window. Multi-target:
+ *  no pre-flip window — each victim reacts to its own instance post-Hit (R3). */
 function startThrow(s: GameState, attacker: number, target: number, soaker: boolean, spread?: Spread): void {
   spendKind(s, attacker, "balloon");
   if (soaker) spendKind(s, attacker, "soaker"); // R2: declared pre-flip (wasted on a Miss)
-  offerReaction(s, { kind: "THROW", attacker, target, soaker, spread, redirectedSeats: [] });
+  if (spread) resolveThrowFlip(s, attacker, target, soaker, spread);
+  else offerReaction(s, { kind: "THROW", attacker, target, soaker, redirectedSeats: [] });
 }
 
-/** Commit a big attack (spend the card + Soaker), then open the reaction window. */
+/** Commit a big attack. Single-target: pre-flip reaction window. Multi-target:
+ *  auto-connect straight into per-target reaction windows. */
 function startBig(s: GameState, attacker: number, target: number, big: BigKind, soaker: boolean, spread?: Spread): void {
   spendKind(s, attacker, big);
   if (soaker) spendKind(s, attacker, "soaker");
-  offerReaction(s, { kind: "PLAY_BIG", attacker, target, big, soaker, spread, redirectedSeats: [] });
+  const { blockNumber, damage } = bigStats(big);
+  if (spread) {
+    spendKind(s, attacker, spread.modifier);
+    launchAttack(s, attacker, buildSpreadTargets(s, attacker, target, spread), big, blockNumber, damage, soaker, true);
+  } else {
+    offerReaction(s, { kind: "PLAY_BIG", attacker, target, big, soaker, redirectedSeats: [] });
+  }
 }
 
 // ---- legal surface ----------------------------------------------------------
@@ -629,16 +670,19 @@ export function legalResolutions(s: GameState): Resolution[] {
   if (seat < 0) return [];
   const p = s.players[seat]!;
   if (s.awaiting.kind === "REACT") {
-    const pa = s.pending!;
     const out: Resolution[] = [{ kind: "REACT", action: "pass" }];
     if (handHas(p, "towel")) out.push({ kind: "REACT", action: "towel" });
-    const canDiscrete = pa.kind !== "SUPPORT" && !pa.redirectedSeats.includes(seat); // Redirect/Trap: attacks only, once/seat
+    // Mid-attack per-target reaction (attack set) vs pre-flip pending reaction.
+    const atk = s.awaiting.attack;
+    const attacker = atk ? atk.attackerSeat : s.pending!.attacker;
+    const isSupport = !atk && s.pending!.kind === "SUPPORT";
+    const redirected = atk ? atk.redirectedSeats : s.pending!.redirectedSeats;
+    const canDiscrete = !isSupport && !redirected.includes(seat); // Redirect/Trap: attacks only, once/seat
     if (canDiscrete && handHas(p, "redirect")) {
       for (const t of livingSeats(s)) if (t !== seat) out.push({ kind: "REACT", action: "redirect", target: t });
     }
-    // Water Trap bounces to the attacker, so it is unavailable vs a Storm Cloud
-    // splash (a Storm Cloud cannot be targeted).
-    if (canDiscrete && handHas(p, "watertrap") && !s.players[pa.attacker]!.out) {
+    // Water Trap bounces to the attacker, so it is unavailable vs a Storm Cloud splash.
+    if (canDiscrete && handHas(p, "watertrap") && !s.players[attacker]!.out) {
       out.push({ kind: "REACT", action: "watertrap" });
     }
     return out;
@@ -744,14 +788,17 @@ function validateResolution(s: GameState, res: Resolution): void {
     if (res.kind !== "REACT") throw new Error("must react");
     const reactor = actingSeat(s);
     const rp = s.players[reactor]!;
-    const pa = s.pending!;
+    const atk = s.awaiting.attack; // mid-attack per-target reaction vs pre-flip pending
+    const attacker = atk ? atk.attackerSeat : s.pending!.attacker;
+    const isSupport = !atk && s.pending!.kind === "SUPPORT";
+    const redirected = atk ? atk.redirectedSeats : s.pending!.redirectedSeats;
     if (res.action === "pass") return;
     if (res.action === "towel") {
       if (!handHas(rp, "towel")) throw new Error("no Towel in hand");
       return;
     }
-    if (pa.kind === "SUPPORT") throw new Error("Redirect/Water Trap apply to attacks only");
-    if (pa.redirectedSeats.includes(reactor)) throw new Error("already used a discrete reaction this attack");
+    if (isSupport) throw new Error("Redirect/Water Trap apply to attacks only");
+    if (redirected.includes(reactor)) throw new Error("already used a discrete reaction this attack");
     if (res.action === "redirect") {
       if (!handHas(rp, "redirect")) throw new Error("no Redirect in hand");
       if (res.target === undefined || res.target === reactor) throw new Error("invalid Redirect target");
@@ -760,7 +807,7 @@ function validateResolution(s: GameState, res: Resolution): void {
       return;
     }
     if (!handHas(rp, "watertrap")) throw new Error("no Water Trap in hand");
-    if (s.players[pa.attacker]!.out) throw new Error("cannot Water Trap a Storm Cloud's splash");
+    if (s.players[attacker]!.out) throw new Error("cannot Water Trap a Storm Cloud's splash");
     return;
   }
   if (res.kind === "REACT") throw new Error("not awaiting a reaction");
@@ -894,6 +941,33 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
     return { state: s, awaiting: s.awaiting, events };
   }
   if (res.kind === "REACT") {
+    // Per-target reaction DURING a multi-target attack (each victim peels only
+    // its own instance — R3). Distinguished by an attack already in progress.
+    if (s.awaiting.attack) {
+      const atk = s.awaiting.attack;
+      if (res.action === "pass") {
+        s.awaiting = { seats: [currentTarget(atk)], kind: "DEFEND", attack: atk }; // to this target's ladder
+        return { state: s, awaiting: s.awaiting, events };
+      }
+      if (res.action === "towel") {
+        spendKind(s, seat, "towel");
+        s.log.push(`seat ${seat} Towels their splash`);
+        nextTargetOrFinish(s); // THIS instance cancelled; the rest still land
+        return { state: s, awaiting: s.awaiting, events };
+      }
+      atk.redirectedSeats.push(seat); // Redirect / Water Trap peel only this instance
+      if (res.action === "redirect") {
+        spendKind(s, seat, "redirect");
+        atk.targets[atk.targetIdx] = res.target!;
+        s.log.push(`seat ${seat} Redirects their splash to ${res.target}`);
+      } else {
+        spendKind(s, seat, "watertrap");
+        atk.targets[atk.targetIdx] = atk.attackerSeat; // bounce this instance to the attacker
+        s.log.push(`seat ${seat} Water Traps their splash back at ${atk.attackerSeat}`);
+      }
+      s.awaiting = { seats: [currentTarget(atk)], kind: "DEFEND", attack: atk };
+      return { state: s, awaiting: s.awaiting, events };
+    }
     const pa = s.pending!;
     if (res.action === "pass") {
       resolvePending(s);

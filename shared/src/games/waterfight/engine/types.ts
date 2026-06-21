@@ -156,6 +156,11 @@ export interface AttackState {
   damage: number; // basic/mega/golden = 1, giant = 2
   /** Soaker Cannon: hand-Miss cards are negated for this whole attack (R2). */
   soaker: boolean;
+  /** Multi-target (R3): each target gets its OWN pre-ladder reaction window and a
+   *  peel (Redirect/Water Trap) affects only that instance — the rest still land. */
+  perTargetReactions: boolean;
+  /** Seats that already spent a discrete reaction (Redirect/Water Trap) this attack. */
+  redirectedSeats: number[];
   // ---- ladder state for the CURRENT target ----
   /** Miss cards currently placed toward blockNumber. */
   missBlocks: number;
