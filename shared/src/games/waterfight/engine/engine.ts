@@ -4,19 +4,22 @@
 // attack.ts; this module owns the turn flow, draws, damage/soak/win, and the
 // legal-move surface that policies (bots/fuzz) read.
 
-import { advanceAttack, startAttack, startBigAttack, type AttackOutcome } from "./attack.js";
+import { advanceLadder, bigStats, currentTarget, openAttack, openTarget } from "./attack.js";
 import { DRAW_PER_TURN } from "./data.js";
-import { discardCard, drawMainCard } from "./deck.js";
+import { discardCard, drawMainCard, flipSplash } from "./deck.js";
 import { rand } from "./rng.js";
 import {
   ApplyResult,
+  AttackKind,
   Awaiting,
+  BigKind,
   CardKind,
   GameEvent,
   GameState,
   Move,
   PlayerState,
   Resolution,
+  Spread,
   StackId,
   SupportKind,
 } from "./types.js";
@@ -228,31 +231,98 @@ function advanceTurn(s: GameState): void {
   startTurn(s, next);
 }
 
-/** Apply the resolved attack's consequence, then end the attacker's turn. */
-function finishAttack(s: GameState, hit: boolean): void {
+/** Remove one card of `kind` from a seat's hand to the discard/used pile. */
+function spendKind(s: GameState, seat: number, kind: CardKind): void {
+  const hand = s.players[seat]!.hand;
+  const idx = hand.findIndex((c) => c.kind === kind);
+  if (idx < 0) throw new Error(`seat ${seat} has no ${kind}`);
+  discardCard(s, hand.splice(idx, 1)[0]!);
+}
+
+/** The seats a spread modifier hits (deduped, living opponents only, ≤3 for
+ *  Triple Splash). The primary target leads; the rest inherit the one Hit (E3). */
+function buildSpreadTargets(s: GameState, attacker: number, primary: number, spread: Spread): number[] {
+  const opp = livingSeats(s).filter((t) => t !== attacker);
+  if (spread.modifier === "splashzone") return [primary, ...opp.filter((t) => t !== primary)];
+  const set = new Set<number>([primary, ...spread.extraTargets.filter((t) => opp.includes(t))]);
+  return [...set].slice(0, 3);
+}
+
+/** After the whole attack resolves: Golden's draw, then an extra throw window
+ *  (Launcher / Rapid Fire — E4) or end the turn. */
+function afterAttack(s: GameState, attacker: number, kind: AttackKind): void {
+  if (kind === "golden") {
+    drawCards(s, attacker, 2); // Golden draws 2 whether it hit or missed (E2)
+    s.log.push(`seat ${attacker} draws 2 (Golden)`);
+  }
+  s.awaiting = { seats: [], kind: "GAME_OVER" }; // clears the attack
+  const p = s.players[attacker]!;
+  if (!p.out && (handHas(p, "launcher") || handHas(p, "rapidfire")) && handHas(p, "balloon")) {
+    s.awaiting = { seats: [attacker], kind: "EXTRA_THROW" }; // E4: optional extra basic throw
+    return;
+  }
+  endActiveTurn(s);
+}
+
+/** Apply the current target's result, then advance to the next target or finish. */
+function resolveTarget(s: GameState, hit: boolean): void {
   const atk = s.awaiting.attack!;
+  const tSeat = currentTarget(atk);
   if (hit) {
-    const target = s.players[atk.targetSeat]!;
-    target.lives = Math.max(0, target.lives - atk.damage);
-    s.log.push(`seat ${atk.targetSeat} hit for ${atk.damage} -> ${target.lives} lives`);
-    if (target.lives <= 0) {
-      target.out = true;
-      s.log.push(`seat ${atk.targetSeat} is SOAKED`);
+    const t = s.players[tSeat]!;
+    t.lives = Math.max(0, t.lives - atk.damage);
+    s.log.push(`seat ${tSeat} hit for ${atk.damage} -> ${t.lives} lives`);
+    if (t.lives <= 0) {
+      t.out = true;
+      s.log.push(`seat ${tSeat} is SOAKED`);
     }
   } else {
-    s.log.push(`attack on seat ${atk.targetSeat} missed`);
+    s.log.push(`attack on seat ${tSeat} missed`);
   }
-  if (atk.kind === "golden") {
-    drawCards(s, atk.attackerSeat, 2); // Golden draws 2 whether it hits or misses
-    s.log.push(`seat ${atk.attackerSeat} draws 2 (Golden)`);
-  }
-  s.awaiting = { seats: [], kind: "GAME_OVER" }; // cleared; reset by advanceTurn unless over
   const living = livingSeats(s);
   if (living.length <= 1) {
     endGame(s, living[0] ?? null, "last-standing");
     return;
   }
-  endActiveTurn(s);
+  atk.targetIdx += 1; // skip any targets already soaked by an earlier instance
+  while (atk.targetIdx < atk.targets.length && s.players[atk.targets[atk.targetIdx]!]!.out) atk.targetIdx += 1;
+  if (atk.targetIdx < atk.targets.length) {
+    openTarget(s);
+    return;
+  }
+  afterAttack(s, atk.attackerSeat, atk.kind);
+}
+
+/** Throw a basic Water Balloon: spend balloon + Soaker, flip, then resolve a Miss
+ *  or open the ladder (spending the spread modifier only on a Hit — E3). */
+function startThrow(s: GameState, attacker: number, target: number, soaker: boolean, spread?: Spread): void {
+  spendKind(s, attacker, "balloon");
+  if (soaker) spendKind(s, attacker, "soaker"); // R2: declared pre-flip (wasted on a Miss)
+  const verdict = flipSplash(s);
+  s.log.push(`seat ${attacker} throws at ${target}: splash ${verdict}`);
+  if (verdict === "miss") {
+    afterAttack(s, attacker, "basic");
+    return;
+  }
+  let targets = [target];
+  if (spread) {
+    spendKind(s, attacker, spread.modifier);
+    targets = buildSpreadTargets(s, attacker, target, spread);
+  }
+  openAttack(s, attacker, targets, "basic", 1, 1, soaker);
+}
+
+/** Play a big attack (auto-connect, E2): spend the card + Soaker + spread. */
+function startBig(s: GameState, attacker: number, target: number, big: BigKind, soaker: boolean, spread?: Spread): void {
+  spendKind(s, attacker, big);
+  if (soaker) spendKind(s, attacker, "soaker");
+  const { blockNumber, damage } = bigStats(big);
+  let targets = [target];
+  if (spread) {
+    spendKind(s, attacker, spread.modifier);
+    targets = buildSpreadTargets(s, attacker, target, spread);
+  }
+  openAttack(s, attacker, targets, big, blockNumber, damage, soaker);
 }
 
 // ---- legal surface ----------------------------------------------------------
@@ -273,7 +343,21 @@ export function legalMoves(s: GameState): Move[] {
       }
     }
   }
-  if (handHas(p, "balloon")) for (const t of opponents) moves.push({ kind: "THROW", target: t });
+  if (handHas(p, "balloon")) {
+    for (const t of opponents) {
+      moves.push({ kind: "THROW", target: t });
+      if (handHas(p, "soaker")) moves.push({ kind: "THROW", target: t, soaker: true }); // R2 pre-flip gamble
+    }
+    if (opponents.length >= 2) {
+      // Spread variants (only meaningful with ≥2 opponents); primary leads the list.
+      if (handHas(p, "splashzone")) {
+        moves.push({ kind: "THROW", target: opponents[0]!, spread: { modifier: "splashzone", extraTargets: [] } });
+      }
+      if (handHas(p, "triplesplash")) {
+        moves.push({ kind: "THROW", target: opponents[0]!, spread: { modifier: "triplesplash", extraTargets: opponents.slice(1, 3) } });
+      }
+    }
+  }
   for (const big of ["mega", "giant", "golden"] as const) {
     if (handHas(p, big)) for (const t of opponents) moves.push({ kind: "PLAY_BIG", big, target: t });
   }
@@ -291,7 +375,7 @@ export function legalResolutions(s: GameState): Resolution[] {
   const p = s.players[seat]!;
   if (s.awaiting.kind === "DEFEND") {
     const out: Resolution[] = [{ kind: "DEFEND", defense: "pass" }];
-    if (handHas(p, "miss")) out.push({ kind: "DEFEND", defense: "miss" });
+    if (!s.awaiting.attack?.soaker && handHas(p, "miss")) out.push({ kind: "DEFEND", defense: "miss" }); // R2: Soaker negates hand-Miss
     if (handHas(p, "umbrella")) out.push({ kind: "DEFEND", defense: "umbrella" });
     if (handHas(p, "wild")) out.push({ kind: "DEFEND", defense: "wild_miss" });
     return out;
@@ -300,6 +384,13 @@ export function legalResolutions(s: GameState): Resolution[] {
     const out: Resolution[] = [{ kind: "ATTACKER_RESPOND", respond: "pass" }];
     if (handHas(p, "hit")) out.push({ kind: "ATTACKER_RESPOND", respond: "hit" });
     if (handHas(p, "wild")) out.push({ kind: "ATTACKER_RESPOND", respond: "wild_hit" });
+    return out;
+  }
+  if (s.awaiting.kind === "EXTRA_THROW") {
+    const out: Resolution[] = [{ kind: "EXTRA", action: "pass" }];
+    if (handHas(p, "balloon")) {
+      for (const t of livingSeats(s)) if (t !== seat) out.push({ kind: "EXTRA", action: "throw", target: t });
+    }
     return out;
   }
   return [];
@@ -346,6 +437,14 @@ function validateMove(s: GameState, move: Move): void {
   } else if (!handHas(p, move.big)) {
     throw new Error(`no ${move.big} in hand`);
   }
+  if (move.soaker && !handHas(p, "soaker")) throw new Error("no Soaker Cannon in hand");
+  if (move.spread) {
+    if (!handHas(p, move.spread.modifier)) throw new Error(`no ${move.spread.modifier} in hand`);
+    if (livingSeats(s).filter((x) => x !== seat).length < 2) throw new Error("spread needs >= 2 living opponents");
+    for (const et of move.spread.extraTargets) {
+      if (et === seat || !s.players[et] || s.players[et]!.out) throw new Error("invalid spread target");
+    }
+  }
 }
 
 function validateResolution(s: GameState, res: Resolution): void {
@@ -361,6 +460,19 @@ function validateResolution(s: GameState, res: Resolution): void {
     return;
   }
   if (res.kind === "DISCARD") throw new Error("not awaiting a discard");
+  if (s.awaiting.kind === "EXTRA_THROW") {
+    if (res.kind !== "EXTRA") throw new Error("must resolve the extra throw");
+    if (res.action === "pass") return;
+    const seat = actingSeat(s);
+    const p = s.players[seat]!;
+    if (res.target === undefined || res.target === seat) throw new Error("invalid extra-throw target");
+    const t = s.players[res.target];
+    if (!t || t.out) throw new Error("target not a living player");
+    if (!handHas(p, "balloon")) throw new Error("no Water Balloon for the extra throw");
+    if (res.soaker && !handHas(p, "soaker")) throw new Error("no Soaker Cannon in hand");
+    return;
+  }
+  if (res.kind === "EXTRA") throw new Error("not awaiting an extra throw");
   const allowed = legalResolutions(s);
   const ok = allowed.some((r) =>
     r.kind === res.kind &&
@@ -427,17 +539,12 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
     return { state: s, awaiting: s.awaiting, events };
   }
 
-  // THROW / PLAY_BIG: spend the card, then run the attack state machine.
-  const hand = s.players[seat]!.hand;
-  const cardKind = move.kind === "THROW" ? "balloon" : move.big;
-  const idx = hand.findIndex((c) => c.kind === cardKind);
-  const [card] = hand.splice(idx, 1);
-  discardCard(s, card!);
-  const outcome: AttackOutcome =
-    move.kind === "THROW"
-      ? startAttack(s, seat, move.target)
-      : startBigAttack(s, seat, move.target, move.big);
-  if (outcome.resolved) finishAttack(s, outcome.hit);
+  // THROW / PLAY_BIG: spend the card(s) + modifiers, then run the attack machine.
+  if (move.kind === "THROW") {
+    startThrow(s, seat, move.target, !!move.soaker, move.spread);
+  } else {
+    startBig(s, seat, move.target, move.big, !!move.soaker, move.spread);
+  }
   return { state: s, awaiting: s.awaiting, events };
 }
 
@@ -456,8 +563,18 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
     advanceTurn(s);
     return { state: s, awaiting: s.awaiting, events };
   }
-  const outcome = advanceAttack(s, res);
-  if (outcome.resolved) finishAttack(s, outcome.hit);
+  if (res.kind === "EXTRA") {
+    if (res.action === "pass") {
+      endActiveTurn(s); // E4: declined the extra throw
+      return { state: s, awaiting: s.awaiting, events };
+    }
+    // Spend a Rapid Fire (preferred) or Launcher, then throw again.
+    spendKind(s, seat, handHas(s.players[seat]!, "rapidfire") ? "rapidfire" : "launcher");
+    startThrow(s, seat, res.target!, !!res.soaker);
+    return { state: s, awaiting: s.awaiting, events };
+  }
+  const outcome = advanceLadder(s, res);
+  if (outcome.resolved) resolveTarget(s, outcome.hit);
   return { state: s, awaiting: s.awaiting, events };
 }
 

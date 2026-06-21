@@ -63,9 +63,10 @@ export function assertInvariants(s: GameState): void {
     if (s.awaiting.seats.length === 0) throw new Error("not over but nobody is awaited");
     const seat = s.awaiting.seats[0]!;
     if (s.players[seat]?.out) throw new Error(`awaiting a soaked seat ${seat}`);
-    // An attack in progress must have a target that is still alive.
+    // An attack in progress must have a CURRENT target that is still alive.
     if (s.awaiting.attack) {
-      const t = s.players[s.awaiting.attack.targetSeat];
+      const atk = s.awaiting.attack;
+      const t = s.players[atk.targets[atk.targetIdx]!];
       if (!t || t.out) throw new Error("attack targets a soaked/absent seat");
     }
   }

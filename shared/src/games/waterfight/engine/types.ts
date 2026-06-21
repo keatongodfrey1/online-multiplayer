@@ -84,15 +84,21 @@ export const DEFAULT_OPTIONS: GameOptions = {
 
 /** Who/what the engine is waiting on. Phase A kinds; `seats` is an array for
  *  forward-compat with multi-target (Phase B) but holds exactly one seat here. */
-export type AwaitKind = "MOVE" | "DEFEND" | "ATTACKER_RESPOND" | "DISCARD" | "GAME_OVER";
+export type AwaitKind =
+  | "MOVE" | "DEFEND" | "ATTACKER_RESPOND" | "DISCARD" | "EXTRA_THROW" | "GAME_OVER";
 
 /** The dedicated attack state machine's persistent state (Issue 1bA). */
 export interface AttackState {
   attackerSeat: number;
-  targetSeat: number;
+  /** Targets resolved sequentially (E3 multi-target); single-target = one entry. */
+  targets: number[];
+  targetIdx: number;
   kind: AttackKind;
   blockNumber: number; // basic/giant/golden = 1, mega = 2
   damage: number; // basic/mega/golden = 1, giant = 2
+  /** Soaker Cannon: hand-Miss cards are negated for this whole attack (R2). */
+  soaker: boolean;
+  // ---- ladder state for the CURRENT target ----
   /** Miss cards currently placed toward blockNumber. */
   missBlocks: number;
   /** An active Umbrella full-block (uncancelable vs a normal balloon; Hit-cancelable vs Mega — R1). */
@@ -136,21 +142,28 @@ export interface GameState {
   log: string[];
 }
 
+/** Multi-target spread, pre-declared on a throw; only consumed if the throw lands
+ *  (Triple Splash = up to 3 targets; Splash Zone = all opponents). The engine
+ *  resolves the targets sequentially (E3). Post-flip choice is a room-layer UX
+ *  refinement; mechanically the modifier is spent only on a Hit. */
+export type Spread = { modifier: "triplesplash" | "splashzone"; extraTargets: number[] };
+
 // ---- Moves: one optional Support card + one Main Action per turn ----
 export type Move =
   | { kind: "PLAY_SUPPORT"; support: SupportKind; target?: number } // Support slot (does not end the turn)
-  | { kind: "THROW"; target: number } // Main Action
-  | { kind: "PLAY_BIG"; big: BigKind; target: number } // Main Action
+  | { kind: "THROW"; target: number; soaker?: boolean; spread?: Spread } // Main Action
+  | { kind: "PLAY_BIG"; big: BigKind; target: number; soaker?: boolean; spread?: Spread } // Main Action
   | { kind: "SHOP"; sell: { balloons: number; treasures: number; wild: number }; buy: StackId[] } // Main Action
   | { kind: "END_TURN" }; // Main Action (pass)
 
-// ---- Resolutions (out-of-turn ladder responses + end-of-turn discard) ----
+// ---- Resolutions (out-of-turn ladder responses, discard, extra throw) ----
 export type Defense = "miss" | "umbrella" | "wild_miss" | "pass";
 export type Respond = "hit" | "wild_hit" | "pass";
 export type Resolution =
   | { kind: "DEFEND"; defense: Defense }
   | { kind: "ATTACKER_RESPOND"; respond: Respond }
-  | { kind: "DISCARD"; cardIds: number[] };
+  | { kind: "DISCARD"; cardIds: number[] }
+  | { kind: "EXTRA"; action: "throw" | "pass"; target?: number; soaker?: boolean };
 
 export interface GameEvent {
   type: string;

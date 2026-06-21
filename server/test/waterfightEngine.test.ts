@@ -9,6 +9,7 @@ const {
   applyMove,
   applyResolution,
   legalMoves,
+  legalResolutions,
   isGameOver,
   assertInvariants,
   drawMainCard,
@@ -354,6 +355,111 @@ describe("water fight engine: support/mischief effects (B.4)", () => {
       () => applyMove(r.state, { kind: "SHOP", sell: { balloons: 0, treasures: 2, wild: 0 }, buy: ["defense"] }),
       /Lemonade Spill/,
     );
+  });
+});
+
+describe("water fight engine: modifiers (B.5)", () => {
+  it("Soaker Cannon (R2): declared pre-flip, negates the defender's hand-Miss", () => {
+    const g = createGame(2, 5);
+    setHand(g, 0, ["balloon", "soaker"]);
+    setHand(g, 1, ["miss"]);
+    forceSplash(g, "hit");
+    const r = applyMove(g, { kind: "THROW", target: 1, soaker: true });
+    assert.equal(r.awaiting.kind, "DEFEND");
+    const opts = legalResolutions(r.state);
+    assert.ok(!opts.some((o) => o.kind === "DEFEND" && o.defense === "miss"), "Soaker removes the Miss option");
+    assert.throws(() => applyResolution(r.state, { kind: "DEFEND", defense: "miss" }), /illegal resolution/);
+    const r2 = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r2.state.players[1]!.lives, 2, "no hand-Miss could save the target");
+  });
+
+  it("Soaker is wasted on a Miss flip; a spread modifier is NOT spent on a Miss (E3)", () => {
+    const g = createGame(3, 5);
+    setHand(g, 0, ["balloon", "soaker", "triplesplash"]);
+    forceSplash(g, "miss");
+    const r = applyMove(g, {
+      kind: "THROW",
+      target: 1,
+      soaker: true,
+      spread: { modifier: "triplesplash", extraTargets: [2] },
+    });
+    assert.equal(r.awaiting.kind, "MOVE", "the Miss ended the attack");
+    assert.equal(r.state.turnSeat, 1);
+    const kinds = r.state.players[0]!.hand.map((c) => c.kind);
+    assert.ok(!kinds.includes("balloon"), "balloon spent");
+    assert.ok(!kinds.includes("soaker"), "Soaker wasted (it is declared pre-flip)");
+    assert.ok(kinds.includes("triplesplash"), "spread only spends on a Hit");
+  });
+
+  it("Triple Splash spreads one Hit to multiple targets, each defending in sequence (E3)", () => {
+    const g = createGame(3, 7);
+    setHand(g, 0, ["balloon", "triplesplash"]);
+    setHand(g, 1, []);
+    setHand(g, 2, []);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1, spread: { modifier: "triplesplash", extraTargets: [2] } });
+    assert.equal(r.awaiting.kind, "DEFEND");
+    assert.equal(r.awaiting.seats[0], 1, "the first target defends first");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 2);
+    assert.equal(r.awaiting.kind, "DEFEND");
+    assert.equal(r.awaiting.seats[0], 2, "then the second target defends");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[2]!.lives, 2);
+    assert.equal(r.state.awaiting.kind, "MOVE", "both resolved -> the turn advances");
+  });
+
+  it("Splash Zone hits every living opponent", () => {
+    const g = createGame(3, 11);
+    setHand(g, 0, ["balloon", "splashzone"]);
+    setHand(g, 1, []);
+    setHand(g, 2, []);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1, spread: { modifier: "splashzone", extraTargets: [] } });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" }); // seat 1
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" }); // seat 2
+    assert.equal(r.state.players[1]!.lives, 2);
+    assert.equal(r.state.players[2]!.lives, 2);
+  });
+
+  it("Launcher grants an extra basic throw after the attack resolves (E4)", () => {
+    const g = createGame(2, 5);
+    setHand(g, 0, ["balloon", "balloon", "launcher"]);
+    setHand(g, 1, []);
+    g.splashPile = ["hit", "hit", "hit", "hit"];
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 2);
+    assert.equal(r.awaiting.kind, "EXTRA_THROW", "Launcher offers an extra throw");
+    assert.equal(r.awaiting.seats[0], 0);
+    r = applyResolution(r.state, { kind: "EXTRA", action: "throw", target: 1 });
+    assert.equal(r.awaiting.kind, "DEFEND", "the extra throw opened its own ladder");
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.players[1]!.lives, 1, "the extra throw landed");
+    assert.equal(r.state.awaiting.kind, "MOVE", "no balloons left -> the turn ends");
+    assert.equal(r.state.turnSeat, 1);
+  });
+
+  it("declining the extra throw (EXTRA pass) ends the turn", () => {
+    const g = createGame(2, 5);
+    setHand(g, 0, ["balloon", "balloon", "rapidfire"]);
+    setHand(g, 1, []);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.awaiting.kind, "EXTRA_THROW", "Rapid Fire also offers it");
+    r = applyResolution(r.state, { kind: "EXTRA", action: "pass" });
+    assert.equal(r.state.awaiting.kind, "MOVE");
+    assert.equal(r.state.turnSeat, 1);
+  });
+
+  it("legalMoves enumerates Soaker and spread throw variants", () => {
+    const g = createGame(3, 5);
+    setHand(g, 0, ["balloon", "soaker", "splashzone", "triplesplash"]);
+    const moves = legalMoves(g);
+    assert.ok(moves.some((m) => m.kind === "THROW" && m.soaker), "a Soaker throw is offered");
+    assert.ok(moves.some((m) => m.kind === "THROW" && m.spread?.modifier === "splashzone"), "a Splash Zone throw is offered");
+    assert.ok(moves.some((m) => m.kind === "THROW" && m.spread?.modifier === "triplesplash"), "a Triple Splash throw is offered");
   });
 });
 
