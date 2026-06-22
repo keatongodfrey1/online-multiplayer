@@ -6,3 +6,4 @@ export * from "./types.js";
 export * from "./constants.js";
 export { mulberry32 } from "./rng.js";
 export { PaperIoWorld } from "./world.js";
+export { assertGridInvariants } from "./invariants.js";
