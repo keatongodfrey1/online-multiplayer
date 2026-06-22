@@ -38,7 +38,6 @@ function context(): AudioContext | undefined {
   if (typeof AudioContext === "undefined") return undefined;
   try {
     audio ??= new AudioContext();
-    if (audio.state === "suspended") void audio.resume();
     return audio;
   } catch {
     return undefined;
@@ -46,13 +45,15 @@ function context(): AudioContext | undefined {
 }
 
 // Unlock the AudioContext on the player's FIRST real gesture so resume() runs
-// inside a trusted click/key/tap (which the autoplay policy honors), instead
-// of from a turn callback (which it rejects, logging a warning). One-shot:
-// the first gesture wakes the context and tears down all the listeners.
+// inside a trusted click/key/tap (which the autoplay policy honors). This is the
+// ONLY place we resume() — never from a turn callback, which the browser rejects
+// with a console warning (the chimes below skip while still suspended instead).
+// One-shot: the first gesture wakes the context and tears down all the listeners.
 if (typeof window !== "undefined") {
   const GESTURES = ["pointerdown", "keydown", "touchstart"] as const;
   const unlock = (): void => {
-    context();
+    const a = context();
+    if (a && a.state === "suspended") void a.resume();
     for (const evt of GESTURES) window.removeEventListener(evt, unlock);
   };
   for (const evt of GESTURES) window.addEventListener(evt, unlock);
@@ -77,7 +78,7 @@ function note(a: AudioContext, freq: number, at: number, duration: number, peak 
 export function turnChime(): void {
   if (isMuted()) return;
   const a = context();
-  if (!a) return;
+  if (!a || a.state !== "running") return; // not unlocked yet (no gesture) - skip, don't warn
   note(a, 660, 0, 0.15);
   note(a, 880, 0.14, 0.25);
 }
@@ -86,7 +87,7 @@ export function turnChime(): void {
 export function clockChime(): void {
   if (isMuted()) return;
   const a = context();
-  if (!a) return;
+  if (!a || a.state !== "running") return; // not unlocked yet (no gesture) - skip, don't warn
   note(a, 520, 0, 0.09, 0.06);
   note(a, 520, 0.14, 0.09, 0.06);
   note(a, 392, 0.28, 0.2, 0.06);
