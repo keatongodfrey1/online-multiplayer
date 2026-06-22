@@ -220,8 +220,9 @@ rooms"; copy Water Fight / Splendor):
    `assertInvariants(state)` - conservation + a soft-lock detector, **phase-aware**
    (gate "in play" checks off setup/over phases or they fire on legit states).
 2. **`shared/src/games/foo/engine/validateData.ts`** exporting
-   `validateFooData(): string[]` - static card/board/cost tables are well-formed,
-   id ranges never collide. One pure test asserting it returns `[]`.
+   `validateFooData(): string[]` (only if the game HAS static card/board/cost
+   tables) - the tables are well-formed, id ranges never collide. One pure test
+   asserting it returns `[]`.
 3. **A fuzz block** in `foo Engine.test.ts` - random playouts at every player
    count calling `assertInvariants` after every reduce, with a termination guard.
 4. **A strict `parseSave`** (if `supportsSaves`): version-gated, runs
@@ -249,8 +250,8 @@ errors; `npm run typecheck` is the authority for those.
 - [ ] one entry in `client/src/games/registry.ts`
 - [ ] `server/test/foo.test.ts`
 - [ ] **engine-backed only:** `engine/invariants.ts` (`assertInvariants`,
-      phase-aware) + `engine/validateData.ts` + a fuzz block asserting invariants
-      after every reduce + (if saves) a version-gated `parseSave` that runs
-      `assertInvariants` + a legal-move smoke
+      phase-aware) + a fuzz block asserting invariants after every reduce + (if
+      static data tables) `engine/validateData.ts` + (if saves) a version-gated
+      `parseSave` that runs `assertInvariants` + a legal-move smoke
 - [ ] typecheck + tests + build green; manual two-window test incl. refresh
 - [ ] no edits inside any `framework/` directory

@@ -243,10 +243,11 @@ together - they are deliberately the same shape:
 When you build a third engine-backed game, copy one of these rooms wholesale
 and swap the engine - do not start from the thin TicTacToe room.
 
-**Every engine ships four safety nets** (Splendor and Water Fight are the
-reference; the others were back-ported). They are not optional polish - a
-rules-heavy engine without them ships soft-locks and state corruption that only
-surface live, mid-game:
+**Engine-backed games ship a stack of safety nets** (Splendor and Water Fight
+are the reference; the others were back-ported). They are not optional polish -
+a rules-heavy engine without them ships soft-locks and state corruption that
+only surface live, mid-game. Two are universal (every engine), two are
+conditional on what the game has:
 
 - **`engine/invariants.ts` -> `assertInvariants(state)`** (throws on violation):
   *conservation* (the fixed card/resource pool is accounted for across every
@@ -257,16 +258,21 @@ surface live, mid-game:
   setup/over phases, or it will fire on a legitimate state. This is the single
   highest-value net.
 - **`engine/validateData.ts` -> `validate<Game>Data(): string[]`** (empty =
-  valid): the static card/board/cost tables are well-formed and the id ranges
-  (main / shop / event, etc.) never collide. A build-time data guard - a
-  mistyped table fails a test instead of crashing a live game. Test-only.
-- **A strict save validator** (`server/src/games/<game>/save.ts`): the blob is
-  UNTRUSTED. `parseSave` rebuilds field-by-field, stamps + gates an
+  valid) - *only for games with static card/board/cost tables*: the tables are
+  well-formed and the id ranges (main / shop / event, etc.) never collide. A
+  build-time data guard - a mistyped table fails a test instead of crashing a
+  live game. Test-only. (A game with no fixed data tables, e.g. a real-time
+  grid, doesn't need one.)
+- **A strict save validator** (`server/src/games/<game>/save.ts`) - *only for
+  `supportsSaves` games* (a real-time game like Paper.io has no save at all):
+  the blob is UNTRUSTED. `parseSave` rebuilds field-by-field, stamps + gates an
   `ENGINE_VERSION` (reject an incompatible save), then on the rebuilt state runs
   `assertInvariants` + a `legalMoves`/"can someone act?" smoke, rejecting on any
-  throw. Do NOT re-implement `assertInvariants`' cross-checks inline here (a
-  non-phase-aware copy wrongly rejects a legitimate mid-setup save - a bug we
-  hit); call the phase-aware net and let it be the authority.
+  throw. Convention: stamp the version on the save **envelope** (it describes
+  the save format, not engine runtime state). Do NOT re-implement
+  `assertInvariants`' cross-checks inline here (a non-phase-aware copy wrongly
+  rejects a legitimate mid-setup save - a bug we hit); call the phase-aware net
+  and let it be the authority.
 - **A fuzz suite** (`server/test/<game>Engine.test.ts`): random (and greedy)
   playouts at every player count, calling `assertInvariants` after EVERY reduce,
   under a termination guard. This is what actually proves the engine can't
