@@ -129,6 +129,14 @@ handled. ADDING_A_GAME.md has the exact wiring for each.
 - **Turn alerts** (client, `framework/turnAlert.ts`) and **slept-tablet
   recovery** (`framework/wakeUp.ts`): see ADDING_A_GAME.md - turn alerts are
   a default for any turn-based game, not an extra.
+- **Crash-safety** (always on): `BaseGameRoom.onUncaughtException` is defined,
+  so Colyseus wraps every message handler, the simulation tick, and clock
+  timers - an uncaught throw is logged and swallowed instead of tearing the
+  room down and dropping every player. A game does nothing for this and must
+  NOT rely on it as a substitute for validating input up front; it is the
+  backstop for the throw that slips past or an engine bug. (Without this hook
+  defined, Colyseus does not catch handler throws at all - that was a real
+  whole-room-crash bug before it was added.)
 
 ## State vs messages - the golden rule
 
@@ -234,6 +242,42 @@ together - they are deliberately the same shape:
 
 When you build a third engine-backed game, copy one of these rooms wholesale
 and swap the engine - do not start from the thin TicTacToe room.
+
+**Engine-backed games ship a stack of safety nets** (Splendor and Water Fight
+are the reference; the others were back-ported). They are not optional polish -
+a rules-heavy engine without them ships soft-locks and state corruption that
+only surface live, mid-game. Two are universal (every engine), two are
+conditional on what the game has:
+
+- **`engine/invariants.ts` -> `assertInvariants(state)`** (throws on violation):
+  *conservation* (the fixed card/resource pool is accounted for across every
+  pile and hand, no dupes, valid ranges) + a *soft-lock detector* ("the game is
+  not over, yet no seat is awaited and no forced auto-step is pending" must
+  never hold). Make it **phase-aware** - a check that assumes "in play" (a
+  current player is set, turnOrder is a full permutation) must be gated off the
+  setup/over phases, or it will fire on a legitimate state. This is the single
+  highest-value net.
+- **`engine/validateData.ts` -> `validate<Game>Data(): string[]`** (empty =
+  valid) - *only for games with static card/board/cost tables*: the tables are
+  well-formed and the id ranges (main / shop / event, etc.) never collide. A
+  build-time data guard - a mistyped table fails a test instead of crashing a
+  live game. Test-only. (A game with no fixed data tables, e.g. a real-time
+  grid, doesn't need one.)
+- **A strict save validator** (`server/src/games/<game>/save.ts`) - *only for
+  `supportsSaves` games* (a real-time game like Paper.io has no save at all):
+  the blob is UNTRUSTED. `parseSave` rebuilds field-by-field, stamps + gates an
+  `ENGINE_VERSION` (reject an incompatible save), then on the rebuilt state runs
+  `assertInvariants` + a `legalMoves`/"can someone act?" smoke, rejecting on any
+  throw. Convention: stamp the version on the save **envelope** (it describes
+  the save format, not engine runtime state). Do NOT re-implement
+  `assertInvariants`' cross-checks inline here (a non-phase-aware copy wrongly
+  rejects a legitimate mid-setup save - a bug we hit); call the phase-aware net
+  and let it be the authority.
+- **A fuzz suite** (`server/test/<game>Engine.test.ts`): random (and greedy)
+  playouts at every player count, calling `assertInvariants` after EVERY reduce,
+  under a termination guard. This is what actually proves the engine can't
+  soft-lock or corrupt state - and an invariant that fires on a legal playout is
+  too strict, so the fuzz is also how you tune the net.
 
 ## Client framework
 
