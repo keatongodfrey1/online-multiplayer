@@ -15,7 +15,7 @@
  */
 import { PerfectPalaceEngine } from "@backbone/shared";
 
-const { isValidResourceCard, TOTAL_CARDS } = PerfectPalaceEngine;
+const { isValidResourceCard, TOTAL_CARDS, ENGINE_VERSION, assertInvariants, chooseAction } = PerfectPalaceEngine;
 type GameState = PerfectPalaceEngine.GameState;
 type Player = PerfectPalaceEngine.Player;
 type PlayerInventory = PerfectPalaceEngine.PlayerInventory;
@@ -65,6 +65,7 @@ export function serializeSave({ engine, seats, turnCount }: SaveInput): object {
   return {
     v: 1,
     game: "perfectpalace",
+    engineVersion: ENGINE_VERSION,
     savedAt: Date.now(),
     turnCount,
     seats: seats.map((s) => ({
@@ -161,6 +162,9 @@ function parsePlayer(v: unknown): Player | null {
 export function parseSave(raw: unknown): ParsedSave | null {
   if (!isObj(raw)) return null;
   if (raw.v !== 1 || raw.game !== "perfectpalace") return null;
+  // Engine-version gate: a save written by a different engine (different rules,
+  // economy, or schema) is rejected outright rather than silently misloaded.
+  if (raw.engineVersion !== ENGINE_VERSION) return null;
   if (!isNonNegInt(raw.turnCount)) return null;
 
   // ---- seats / lineup ----
@@ -282,6 +286,43 @@ export function parseSave(raw: unknown): ParsedSave | null {
     const parsedDuel = parseDuel(e.duel, presentIds);
     if (!parsedDuel) return null;
     engine.duel = parsedDuel;
+  }
+
+  // ---- cross-field consistency: the field-by-field rebuild above is structurally
+  //      valid, but a tampered blob can still be internally INCONSISTENT (e.g. a
+  //      duel phase with no duel block, an in-play game whose currentPlayerId/
+  //      activePlayerIndex disagree, or turnOrder missing a live seat). These are
+  //      the cross-checks the per-field validators can't see; assertInvariants
+  //      below catches most, and the legalMoves smoke proves the seat can act. ----
+
+  // The per-field rebuild above is structurally valid but can still be
+  // internally INCONSISTENT. assertInvariants (run below) is the authority for
+  // the cross-field facts and is PHASE-AWARE — it already enforces that
+  // turnOrder is a permutation of the live players once in play, the current
+  // player is set/present/live in play (null is legitimate in the simultaneous
+  // setup phases), and the soft-lock rule (not-over ⇒ some seat is awaited or an
+  // auto-step is pending). We do NOT duplicate those here — a non-phase-aware
+  // copy would wrongly reject a legitimate mid-setup save.
+  //
+  // The one cross-check assertInvariants does not make explicitly, valid in
+  // every phase: a 'duel' turn phase must coincide with a duel block.
+  if ((engine.turn.phase === "duel") !== (engine.duel !== undefined)) return null;
+  if (engine.duel) {
+    const partSet = new Set(engine.duel.participants);
+    for (const id of engine.duel.contenders) if (!partSet.has(id)) return null;
+  }
+
+  // ---- structural invariants (phase-aware, incl. the soft-lock detector) + a
+  //      "can someone act?" smoke. Both run on the REBUILT state; reject on any
+  //      throw. ----
+  try {
+    assertInvariants(engine);
+    // When a single seat is current, the policy must produce an action for it
+    // without throwing. (In the simultaneous setup phases the awaited-seat
+    // soft-lock check inside assertInvariants is the guard instead.)
+    if (engine.currentPlayerId !== null) chooseAction(engine, engine.currentPlayerId, "normal");
+  } catch {
+    return null;
   }
 
   return { engine, seats, turnCount: raw.turnCount };

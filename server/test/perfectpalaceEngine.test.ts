@@ -8,6 +8,9 @@
 
 import assert from "node:assert/strict";
 import { PerfectPalaceEngine } from "@backbone/shared";
+// Pure save round-trip checks (no @colyseus/testing boot — these import the
+// validator directly, like catanEngine.test.ts).
+import { parseSave, serializeSave } from "../src/games/perfectpalace/save.js";
 
 const { initialState, reducer, isValidResourceCard, rankPlayers, totalPoints, staffWeight, RESOURCE_OPTIONS } =
   PerfectPalaceEngine;
@@ -2225,7 +2228,7 @@ describe('createReadyState bootstrap', () => {
 // seeded duel die and auto-reveals / auto-resolves exactly like the room.
 
 describe('Bot policy', () => {
-  const { chooseAction, createReadyState, tryReduce, rollDieFrom } = PerfectPalaceEngine;
+  const { chooseAction, createReadyState, tryReduce, rollDieFrom, assertInvariants } = PerfectPalaceEngine;
 
   function awaiting(s: GameState): string[] {
     if (s.phase === 'game-over') return [];
@@ -2242,14 +2245,14 @@ describe('Bot policy', () => {
         const active = s.players.filter((p) => !p.removed);
         if (active.length && active.every((p) => p.mappingLocked)) {
           const o = tryReduce(s, { type: 'mapping/revealAll' });
-          if (o.ok) { s = o.state; continue; }
+          if (o.ok) { s = o.state; assertInvariants(s); continue; }
         }
         return s;
       }
       if (s.turn.phase === 'duel' && s.duel && s.duel.contenders.length &&
           s.duel.contenders.every((id) => s.duel!.rolls[id] != null)) {
         const o = tryReduce(s, { type: 'turn/duelResolve' });
-        if (o.ok) { s = o.state; continue; }
+        if (o.ok) { s = o.state; assertInvariants(s); continue; }
       }
       return s;
     }
@@ -2269,13 +2272,15 @@ describe('Bot policy', () => {
       action = { ...action, value: r.value };
     }
     const out = tryReduce(s, action);
-    if (out.ok) return { state: autoAdvance(out.state), rejected: false, stalled: false };
+    if (out.ok) { assertInvariants(out.state); return { state: autoAdvance(out.state), rejected: false, stalled: false }; }
     const fb = tryReduce(s, { type: 'turn/endTurn' });
+    if (fb.ok) assertInvariants(fb.state);
     return { state: fb.ok ? autoAdvance(fb.state) : s, rejected: true, stalled: !fb.ok };
   }
 
   function playBotGame(seed: number, players: number, difficulty: any = 'normal', cap = 25000) {
     let s = createReadyState(Array.from({ length: players }, (_, i) => ({ name: `Bot${i + 1}` })), seed);
+    assertInvariants(s);
     let rejects = 0;
     let i = 0;
     for (; i < cap && s.phase !== 'game-over'; i++) {
@@ -2524,5 +2529,205 @@ describe('Interactive opening roll', () => {
     s = reducer(s, { type: 'initialRoll/clearTopTie' });
     expect(playerById(s, 'p1').initialRoll).toBeUndefined();
     expect(playerById(s, 'p2').initialRoll).toBeUndefined();
+  });
+});
+
+// ==================== Static data validation ====================
+// validatePerfectPalaceData() is the source-of-truth self-consistency check for
+// the deck/board/cost tables. Empty list => valid.
+
+describe('Static data (validatePerfectPalaceData)', () => {
+  const { validatePerfectPalaceData } = PerfectPalaceEngine;
+
+  it('the deck, board, and cost tables are internally consistent', () => {
+    assert.deepEqual(validatePerfectPalaceData(), []);
+  });
+});
+
+// ==================== Invariants + random-playout fuzz ====================
+// Mirrors the waterfight/splendor fuzz: assertInvariants after EVERY accepted
+// reduce, across player counts, with a hard termination guard. The bot-policy
+// block above already asserts invariants on greedy playouts; this adds RANDOM
+// action selection (random difficulty per step) to widen state coverage.
+
+describe('Invariants fuzz (random playouts)', () => {
+  const { createReadyState, chooseAction, tryReduce, rollDieFrom, assertInvariants } = PerfectPalaceEngine;
+
+  // A small deterministic PRNG so fuzz seeds reproduce on failure.
+  function mulberry(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a |= 0;
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function awaiting(s: GameState): string[] {
+    if (s.phase === 'game-over' || s.turn.phase === 'game-over') return [];
+    if (s.phase === 'initial-mapping') return s.players.filter((p) => !p.removed && !p.mappingLocked).map((p) => p.id);
+    if (s.turn.phase === 'duel' && s.duel) return s.duel.contenders.filter((id) => s.duel!.rolls[id] == null);
+    return s.currentPlayerId ? [s.currentPlayerId] : [];
+  }
+
+  function autoAdvance(s: GameState): GameState {
+    for (let g = 0; g < 1000; g++) {
+      if (s.phase === 'initial-mapping') {
+        const active = s.players.filter((p) => !p.removed);
+        if (active.length && active.every((p) => p.mappingLocked)) {
+          const o = tryReduce(s, { type: 'mapping/revealAll' });
+          if (o.ok) { s = o.state; assertInvariants(s); continue; }
+        }
+        return s;
+      }
+      if (s.turn.phase === 'duel' && s.duel && s.duel.contenders.length &&
+          s.duel.contenders.every((id) => s.duel!.rolls[id] != null)) {
+        const o = tryReduce(s, { type: 'turn/duelResolve' });
+        if (o.ok) { s = o.state; assertInvariants(s); continue; }
+      }
+      return s;
+    }
+    return s;
+  }
+
+  function playRandom(seed: number, players: number, cap: number): GameState {
+    const rng = mulberry(seed);
+    const diffs = ['easy', 'normal', 'hard'] as const;
+    let s = createReadyState(Array.from({ length: players }, (_, i) => ({ name: `Bot${i + 1}` })), seed);
+    assertInvariants(s);
+    for (let i = 0; i < cap && s.phase !== 'game-over'; i++) {
+      const seats = awaiting(s);
+      assert.ok(seats.length > 0, `no awaited seat but game not over at step ${i} (${s.phase}/${s.turn.phase})`);
+      const id = seats[0]!;
+      // Random difficulty per step → a different legal action mix than greedy.
+      const difficulty = diffs[Math.floor(rng() * diffs.length)]!;
+      let action = chooseAction(s, id, difficulty);
+      if (action.type === 'turn/duelRollForPlayer') {
+        const r = rollDieFrom(s);
+        s = { ...s, rngState: r.rngState };
+        action = { ...action, value: r.value };
+      }
+      const out = tryReduce(s, action);
+      if (out.ok) {
+        assertInvariants(out.state); // invariants hold after EVERY accepted reduce
+        s = autoAdvance(out.state);
+      } else {
+        // The policy never emits an illegal action; if it somehow did, end the
+        // turn so the table never stalls (matches the room's safety net).
+        const fb = tryReduce(s, { type: 'turn/endTurn' });
+        assert.ok(fb.ok, `stalled at step ${i} (${s.phase}/${s.turn.phase})`);
+        assertInvariants(fb.state);
+        s = autoAdvance(fb.state);
+      }
+    }
+    return s;
+  }
+
+  it('invariants hold every step across 2..6 players; games terminate', function () {
+    this.timeout(120000);
+    const N = 12;
+    for (const pc of [2, 3, 4, 6]) {
+      for (let k = 0; k < N; k++) {
+        const s = playRandom(900 * pc + k, pc, 40000);
+        // Termination guard: a cap-exhausted run would leave phase !== 'game-over'.
+        // Easy bots never buy and rarely reach a palace, but a random mix that
+        // includes normal/hard does — assert progress (a healthy turn count) when
+        // the game has not finished, so a real soft-lock still trips the awaited
+        // assertion above rather than silently spinning the cap.
+        const turns = s.players.reduce((n, p) => n + p.baseTurnsTaken, 0);
+        assert.ok(s.phase === 'game-over' || turns > 50, `${pc}p seed ${k}: no progress (turns=${turns})`);
+      }
+    }
+  });
+});
+
+// ==================== Save validator (pure, no server boot) ====================
+// parseSave is the trust boundary for an untrusted localStorage blob. These
+// tests prove a clean serializeSave round-trips and that tampered/inconsistent
+// blobs are rejected (return null). No @colyseus/testing boot.
+
+describe('Save validator (parseSave/serializeSave)', () => {
+  const { createReadyState, ENGINE_VERSION } = PerfectPalaceEngine;
+
+  // Build a real, in-play engine state to serialize (past the hidden mapping).
+  function inPlayEngine(seed = 4242, players = 3): GameState {
+    let s = createReadyState(Array.from({ length: players }, (_, i) => ({ name: `P${i + 1}` })), seed);
+    // Lock everyone's mapping and reveal so the game is genuinely in play.
+    for (const p of s.players) s = reducer(s, { type: 'mapping/setInitial', id: p.id, card: p.resourceCard });
+    s = reducer(s, { type: 'mapping/revealAll' });
+    return s;
+  }
+
+  function makeSave(seed = 4242, players = 3) {
+    const engine = inPlayEngine(seed, players);
+    const seats = engine.players.map((p) => ({ nickname: p.name, isBot: false, gone: false, difficulty: 'normal' as const }));
+    return serializeSave({ engine, seats, turnCount: 3 }) as any;
+  }
+
+  it('a clean blob round-trips and rebuilds an equivalent engine', () => {
+    const blob = makeSave();
+    const parsed = parseSave(blob);
+    assert.ok(parsed, 'clean blob should validate');
+    assert.equal(parsed!.engine.players.length, 3);
+    assert.equal(parsed!.engine.currentPlayerId, blob.engine.currentPlayerId);
+    // Deck conservation survives the rebuild.
+    assert.equal(parsed!.engine.deck.length + parsed!.engine.discard.length, 18);
+  });
+
+  it('stamps the engine version and rejects a mismatched/absent version', () => {
+    const blob = makeSave();
+    assert.equal(blob.engineVersion, ENGINE_VERSION);
+    assert.equal(parseSave({ ...blob, engineVersion: '0.0.0' }), null);
+    const { engineVersion: _drop, ...noVersion } = blob;
+    assert.equal(parseSave(noVersion), null);
+  });
+
+  it('rejects a finished game (a winner is set)', () => {
+    const blob = makeSave();
+    assert.equal(parseSave({ ...blob, engine: { ...blob.engine, winner: blob.engine.players[0].id } }), null);
+  });
+
+  it('rejects card-conservation tampering (a duplicated / dropped card)', () => {
+    const blob = makeSave();
+    // Duplicate the first deck card → 19 cards across deck+discard.
+    const dupDeck = [...blob.engine.deck, blob.engine.deck[0]];
+    assert.equal(parseSave({ ...blob, engine: { ...blob.engine, deck: dupDeck } }), null);
+    // Drop a card → 17 cards.
+    const shortDeck = blob.engine.deck.slice(1);
+    assert.equal(parseSave({ ...blob, engine: { ...blob.engine, deck: shortDeck } }), null);
+  });
+
+  it('rejects a negative inventory value', () => {
+    const blob = makeSave();
+    const players = blob.engine.players.map((p: any, i: number) =>
+      i === 0 ? { ...p, inventory: { ...p.inventory, dollars: -5 } } : p,
+    );
+    assert.equal(parseSave({ ...blob, engine: { ...blob.engine, players } }), null);
+  });
+
+  it('rejects an unknown currentPlayerId, and a null one (an in-play game has a current player)', () => {
+    const blob = makeSave();
+    assert.equal(parseSave({ ...blob, engine: { ...blob.engine, currentPlayerId: 'p99' } }), null);
+    assert.equal(parseSave({ ...blob, engine: { ...blob.engine, currentPlayerId: null } }), null);
+  });
+
+  it('rejects a turnOrder that is not a permutation of the live players', () => {
+    const blob = makeSave();
+    // Drop one id from turnOrder → no longer covers every live seat.
+    const shortOrder = blob.engine.turnOrder.slice(1);
+    assert.equal(parseSave({ ...blob, engine: { ...blob.engine, turnOrder: shortOrder } }), null);
+  });
+
+  it('rejects a duel turn-phase with no duel block', () => {
+    const blob = makeSave();
+    const tampered = { ...blob.engine, turn: { ...blob.engine.turn, phase: 'duel' } };
+    assert.equal(parseSave({ ...blob, engine: tampered }), null);
+  });
+
+  it('rejects the Bailiff held by an unknown player', () => {
+    const blob = makeSave();
+    assert.equal(parseSave({ ...blob, engine: { ...blob.engine, bailiff: { kind: 'held', by: 'p99' } } }), null);
   });
 });

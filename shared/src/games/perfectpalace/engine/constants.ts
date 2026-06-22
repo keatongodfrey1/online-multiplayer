@@ -1,6 +1,13 @@
 // Economic constants: shop prices, construction recipes, point values, etc.
 // Source of truth: DESIGN.md Sections 6-8.
 
+// ---------- Engine version ----------
+// Stamped into every save blob and gated on resume: a save written by an older
+// engine (different rules/economy) is rejected rather than silently misloaded.
+// Bump this whenever a change would invalidate older saves (deck, economy,
+// schema, or turn-flow changes). Mirrors waterfight/data.ts ENGINE_VERSION.
+export const ENGINE_VERSION = "1.0.0";
+
 // ---------- Shop prices ----------
 export const PRICE = {
   brick: 1,
