@@ -31,6 +31,15 @@ export class StubRoom extends BaseGameRoom<StubState> {
   protected onGameStart(): void {
     this.state.startCount += 1;
   }
+
+  // A handler that always throws — used by the crash-safety test to prove an
+  // uncaught exception in a message handler is caught by onUncaughtException
+  // and does NOT tear the room down.
+  protected onRoomCreate(): void {
+    this.onMessage("boom", () => {
+      throw new Error("boom: simulated handler crash");
+    });
+  }
 }
 
 /**

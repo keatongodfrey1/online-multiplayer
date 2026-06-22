@@ -231,6 +231,24 @@ export abstract class BaseGameRoom<TState extends BaseState = BaseState> extends
     this.onRoomCreate(options);
   }
 
+  /**
+   * Platform-wide crash-safety net. Colyseus does NOT wrap room callbacks in
+   * try/catch UNLESS this hook is defined (it checks for it in the Room
+   * constructor); once defined, every onMessage handler, the simulation tick,
+   * and clock timers are auto-wrapped and any uncaught throw is routed here
+   * instead of tearing the room down — which would drop every player at the
+   * table. We log and swallow: the one offending message/tick is dropped, state
+   * stays consistent (engine reducers assign only on success, so a throw leaves
+   * the prior state intact), and play continues. Games still validate input up
+   * front; this is the backstop for the throw that slips past or an engine bug.
+   */
+  onUncaughtException(error: Error, methodName: string): void {
+    console.error(
+      `[room ${this.roomId}] uncaught exception in ${methodName}: ${error?.message ?? String(error)}`,
+      error?.stack ?? "",
+    );
+  }
+
   onJoin(client: Client, options?: { nickname?: string }) {
     const nickname = this.validateNickname(options?.nickname);
 

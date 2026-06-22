@@ -165,9 +165,13 @@ export class SpaceChaseRoom extends BaseGameRoom<SpaceChaseState> {
   private handleAction(client: Client, move: Move): void {
     if (!this.canAct(client, ScAwait.ACTION)) return;
     if (!isLegalMove(this.engine, move)) return;
-    const r = applyMove(this.engine, move);
-    this.engine = r.state;
-    this.commit(r.events);
+    try {
+      const r = applyMove(this.engine, move);
+      this.engine = r.state;
+      this.commit(r.events);
+    } catch {
+      // a move that passes isLegalMove but still throws: ignore, don't desync (mirrors handleResolution)
+    }
   }
 
   private handleResolution(client: Client, res: Resolution | null): void {

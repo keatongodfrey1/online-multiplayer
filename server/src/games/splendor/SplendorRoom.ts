@@ -309,7 +309,11 @@ export class SplendorRoom extends BaseGameRoom<SplendorState> {
     if (this.seatOrder[this.engine.awaiting.seat] !== client.sessionId) return;
     const move = parseMove(payload);
     if (!move || !isLegalMove(this.engine, move)) return;
-    this.engine = applyMove(this.engine, move).state;
+    try {
+      this.engine = applyMove(this.engine, move).state;
+    } catch {
+      return; // a move that passes isLegalMove but still throws: ignore, don't desync (mirrors handleResolve)
+    }
     this.afterApply();
   }
 
