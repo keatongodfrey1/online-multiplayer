@@ -22,7 +22,6 @@ import {
   SC_FINISH,
   SC_SATELLITE_PEEK,
   SC_SHIELD_ROUNDS,
-  SC_SIX_SEVEN_ID,
   SC_START,
   ScAwait,
   ScChoice,
@@ -33,7 +32,6 @@ import {
   buildDeck,
   moveBy,
   nearestAhead,
-  portalById,
   scanCollisions,
   teleportTo,
   type MoveStep,
@@ -736,22 +734,44 @@ export function autoResolve(state: GameState, seatIndex: number): ApplyResult {
 
 // ── queries (tests, save validation, summary) ────────────────────────────────
 
-export function assertInvariants(state: GameState): void {
-  const counts = new Map<number, number>();
-  for (const id of [...state.deck, ...state.discard]) counts.set(id, (counts.get(id) ?? 0) + 1);
-  for (let id = 1; id <= 41; id++) {
-    const expected = id === SC_SIX_SEVEN_ID ? 2 : 1;
-    if ((counts.get(id) ?? 0) !== expected) throw new Error(`card ${id}: expected ${expected} in pile`);
-  }
-  if (counts.size !== 41) throw new Error("unknown card id in pile");
-  if (state.deck.length + state.discard.length !== 42) throw new Error("pile is not 42 cards");
-  for (const p of state.players) {
-    if (p.position < 0 || p.position > SC_FINISH) throw new Error("position out of range");
-    if (p.portalId < 0 || p.portalId > 3) throw new Error("bad portalId");
-    if (p.portalId !== 0) {
-      const def = portalById(p.portalId);
-      if (!def || p.portalProgress < 0 || p.portalProgress > def.internal) throw new Error("bad portal progress");
-    }
+/**
+ * Whether the seat the engine is currently awaiting has at least one legal way
+ * to proceed (a move it can make, or a prompt answer that resolves without
+ * throwing). The soft-lock detector in assertInvariants uses this: a running
+ * game whose awaited seat can do NOTHING is a dead end. Returns true for a
+ * finished game (nothing is awaited). Never mutates `state`.
+ */
+export function legalActionExists(state: GameState): boolean {
+  if (state.over) return true;
+  const aw = state.awaiting;
+  const seat = state.players[aw.seat];
+  if (!seat || seat.gone) return false;
+  switch (aw.inputType) {
+    case ScAwait.ACTION:
+      // ROLL is always available (rolling a die and moving 0+ is legal), and so
+      // is DRAW (the pile is never empty - it reshuffles the discard).
+      return isLegalMove(state, { kind: "ROLL" }) || isLegalMove(state, { kind: "DRAW" });
+    case ScAwait.TARGET:
+      // At least one legal target must exist (else resolveTarget would throw).
+      return validTargets(state, aw.seat, aw.context, aw.cardId).length > 0;
+    case ScAwait.MULTI_TARGET:
+      return validTargets(state, aw.seat, aw.context, aw.cardId).length >= aw.count;
+    case ScAwait.CHOICE:
+      // Every CHOICE context has at least one self-resolving option, but a
+      // Kraken "three"/"one" choice that leaves no legal target is a dead end;
+      // the autoResolver picks "one"/"self"/"6", all of which resolve here so
+      // long as there is at least one target where the chosen branch needs one.
+      if (aw.context === ScPrompt.KRAKEN_CHOICE) {
+        // "one" needs >=1 target; if even that is impossible the choice is stuck.
+        return validTargets(state, aw.seat, ScPrompt.KRAKEN_ONE, aw.cardId).length > 0;
+      }
+      return true; // star-choice (self), sixseven-space (6/7) always resolve
+    case ScAwait.SPACE:
+      return true; // any space 1..67 resolves (target is fixed from step 1)
+    case ScAwait.SATELLITE:
+      return true; // the identity reorder always resolves
+    default:
+      return false;
   }
 }
 
