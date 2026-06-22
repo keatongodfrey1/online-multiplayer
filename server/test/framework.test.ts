@@ -43,6 +43,33 @@ describe("BaseGameRoom framework", () => {
     assert.strictEqual((host.state as any).startCount, 0);
   });
 
+  it("survives an uncaught exception in a message handler (crash-safety net)", async () => {
+    const { room, host } = await createWithHost();
+    await colyseus.sdk.joinById(room.roomId, { nickname: "Bob" }); // reach minPlayers
+    await room.waitForNextPatch();
+    assert.strictEqual(room.state.players.size, 2);
+
+    // Capture the expected error log (and keep test output clean) while the
+    // "boom" handler throws; onUncaughtException must catch it, not crash the room.
+    const origErr = console.error;
+    let logged = "";
+    console.error = (...a: unknown[]) => {
+      logged += a.map(String).join(" ") + "\n";
+    };
+    try {
+      host.send("boom", {});
+      await until(() => /uncaught exception in onMessage/.test(logged), 2000);
+    } finally {
+      console.error = origErr;
+    }
+
+    // The room must still be alive and processing messages afterward.
+    assert.strictEqual(room.state.players.size, 2, "no players were dropped by the crash");
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    assert.strictEqual(room.state.phase, Phase.PLAYING, "the room still processes messages after a handler threw");
+  });
+
   it("lets a second player join by code", async () => {
     const { room } = await createWithHost();
     const guest = await colyseus.sdk.joinById(room.roomId, { nickname: "Bob" });

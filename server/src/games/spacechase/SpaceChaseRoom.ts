@@ -165,7 +165,15 @@ export class SpaceChaseRoom extends BaseGameRoom<SpaceChaseState> {
   private handleAction(client: Client, move: Move): void {
     if (!this.canAct(client, ScAwait.ACTION)) return;
     if (!isLegalMove(this.engine, move)) return;
-    const r = applyMove(this.engine, move);
+    // Guard ONLY the engine reduce (assign-on-success). commit() stays outside
+    // the catch so a sync-time throw surfaces via onUncaughtException (logged)
+    // rather than being silently swallowed mid-mutation.
+    let r: ReturnType<typeof applyMove>;
+    try {
+      r = applyMove(this.engine, move);
+    } catch {
+      return; // a move that passes isLegalMove but still throws in the reduce: ignore
+    }
     this.engine = r.state;
     this.commit(r.events);
   }
