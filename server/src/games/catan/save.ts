@@ -15,7 +15,7 @@
  */
 import { CatanEngine } from "@backbone/shared";
 
-const { buildBoardGeometry, RESOURCES, TERRAIN_BAG } = CatanEngine;
+const { buildBoardGeometry, RESOURCES, TERRAIN_BAG, ENGINE_VERSION, assertInvariants, actingId } = CatanEngine;
 type GameState = CatanEngine.GameState;
 type PlayerState = CatanEngine.PlayerState;
 type BoardState = CatanEngine.BoardState;
@@ -78,6 +78,7 @@ export function serializeSave({ engine, seats, config, turnCount }: SaveInput): 
   return {
     v: 1,
     game: "catan",
+    engineVersion: ENGINE_VERSION,
     savedAt: Date.now(),
     turnCount,
     config: { useTwoPlayerVariant: config.useTwoPlayerVariant, robberBounty: config.robberBounty },
@@ -128,6 +129,8 @@ export function parseSave(raw: unknown): ParsedSave | null {
   if (typeof raw !== "object" || raw === null) return null;
   const top = raw as Record<string, unknown>;
   if (top.v !== 1 || top.game !== "catan") return null;
+  // engine-version gate: reject saves stamped by a different (or no) ruleset.
+  if (top.engineVersion !== ENGINE_VERSION) return null;
   if (!isInt(top.turnCount, 0, 100000)) return null;
 
   const cfg = top.config as Record<string, unknown> | null;
@@ -307,6 +310,25 @@ export function parseSave(raw: unknown): ParsedSave | null {
     knightDiscardedThisTurn: e.knightDiscardedThisTurn,
     log: [],
   };
+
+  // ---- final cross-checks on the rebuilt state -----------------------------
+  // 1) The engine's own conservation/limit/win-detection net (the same one the
+  //    fuzz runs after every move). A blob that is individually-valid per field
+  //    but globally inconsistent (e.g. a phase that implies a win) is rejected.
+  // 2) A legal-move smoke: a resumed, not-over game MUST be able to produce a
+  //    legal action for whoever is on the clock. RandomPolicy is the seat-keeping
+  //    "ghost" — if it cannot name a move, or the engine rejects that move, the
+  //    state is a dead end (a stuck/soft-locked save) and we refuse it.
+  try {
+    assertInvariants(engine);
+    const seat = engine.phase === "discard" ? +Object.keys(engine.pendingDiscards)[0]! : actingId(engine);
+    if (!Number.isInteger(seat) || seat < 0 || seat >= totalSeats) return null;
+    const move = new CatanEngine.RandomPolicy(0).act(geo, engine, seat);
+    if (!CatanEngine.tryReduce(geo, engine, move).ok) return null;
+  } catch {
+    return null;
+  }
+
   return { engine, seats, config, turnCount: top.turnCount };
 }
 
