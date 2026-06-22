@@ -212,6 +212,23 @@ Copy `server/test/tictactoe.test.ts` (or `arena.test.ts`) to
 3. rematch fully resets the game
 4. whatever is special about your game (late join, hidden info, ...)
 
+**Engine-backed game?** Then the test file also carries the engine's safety
+nets - these are required, not optional (see ARCHITECTURE.md "Engine-backed
+rooms"; copy Water Fight / Splendor):
+
+1. **`shared/src/games/foo/engine/invariants.ts`** exporting
+   `assertInvariants(state)` - conservation + a soft-lock detector, **phase-aware**
+   (gate "in play" checks off setup/over phases or they fire on legit states).
+2. **`shared/src/games/foo/engine/validateData.ts`** exporting
+   `validateFooData(): string[]` - static card/board/cost tables are well-formed,
+   id ranges never collide. One pure test asserting it returns `[]`.
+3. **A fuzz block** in `foo Engine.test.ts` - random playouts at every player
+   count calling `assertInvariants` after every reduce, with a termination guard.
+4. **A strict `parseSave`** (if `supportsSaves`): version-gated, runs
+   `assertInvariants` + a legal-move smoke on the rebuilt state, rejects tampered
+   blobs. Pure accept/reject unit tests (no server boot). Do NOT duplicate the
+   phase-aware invariant cross-checks inline - call `assertInvariants`.
+
 Run everything before calling it done:
 
 ```bash
@@ -219,7 +236,9 @@ npm run typecheck && npm test && npm run build
 ```
 
 ...then do the manual smoke test from the README (two browser windows,
-including the mid-game refresh).
+including the mid-game refresh). Note: `npm test` (mocha + tsx) does NOT
+type-check - `tsx` strips types - so a green test run can still hide type
+errors; `npm run typecheck` is the authority for those.
 
 ## Checklist
 
@@ -229,5 +248,9 @@ including the mid-game refresh).
 - [ ] `client/src/games/foo/FooView.ts`
 - [ ] one entry in `client/src/games/registry.ts`
 - [ ] `server/test/foo.test.ts`
+- [ ] **engine-backed only:** `engine/invariants.ts` (`assertInvariants`,
+      phase-aware) + `engine/validateData.ts` + a fuzz block asserting invariants
+      after every reduce + (if saves) a version-gated `parseSave` that runs
+      `assertInvariants` + a legal-move smoke
 - [ ] typecheck + tests + build green; manual two-window test incl. refresh
 - [ ] no edits inside any `framework/` directory
