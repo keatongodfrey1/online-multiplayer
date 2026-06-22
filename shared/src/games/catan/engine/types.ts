@@ -187,6 +187,11 @@ export const LONGEST_ROAD_MIN = 5;
 export const LARGEST_ARMY_MIN = 3;
 export const WINNING_VP = 10;
 
+// Save-format / rules version. Bump whenever the GameState shape or the rules
+// that a saved blob is rebuilt against change in a way that invalidates older
+// saves. parseSave gates on an exact match and rejects mismatched/absent stamps.
+export const ENGINE_VERSION = "catan-1";
+
 // "CATAN for Two" variant constants (official rule sheet)
 export const TWO_PLAYER_TOKEN_START = 5; // each player starts with 5 trade tokens
 export const TWO_PLAYER_TOKEN_SUPPLY = 20; // total tokens in the game

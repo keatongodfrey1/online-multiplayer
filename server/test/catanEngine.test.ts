@@ -5,6 +5,7 @@
 // number placement (the official A-R variable setup) and startingPlayer.
 import assert from "node:assert/strict";
 import { CatanEngine } from "@backbone/shared";
+import { parseSave, serializeSave, type SaveSeat, type SaveConfig } from "../src/games/catan/save.js";
 
 const {
   buildBoardGeometry,
@@ -36,6 +37,8 @@ const {
   TWO_PLAYER_TOKEN_SUPPLY,
   GreedyPolicy,
   RandomPolicy,
+  assertInvariants,
+  ENGINE_VERSION,
 } = CatanEngine;
 type GameState = CatanEngine.GameState;
 type BoardState = CatanEngine.BoardState;
@@ -964,25 +967,10 @@ describe("catan engine: cross-turn win via Longest Road transfer", () => {
 describe("catan engine: property test (random legal playouts)", function () {
   this.timeout(120000);
 
-  function invariantsOk(s: GameState, where: string): void {
-    for (const r of RESOURCES) {
-      let total = s.bank[r];
-      for (const p of s.players) total += p.hand[r];
-      assert.equal(total, 19, `[${where}] conservation broken for ${r}`);
-      assert.ok(s.bank[r] >= 0, `[${where}] negative bank ${r}`);
-    }
-    for (const p of s.players) {
-      for (const r of RESOURCES) assert.ok(p.hand[r] >= 0, `[${where}] negative hand p${p.id} ${r}`);
-      assert.ok(
-        p.piecesLeft.roads >= 0 && p.piecesLeft.settlements >= 0 && p.piecesLeft.cities >= 0,
-        `[${where}] negative pieces p${p.id}`,
-      );
-    }
-    if (s.phase !== "gameOver") {
-      for (const p of s.players)
-        assert.ok(victoryPoints(s, p.id) < WINNING_VP, `[${where}] missed win: p${p.id} at ${victoryPoints(s, p.id)} VP`);
-    }
-  }
+  // The conservation/limit/win-detection net now lives in the engine
+  // (shared/src/games/catan/engine/invariants.ts) so parseSave reuses it; this
+  // wrapper keeps the call sites and failure-message format identical.
+  const invariantsOk = (s: GameState, where: string): void => assertInvariants(s, where);
 
   it("80 randomized games (3-6 players) never break conservation, limits, or win detection", () => {
     const mulberry = (a: number) => () => {
@@ -1914,6 +1902,113 @@ describe("catan engine: CATAN for Two — property test", function () {
         }
       }
       invariants(s, `seed${seed}-final`);
+    }
+  });
+});
+
+// =============================================================================
+// Save validator (pure, no server boot): ENGINE_VERSION gate + legal-move smoke.
+// parseSave never trusts the blob — these confirm the new guards reject what
+// the old per-field checks would have waved through.
+// =============================================================================
+describe("catan save: version gate + legal-move smoke", () => {
+  /**
+   * A standard 4p game advanced into the main phase (resumable, has moves).
+   * Built exactly as CatanRoom does — rollForOrder on — so the blob shape
+   * (orderRolls sized to the seats) matches what parseSave expects.
+   */
+  function midGameSave(): { engine: GameState; seats: SaveSeat[]; config: SaveConfig } {
+    let engine = createInitialGameState(geo, { numPlayers: 4, seed: 42, numbers: "balanced", rollForOrder: true });
+    let guard = 0;
+    while (engine.phase === "rollForOrder" && guard++ < 30) {
+      const next = engine.orderContenders.find((p) => engine.orderRolls[p] === null)!;
+      engine = reduce(geo, engine, { type: "rollForOrder", player: next });
+    }
+    guard = 0;
+    while ((engine.phase === "setupSettlement" || engine.phase === "setupRoad") && guard++ < 300) {
+      if (engine.phase === "setupSettlement")
+        engine = reduce(geo, engine, { type: "placeSetupSettlement", vertex: getValidInitialSettlements(geo, engine.board)[0]! });
+      else
+        engine = reduce(geo, engine, {
+          type: "placeSetupRoad",
+          edge: getValidRoads(geo, engine.board, engine.currentPlayer, { setupVertex: engine.lastSettlementVertex! })[0]!,
+        });
+    }
+    engine = toMain(engine);
+    const seats: SaveSeat[] = [0, 1, 2, 3].map((i) => ({
+      nickname: `P${i}`,
+      isBot: false,
+      gone: false,
+    }));
+    const config: SaveConfig = { useTwoPlayerVariant: false, robberBounty: false };
+    return { engine, seats, config };
+  }
+
+  it("a clean blob round-trips through serializeSave -> parseSave", () => {
+    const { engine, seats, config } = midGameSave();
+    const blob = serializeSave({ engine, seats, config, turnCount: 3 });
+    const parsed = parseSave(blob);
+    assert.ok(parsed, "the produced blob validates");
+    assert.equal(parsed!.engine.phase, "main");
+    assert.equal(parsed!.turnCount, 3);
+    assert.equal(parsed!.seats.length, 4);
+  });
+
+  it("the blob carries the engine version stamp", () => {
+    const { engine, seats, config } = midGameSave();
+    const blob = serializeSave({ engine, seats, config, turnCount: 0 }) as Record<string, unknown>;
+    assert.equal(blob.engineVersion, ENGINE_VERSION);
+  });
+
+  it("rejects a wrong or absent engineVersion", () => {
+    const { engine, seats, config } = midGameSave();
+    const blob = serializeSave({ engine, seats, config, turnCount: 0 }) as Record<string, unknown>;
+
+    assert.strictEqual(parseSave({ ...blob, engineVersion: "catan-0" }), null, "older version rejected");
+    assert.strictEqual(parseSave({ ...blob, engineVersion: "splendor-1" }), null, "foreign version rejected");
+    const { engineVersion: _drop, ...without } = blob;
+    assert.strictEqual(parseSave(without), null, "absent version rejected");
+  });
+
+  it("assertInvariants throws on a missed-win state (the net parseSave runs after rebuild)", () => {
+    // Globally impossible: a resumable (non-gameOver) phase while a seat already
+    // sits at the winning VP. Per-field validation would wave this through
+    // (winner is null, phase is resumable); the engine invariant is what catches
+    // it. Build the 10 VP purely from the board + the two award holders so no
+    // conservation/composition field check fires first.
+    const { engine } = midGameSave();
+    // four cities (8 VP) on mutually-distant vertices owned by P0...
+    engine.board.vertices.forEach((v) => (v.building = null));
+    let placed = 0;
+    for (let id = 0; id < geo.vertices.length && placed < 4; id++) {
+      const tooClose = geo.vertices[id]!.neighbors.some((n) => engine.board.vertices[n]!.building);
+      if (tooClose) continue;
+      engine.board.vertices[id]!.building = { owner: 0, type: "city" };
+      placed++;
+    }
+    assert.equal(placed, 4, "placed four distant cities for P0");
+    engine.longestRoadHolder = 0; // +2 -> 10 VP total, while phase is still "main"
+    assert.ok(victoryPoints(engine, 0) >= WINNING_VP, "fixture really is at/over the win line");
+    assert.throws(() => assertInvariants(engine), /missed win/, "the engine net flags it");
+  });
+
+  it("a resumed not-over state can always produce a legal move (the smoke parseSave runs)", () => {
+    // The legal-move smoke is the new save guard: a rebuilt, not-over game must
+    // be actionable by whoever is on the clock. Exercise it directly across the
+    // resumable phases a save can sit in, mirroring parseSave's seat selection
+    // and the policy/tryReduce no-throw probe.
+    const phases: GameState[] = [];
+    phases.push(toMain(setupGame(4, 7))); // main
+    // a discard phase (roll a 7 with a fat hand)
+    let d = setupGame(4, 7);
+    d.players[d.currentPlayer]!.hand = { ...emptyBag(), wool: 4, grain: 4 };
+    d = reduce(geo, d, { type: "rollDice", dice: [3, 4] }, TRUST); // 7
+    phases.push(d); // discard or moveRobber
+    for (const st of phases) {
+      assert.notEqual(st.phase, "gameOver");
+      const seat = st.phase === "discard" ? +Object.keys(st.pendingDiscards)[0]! : actingId(st);
+      const move = new RandomPolicy(0).act(geo, st, seat);
+      assert.ok(tryReduce(geo, st, move).ok, `the ${st.phase} state is actionable`);
     }
   });
 });

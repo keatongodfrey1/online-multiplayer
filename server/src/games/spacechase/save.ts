@@ -7,12 +7,12 @@
  * will touch it. A tampered or version-mismatched blob returns null and is
  * ignored. serializeSave is the inverse - a plain JSON snapshot.
  */
-import { SpaceChaseEngine, isValidSpaceChaseTurnSeconds, ScAwait } from "@backbone/shared";
+import { SpaceChaseEngine, isValidSpaceChaseTurnSeconds, ScAwait, ScPrompt, SC_SATELLITE_PEEK } from "@backbone/shared";
 
 type GameState = SpaceChaseEngine.GameState;
 type EngineSeat = SpaceChaseEngine.EngineSeat;
 
-const { ENGINE_VERSION, assertInvariants } = SpaceChaseEngine;
+const { ENGINE_VERSION, assertInvariants, legalActionExists, isLegalMove, autoResolve } = SpaceChaseEngine;
 
 const SAVE_VERSION = 1;
 
@@ -105,6 +105,83 @@ const AWAIT_TYPES: ReadonlySet<string> = new Set<string>([
   "", ScAwait.ACTION, ScAwait.TARGET, ScAwait.MULTI_TARGET, ScAwait.CHOICE, ScAwait.SPACE, ScAwait.SATELLITE,
 ]);
 
+/**
+ * Is the restored `awaiting` block one the engine could actually have produced?
+ * The per-field parse only range-checks the numbers; this proves the
+ * inputType / context / count / peek / cardId combination is internally
+ * consistent (a state machine reachable from a real draw), so a hand-forged
+ * blob describing an impossible prompt is rejected before the room loads it.
+ * Only meaningful for a running (not-over) game.
+ */
+function sameMultiset(a: number[], b: number[]): boolean {
+  if (a.length !== b.length) return false;
+  const counts = new Map<number, number>();
+  for (const x of a) counts.set(x, (counts.get(x) ?? 0) + 1);
+  for (const x of b) {
+    const c = counts.get(x);
+    if (!c) return false;
+    counts.set(x, c - 1);
+  }
+  return true;
+}
+
+function awaitingIsReachable(engine: GameState): boolean {
+  const aw = engine.awaiting;
+  const live = engine.players.filter((p) => !p.gone).length;
+  switch (aw.inputType) {
+    case ScAwait.ACTION:
+      // The idle turn: no card has been drawn, so no prompt baggage.
+      return aw.context === "" && aw.cardId === 0 && aw.count === 0 && aw.peek.length === 0 && aw.targetSeat === -1;
+    case ScAwait.TARGET:
+      return (
+        aw.cardId > 0 &&
+        (aw.context === ScPrompt.ATTACK_TARGET ||
+          aw.context === ScPrompt.BLACKHOLE_TARGET ||
+          aw.context === ScPrompt.KRAKEN_ONE ||
+          aw.context === ScPrompt.STAR_TARGET ||
+          aw.context === ScPrompt.SIXSEVEN_TARGET) &&
+        aw.peek.length === 0
+      );
+    case ScAwait.MULTI_TARGET:
+      // Only Kraken "three"; count is clamped to min(3, live) when opened, so a
+      // count of 0 or one that exceeds the live seats is forged.
+      return (
+        aw.context === ScPrompt.KRAKEN_THREE &&
+        aw.cardId > 0 &&
+        aw.count >= 1 &&
+        aw.count === Math.min(3, live) &&
+        aw.peek.length === 0
+      );
+    case ScAwait.CHOICE:
+      return (
+        aw.cardId > 0 &&
+        (aw.context === ScPrompt.KRAKEN_CHOICE ||
+          aw.context === ScPrompt.STAR_CHOICE ||
+          aw.context === ScPrompt.SIXSEVEN_SPACE) &&
+        // sixseven-space carries the step-1 victim; the others have none.
+        (aw.context === ScPrompt.SIXSEVEN_SPACE ? aw.targetSeat >= 0 : aw.targetSeat === -1) &&
+        aw.peek.length === 0
+      );
+    case ScAwait.SPACE:
+      // Black Hole step 2: a victim was chosen in step 1.
+      return aw.context === ScPrompt.BLACKHOLE_SPACE && aw.cardId > 0 && aw.targetSeat >= 0 && aw.peek.length === 0;
+    case ScAwait.SATELLITE: {
+      // The peek is a non-empty hand of up to SC_SATELLITE_PEEK cards drawn from
+      // the top of the deck (next-draw first), and count mirrors its length. It
+      // must be a multiset of the ACTUAL top cards, else the reorder it answers
+      // would smuggle new card ids into the deck and break conservation.
+      const n = aw.peek.length;
+      if (aw.context !== ScPrompt.SATELLITE || n < 1 || n > SC_SATELLITE_PEEK || aw.count !== n) return false;
+      if (n > engine.deck.length) return false;
+      const top: number[] = [];
+      for (let k = 0; k < n; k++) top.push(engine.deck[engine.deck.length - 1 - k]!);
+      return sameMultiset(top, aw.peek);
+    }
+    default:
+      return false;
+  }
+}
+
 function parseEngine(raw: unknown): GameState | null {
   const o = asObject(raw);
   if (!o) return null;
@@ -193,12 +270,38 @@ function parseEngine(raw: unknown): GameState | null {
   };
 
   // The engine's own invariants are the final gate (deck multiset, positions,
-  // portal consistency). A tampered blob that slips past the field checks dies here.
+  // portal consistency, over/winner consistency, AND the soft-lock detector -
+  // a tampered blob whose awaited seat is gone or can't act dies here). A blob
+  // that slips past the field checks but is internally inconsistent dies here.
   try {
     assertInvariants(engine);
   } catch {
     return null;
   }
+
+  // Awaiting-reachability cross-check: an inconsistent awaiting block can pass
+  // the per-field range checks yet describe a prompt no player could ever be
+  // in (e.g. a SATELLITE await with an empty peek, a MULTI_TARGET await whose
+  // count exceeds the live seats, a TARGET await for a card that does not open
+  // a target prompt). assertInvariants only fires for a NOT-over game; do the
+  // structural reachability check for every running blob, then prove a legal
+  // action exists by both the cheap predicate AND a no-throw auto-resolve.
+  if (!engine.over) {
+    if (!awaitingIsReachable(engine)) return null;
+    if (!legalActionExists(engine)) return null;
+    if (engine.awaiting.inputType === ScAwait.ACTION) {
+      // A running ACTION turn must accept the basic moves.
+      if (!isLegalMove(engine, { kind: "ROLL" }) || !isLegalMove(engine, { kind: "DRAW" })) return null;
+    }
+    // The deterministic auto-resolver must not throw on the restored prompt -
+    // the room loops it for timed-out seats, so a blob it chokes on is poison.
+    try {
+      autoResolve(engine, engine.awaiting.seat);
+    } catch {
+      return null;
+    }
+  }
+
   return engine;
 }
 

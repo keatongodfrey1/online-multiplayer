@@ -288,6 +288,111 @@ describe("paper.io engine", () => {
     assert.ok(Math.abs(path - speed) <= 1, `bot stepped ~${speed} cells in 1s (got ${path})`);
   });
 
+  // --- fuzz: drive random actors through many ticks and assert the grid never
+  //     drifts out of sync with the actor set. Paper.io is real-time, so the
+  //     guard is the GRID invariant (owned cells map to live actors, counts
+  //     match a fresh scan, no stale trails, heads in bounds) plus a hard
+  //     termination guard. Kept fast: small boards, capped ticks, all pure. ---
+  const { assertGridInvariants } = PaperIoEngine;
+
+  // A cheap deterministic random "human" controller: re-aim toward a random
+  // heading every few ticks so heads roam, claim, die, and respawn.
+  function steerRandomly(w: World, rnd: () => number, tick: number): void {
+    for (const h of w.humans) {
+      if (h.eliminated || h.dead) continue;
+      if (tick % 5 === 0 || !h.moving) w.steer(h.seat, rnd() * Math.PI * 2);
+    }
+  }
+
+  // Tiny LCG so the fuzz is reproducible independently of the engine's RNG.
+  function lcg(seed: number): () => number {
+    let s = seed >>> 0;
+    return () => {
+      s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+
+  it("fuzz: grid invariants hold across many ticks at several board sizes", () => {
+    const sizes: [number, number][] = [
+      [16, 16],
+      [24, 18],
+      [40, 28],
+    ];
+    const difficulties: BotDifficulty[] = ["easy", "normal", "hard", "extreme"];
+    for (let run = 0; run < 12; run++) {
+      const [cols, rows] = sizes[run % sizes.length]!;
+      const humanCount = 1 + (run % 3); // 1..3 humans
+      const humans = Array.from({ length: humanCount }, (_, i) => ({ seat: i }));
+      const w = makeWorld({
+        cols,
+        rows,
+        speedCellsPerSec: 13,
+        winMode: "target",
+        targetThreshold: 0.6,
+        humanLives: 1 + (run % 3),
+        humans,
+        botCount: 2 + (run % 4),
+        botDifficulty: difficulties[run % difficulties.length]!,
+        seed: 1000 + run * 7,
+      });
+      const rnd = lcg(4242 + run);
+
+      assertGridInvariants(w); // clean at setup
+      const maxTicks = 1200; // ~60s of sim at 20Hz; ample for the small boards
+      let ticks = 0;
+      for (; ticks < maxTicks && !w.ended; ticks++) {
+        steerRandomly(w, rnd, ticks);
+        w.step(1 / 20);
+        if (ticks % 3 === 0) assertGridInvariants(w);
+      }
+      assertGridInvariants(w); // and after the final tick
+      // NOTE: a target round of roaming bots is NOT guaranteed to resolve within
+      // the tick budget, so this test asserts the GRID INVARIANTS hold under
+      // random play, not termination — `w.ended || ticks === maxTicks` would be a
+      // tautology (the loop exits only when one of those is true). The maxTicks
+      // cap is purely a runaway guard so the test can't hang; the timed-mode fuzz
+      // below is what proves a round always ends.
+      if (w.ended) {
+        assert.ok(w.endResult !== null, `run ${run}: ended without an endResult`);
+      }
+    }
+  });
+
+  it("fuzz: timed mode ALWAYS terminates and invariants hold throughout", () => {
+    const sizes: [number, number][] = [
+      [16, 16],
+      [32, 20],
+    ];
+    for (let run = 0; run < 6; run++) {
+      const [cols, rows] = sizes[run % sizes.length]!;
+      const w = makeWorld({
+        cols,
+        rows,
+        winMode: "timed",
+        timedLimitMs: 3000, // 3s of sim
+        humans: [{ seat: 0 }, { seat: 1 }],
+        humanLives: 2,
+        botCount: 2 + (run % 3),
+        botDifficulty: "hard",
+        seed: 5000 + run * 13,
+      });
+      const rnd = lcg(777 + run);
+
+      // 3s limit at 20Hz = 60 ticks; give a comfortable margin then assert it ended.
+      const maxTicks = 200;
+      let ticks = 0;
+      for (; ticks < maxTicks && !w.ended; ticks++) {
+        steerRandomly(w, rnd, ticks);
+        w.step(1 / 20);
+        if (ticks % 2 === 0) assertGridInvariants(w);
+      }
+      assertGridInvariants(w);
+      assert.equal(w.ended, true, `run ${run}: timed round failed to terminate in ${ticks} ticks`);
+      assert.ok(w.endResult !== null, `run ${run}: timed round ended without an endResult`);
+    }
+  });
+
   it("is deterministic: same seed -> identical grid", () => {
     const run = () => {
       const w = makeWorld({ cols: 48, rows: 32, humans: [{ seat: 0 }], botCount: 3, botDifficulty: "hard", seed: 999 });

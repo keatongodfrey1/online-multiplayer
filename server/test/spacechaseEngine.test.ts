@@ -9,7 +9,8 @@
  * games played through un-tampered draws.)
  */
 import assert from "node:assert/strict";
-import { SpaceChaseEngine } from "@backbone/shared";
+import { SpaceChaseEngine, ScAwait, ScChoice, ScPrompt } from "@backbone/shared";
+import { parseSave, serializeSave, type SaveSeat } from "../src/games/spacechase/save.js";
 
 const {
   createGame,
@@ -18,6 +19,7 @@ const {
   applyLeave,
   autoResolve,
   isLegalMove,
+  legalActionExists,
   assertInvariants,
   ranking,
   buildDeck,
@@ -392,6 +394,33 @@ describe("spacechase engine - cards", () => {
     assert.ok(loss && loss.a === 3, "one target loses 3 turns");
   });
 
+  it("re-clamps a Kraken-three count when a non-awaited target leaves (no soft-lock)", () => {
+    const opened = draw(start(3, 9), CARD.KRAKEN).state;
+    const g3 = applyResolution(opened, { kind: "CHOICE", choice: "three" }).state;
+    assert.equal(g3.awaiting.inputType, "MULTI_TARGET");
+    assert.equal(g3.awaiting.count, 3);
+    const awaited = g3.awaiting.seat;
+
+    // A NON-awaited participant leaves while the prompt is open. Without the
+    // re-clamp the awaited seat could never pick 3 valid targets (only 2 remain)
+    // and autoResolve would throw every timer — a soft-lock.
+    const victim = [0, 1, 2].find((s) => s !== awaited)!;
+    const left = applyLeave(g3, victim).state;
+    assert.equal(left.awaiting.inputType, "MULTI_TARGET");
+    assert.equal(left.awaiting.seat, awaited, "the prompt stays with the same awaited seat");
+    assert.equal(left.awaiting.count, 2, "count re-clamped to the 2 remaining valid targets");
+    assert.ok(legalActionExists(left), "the awaited seat still has a legal action");
+
+    // resolveTargets requires EXACTLY awaiting.count targets, so the 2 remaining
+    // targets must now resolve cleanly (before the re-clamp, count stayed 3 and
+    // this threw "wrong number of targets"); autoResolve must not throw either.
+    // (assertInvariants is skipped here — `draw` plants the Kraken, which breaks
+    // the 42-card conservation the invariant checks; the fuzz covers that path.)
+    const targets = [0, 1, 2].filter((s) => s !== victim);
+    assert.doesNotThrow(() => applyResolution(left, { kind: "TARGETS", seats: targets }));
+    assert.doesNotThrow(() => autoResolve(left, awaited));
+  });
+
   it("6-7: first draw targets+chooses 6/7; the SAME player's second draw sends them to 67", () => {
     let g = start(2, 9);
     g = draw(g, CARD.SIX_SEVEN).state; // Ada, 1st
@@ -546,5 +575,279 @@ describe("spacechase engine - winning + lifecycle", () => {
       assertInvariants(g);
     }
     assert.ok(ranking(g).length >= 1);
+  });
+});
+
+// ── random-playout fuzz ──────────────────────────────────────────────────────
+// Unlike the scripted tests (which plant draws and dice), these drive the game
+// through UN-TAMPERED draws so the deck multiset stays at 42 and assertInvariants
+// applies in full. A separate move-choice RNG (mulberry32) randomizes ROLL vs
+// DRAW and every prompt answer; invariants - including the soft-lock detector -
+// must hold after EVERY single reduce, the game must always terminate, and a
+// not-over game must always have a legal action.
+
+describe("spacechase engine - random-playout fuzz", () => {
+  /** Pick a legal answer to whatever prompt is open, randomized but always
+   *  valid (falls back to autoResolve, which is the deterministic safe choice). */
+  function randomResolve(g: GameState, rnd: () => number): ApplyResult {
+    const aw = g.awaiting;
+    const live = g.players.filter((p) => !p.gone).map((p) => p.seat);
+    const pick = <T,>(xs: T[]): T => xs[Math.floor(rnd() * xs.length)]!;
+    try {
+      switch (aw.inputType) {
+        case ScAwait.TARGET: {
+          // selfAllowed: black hole + worm hole forbid self; rest allow it.
+          const card = aw.cardId;
+          const noSelf = aw.context === ScPrompt.BLACKHOLE_TARGET ||
+            (aw.context === ScPrompt.ATTACK_TARGET && card === 41 /* Worm Hole */);
+          const pool = live.filter((s) => !noSelf || s !== aw.seat);
+          if (pool.length === 0) return autoResolve(g, aw.seat);
+          return applyResolution(g, { kind: "TARGET", seat: pick(pool) });
+        }
+        case ScAwait.MULTI_TARGET: {
+          const pool = live.slice();
+          // shuffle, take exactly count
+          for (let k = pool.length - 1; k > 0; k--) {
+            const j = Math.floor(rnd() * (k + 1));
+            [pool[k], pool[j]] = [pool[j]!, pool[k]!];
+          }
+          if (pool.length < aw.count) return autoResolve(g, aw.seat);
+          return applyResolution(g, { kind: "TARGETS", seats: pool.slice(0, aw.count) });
+        }
+        case ScAwait.CHOICE: {
+          const opts =
+            aw.context === ScPrompt.KRAKEN_CHOICE ? [ScChoice.KRAKEN_ONE, ScChoice.KRAKEN_THREE] :
+            aw.context === ScPrompt.STAR_CHOICE ? [ScChoice.STAR_SELF, ScChoice.STAR_SEND] :
+            [ScChoice.SIX, ScChoice.SEVEN];
+          return applyResolution(g, { kind: "CHOICE", choice: pick(opts) });
+        }
+        case ScAwait.SPACE:
+          return applyResolution(g, { kind: "SPACE", space: 1 + Math.floor(rnd() * 67) });
+        case ScAwait.SATELLITE: {
+          const order = aw.peek.map((_, k) => k);
+          for (let k = order.length - 1; k > 0; k--) {
+            const j = Math.floor(rnd() * (k + 1));
+            [order[k], order[j]] = [order[j]!, order[k]!];
+          }
+          return applyResolution(g, { kind: "SATELLITE", order });
+        }
+        default:
+          return autoResolve(g, aw.seat);
+      }
+    } catch {
+      // Any randomized choice that turns out illegal -> fall back to the safe
+      // deterministic resolver (this must never throw on a legal game).
+      return autoResolve(g, aw.seat);
+    }
+  }
+
+  function playout(players: number, seed: number, moveSeed: number): GameState {
+    const rnd = mulberry32(moveSeed);
+    let g = createGame(players, seed, undefined);
+    assertInvariants(g);
+    let leftOne = false;
+    for (let step = 0; step < 5000 && !g.over; step++) {
+      // Rarely have a non-current seat leave (exercises the gone-seat skip +
+      // the soft-lock detector), but never below 2 live so the race continues.
+      const liveSeats = g.players.filter((p) => !p.gone);
+      if (!leftOne && players >= 3 && liveSeats.length >= 3 && rnd() < 0.02) {
+        const victim = g.players.find((p) => !p.gone && p.seat !== g.awaiting.seat);
+        if (victim) {
+          g = applyLeave(g, victim.seat).state;
+          leftOne = true;
+          assertInvariants(g);
+          continue;
+        }
+      }
+      if (g.awaiting.inputType === ScAwait.ACTION) {
+        g = (rnd() < 0.5 ? applyMove(g, { kind: "ROLL" }) : applyMove(g, { kind: "DRAW" })).state;
+      } else {
+        g = randomResolve(g, rnd).state;
+      }
+      assertInvariants(g);
+      // A running game must always offer a legal action (the soft-lock contract).
+      if (!g.over) assert.ok(legalActionExists(g), "running game has a legal action");
+    }
+    return g;
+  }
+
+  it("random playouts keep invariants every step and always terminate, across player counts", function () {
+    this.timeout(60000);
+    for (let players = 2; players <= 5; players++) {
+      let finished = 0;
+      for (let trial = 0; trial < 40; trial++) {
+        const g = playout(players, 1000 * players + trial, 7 * trial + 13);
+        // Either someone won, or (after a rare leave) the rest played on; the
+        // termination guard means we never spun forever.
+        if (g.over) finished++;
+        assert.ok(ranking(g).length >= 1);
+      }
+      // The vast majority must reach a real finish (proves no soft-lock stall).
+      assert.ok(finished >= 30, `${players}p: only ${finished}/40 playouts finished`);
+    }
+  });
+
+  it("a fresh game never reports a missing legal action (soft-lock smoke)", () => {
+    for (let players = 2; players <= 5; players++) {
+      const g = createGame(players, players * 99, undefined);
+      assert.ok(legalActionExists(g));
+      assertInvariants(g);
+    }
+  });
+});
+
+// ── pure parseSave round-trip + tamper rejection (no server boot) ─────────────
+
+describe("spacechase save - parseSave accept + reject (pure)", () => {
+  const SEATS2: SaveSeat[] = [
+    { nickname: "Ada", isBot: false, gone: false },
+    { nickname: "Ben", isBot: false, gone: false },
+  ];
+
+  /** A mid-game engine snapshot reached through real play (clean 42-card pile). */
+  function midGame(players = 2, seed = 4242): GameState {
+    let g = createGame(players, seed, ["Ada", "Ben", "Cy", "Di", "Ev"].slice(0, players));
+    for (let t = 0; t < 12 && !g.over; t++) {
+      if (g.awaiting.inputType === ScAwait.ACTION) {
+        g = (t % 3 === 0 ? applyMove(g, { kind: "DRAW" }) : applyMove(g, { kind: "ROLL" })).state;
+      } else {
+        g = autoResolve(g, g.awaiting.seat).state;
+      }
+    }
+    return g;
+  }
+
+  function blob(engine: GameState, seats = SEATS2) {
+    return serializeSave({ engine, seats, turnSeconds: 30 }) as Record<string, unknown>;
+  }
+
+  it("a clean round-tripped blob validates", () => {
+    const g = midGame();
+    const parsed = parseSave(blob(g));
+    assert.ok(parsed, "clean save accepted");
+    assert.equal(parsed!.engine.players.length, 2);
+    assert.equal(parsed!.seats.length, 2);
+  });
+
+  it("a finished game round-trips", () => {
+    let g = createGame(2, 9, ["Ada", "Ben"]);
+    g.players[0]!.position = 67;
+    g.forcedRolls.push(3);
+    g = applyMove(g, { kind: "ROLL" }).state;
+    assert.equal(g.over, true);
+    assert.ok(parseSave(blob(g)), "finished game accepted");
+  });
+
+  it("rejects a wrong-game / wrong-version envelope", () => {
+    const g = midGame();
+    assert.equal(parseSave({ ...blob(g), game: "splendor" }), null);
+    assert.equal(parseSave({ ...blob(g), v: 999 }), null);
+    assert.equal(parseSave("not even an object"), null);
+    assert.equal(parseSave({ ...blob(g), turnSeconds: -5 }), null);
+  });
+
+  it("rejects an engineVersion mismatch", () => {
+    const g = midGame();
+    const b = blob(g);
+    (b.engine as Record<string, unknown>).engineVersion = "sc-0";
+    assert.equal(parseSave(b), null);
+  });
+
+  it("rejects a tampered deck (broken card conservation)", () => {
+    const g = midGame();
+    const b = blob(g);
+    const eng = b.engine as { deck: number[] };
+    eng.deck = [...eng.deck, 5]; // 43 cards now
+    assert.equal(parseSave(b), null);
+  });
+
+  it("rejects an out-of-range position", () => {
+    const g = midGame();
+    const b = blob(g);
+    (b.engine as { players: { position: number }[] }).players[0]!.position = 99;
+    assert.equal(parseSave(b), null);
+  });
+
+  it("rejects awaiting a seat that has left the race (soft-lock)", () => {
+    // Not-over game whose current seat is gone -> assertInvariants fires.
+    const g = midGame(3, 321);
+    const b = blob(g, [
+      { nickname: "Ada", isBot: false, gone: false },
+      { nickname: "Ben", isBot: false, gone: false },
+      { nickname: "Cy", isBot: false, gone: true },
+    ]);
+    const eng = b.engine as { awaiting: { seat: number }; players: { gone: boolean }[] };
+    eng.players[2]!.gone = true;
+    eng.awaiting.seat = 2; // awaiting a gone seat
+    assert.equal(parseSave(b), null);
+  });
+
+  it("rejects an internally-inconsistent awaiting block (impossible prompt)", () => {
+    const g = midGame();
+    // Force an ACTION turn so the base blob is clean, then forge a prompt that
+    // carries baggage ACTION never has.
+    while (g.awaiting.inputType !== ScAwait.ACTION && !g.over) {
+      // (midGame ends on ACTION already, but be safe)
+      break;
+    }
+    const b = blob(g);
+    const aw = (b.engine as { awaiting: Record<string, unknown> }).awaiting;
+    // A SATELLITE await whose peek does NOT match the top of the deck is forged.
+    aw.inputType = ScAwait.SATELLITE;
+    aw.context = ScPrompt.SATELLITE;
+    aw.peek = [1, 2, 3];
+    aw.count = 3;
+    assert.equal(parseSave(b), null);
+  });
+
+  it("rejects a MULTI_TARGET await with a count that exceeds the live seats", () => {
+    const g = midGame(2, 77); // 2 players -> Kraken three count would be 2 max
+    const b = blob(g);
+    const aw = (b.engine as { awaiting: Record<string, unknown> }).awaiting;
+    aw.inputType = ScAwait.MULTI_TARGET;
+    aw.context = ScPrompt.KRAKEN_THREE;
+    aw.cardId = 22;
+    aw.count = 3; // but only 2 are live
+    assert.equal(parseSave(b), null);
+  });
+
+  it("rejects a TARGET await for a context that never opens one", () => {
+    const g = midGame();
+    const b = blob(g);
+    const aw = (b.engine as { awaiting: Record<string, unknown> }).awaiting;
+    aw.inputType = ScAwait.TARGET;
+    aw.context = "made-up-context";
+    aw.cardId = 17;
+    assert.equal(parseSave(b), null);
+  });
+
+  it("rejects when the lineup gone flags disagree with the engine", () => {
+    const g = midGame();
+    const b = blob(g, [
+      { nickname: "Ada", isBot: false, gone: true }, // engine says not gone
+      { nickname: "Ben", isBot: false, gone: false },
+    ]);
+    assert.equal(parseSave(b), null);
+  });
+
+  it("accepts a legitimately-restored open prompt (Kraken three)", () => {
+    // Reach a real Kraken-three MULTI_TARGET await through play, then save it.
+    // Move the Kraken (#22) to the top WITHOUT changing the multiset (swap with
+    // the current top) so the pile stays a clean 42 cards.
+    let g = createGame(3, 9, ["Ada", "Ben", "Cy"]);
+    const ki = g.deck.indexOf(22);
+    const top = g.deck.length - 1;
+    [g.deck[ki], g.deck[top]] = [g.deck[top]!, g.deck[ki]!];
+    g = applyMove(g, { kind: "DRAW" }).state;
+    g = applyResolution(g, { kind: "CHOICE", choice: ScChoice.KRAKEN_THREE }).state;
+    assert.equal(g.awaiting.inputType, ScAwait.MULTI_TARGET);
+    const seats3: SaveSeat[] = [
+      { nickname: "Ada", isBot: false, gone: false },
+      { nickname: "Ben", isBot: false, gone: false },
+      { nickname: "Cy", isBot: false, gone: false },
+    ];
+    const parsed = parseSave(serializeSave({ engine: g, seats: seats3, turnSeconds: 30 }));
+    assert.ok(parsed, "a real open Kraken-three prompt round-trips");
+    assert.equal(parsed!.engine.awaiting.inputType, ScAwait.MULTI_TARGET);
   });
 });
