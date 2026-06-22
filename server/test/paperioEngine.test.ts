@@ -347,14 +347,12 @@ describe("paper.io engine", () => {
         if (ticks % 3 === 0) assertGridInvariants(w);
       }
       assertGridInvariants(w); // and after the final tick
-      // Termination guard: a target round with steering humans + bots either
-      // resolves (someone wins / wipeout / takeover) or is still legally
-      // progressing. If it ran the full budget without ending, that's a
-      // non-terminating loop we want to know about.
-      assert.ok(
-        w.ended || ticks === maxTicks,
-        `run ${run}: loop exited early (ticks=${ticks}) without ending`
-      );
+      // NOTE: a target round of roaming bots is NOT guaranteed to resolve within
+      // the tick budget, so this test asserts the GRID INVARIANTS hold under
+      // random play, not termination — `w.ended || ticks === maxTicks` would be a
+      // tautology (the loop exits only when one of those is true). The maxTicks
+      // cap is purely a runaway guard so the test can't hang; the timed-mode fuzz
+      // below is what proves a round always ends.
       if (w.ended) {
         assert.ok(w.endResult !== null, `run ${run}: ended without an endResult`);
       }

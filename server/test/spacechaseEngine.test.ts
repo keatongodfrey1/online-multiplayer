@@ -394,6 +394,33 @@ describe("spacechase engine - cards", () => {
     assert.ok(loss && loss.a === 3, "one target loses 3 turns");
   });
 
+  it("re-clamps a Kraken-three count when a non-awaited target leaves (no soft-lock)", () => {
+    const opened = draw(start(3, 9), CARD.KRAKEN).state;
+    const g3 = applyResolution(opened, { kind: "CHOICE", choice: "three" }).state;
+    assert.equal(g3.awaiting.inputType, "MULTI_TARGET");
+    assert.equal(g3.awaiting.count, 3);
+    const awaited = g3.awaiting.seat;
+
+    // A NON-awaited participant leaves while the prompt is open. Without the
+    // re-clamp the awaited seat could never pick 3 valid targets (only 2 remain)
+    // and autoResolve would throw every timer — a soft-lock.
+    const victim = [0, 1, 2].find((s) => s !== awaited)!;
+    const left = applyLeave(g3, victim).state;
+    assert.equal(left.awaiting.inputType, "MULTI_TARGET");
+    assert.equal(left.awaiting.seat, awaited, "the prompt stays with the same awaited seat");
+    assert.equal(left.awaiting.count, 2, "count re-clamped to the 2 remaining valid targets");
+    assert.ok(legalActionExists(left), "the awaited seat still has a legal action");
+
+    // resolveTargets requires EXACTLY awaiting.count targets, so the 2 remaining
+    // targets must now resolve cleanly (before the re-clamp, count stayed 3 and
+    // this threw "wrong number of targets"); autoResolve must not throw either.
+    // (assertInvariants is skipped here — `draw` plants the Kraken, which breaks
+    // the 42-card conservation the invariant checks; the fuzz covers that path.)
+    const targets = [0, 1, 2].filter((s) => s !== victim);
+    assert.doesNotThrow(() => applyResolution(left, { kind: "TARGETS", seats: targets }));
+    assert.doesNotThrow(() => autoResolve(left, awaited));
+  });
+
   it("6-7: first draw targets+chooses 6/7; the SAME player's second draw sends them to 67", () => {
     let g = start(2, 9);
     g = draw(g, CARD.SIX_SEVEN).state; // Ada, 1st

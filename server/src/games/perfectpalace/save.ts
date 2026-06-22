@@ -288,13 +288,7 @@ export function parseSave(raw: unknown): ParsedSave | null {
     engine.duel = parsedDuel;
   }
 
-  // ---- cross-field consistency: the field-by-field rebuild above is structurally
-  //      valid, but a tampered blob can still be internally INCONSISTENT (e.g. a
-  //      duel phase with no duel block, an in-play game whose currentPlayerId/
-  //      activePlayerIndex disagree, or turnOrder missing a live seat). These are
-  //      the cross-checks the per-field validators can't see; assertInvariants
-  //      below catches most, and the legalMoves smoke proves the seat can act. ----
-
+  // ---- cross-field consistency ----
   // The per-field rebuild above is structurally valid but can still be
   // internally INCONSISTENT. assertInvariants (run below) is the authority for
   // the cross-field facts and is PHASE-AWARE — it already enforces that

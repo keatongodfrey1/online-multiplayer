@@ -702,7 +702,18 @@ export function applyLeave(state: GameState, seatIndex: number): ApplyResult {
   seat.portalForward = true;
   seat.justExitedPortal = 0;
   events.push(ev(ScEvent.NOOP, seatIndex, 0, 0, `${seat.name} has left the race.`));
-  if (!s.over && s.awaiting.seat === seatIndex) advanceTurn(s, events);
+  if (!s.over && s.awaiting.seat === seatIndex) {
+    advanceTurn(s, events);
+  } else if (!s.over && s.awaiting.inputType === ScAwait.MULTI_TARGET) {
+    // A NON-awaited participant left while a multi-target (Kraken) prompt is
+    // open. resolveTargets requires EXACTLY awaiting.count targets, so if the
+    // valid-target pool just shrank below count, the awaited seat could never
+    // resolve and autoResolve would throw every timer — a soft-lock. Re-clamp
+    // count to what remains (may reach 0 = the throw simply hits nobody).
+    const aw = s.awaiting;
+    const available = validTargets(s, aw.seat, aw.context, aw.cardId).length;
+    if (available < aw.count) s.awaiting = { ...aw, count: available };
+  }
   return { state: s, events };
 }
 
