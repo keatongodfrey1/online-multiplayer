@@ -73,6 +73,14 @@ export function assertInvariants(s: GameState): void {
     throw new Error("pending action set outside a REACT window");
   }
 
+  // --- pending-flip (interactive Splash draw) consistency ---
+  if (s.awaiting.kind === "SPLASH_DRAW") {
+    if (!s.pendingFlip) throw new Error("SPLASH_DRAW without a pendingFlip");
+    if (s.pendingFlip.attacker !== s.awaiting.seats[0]) throw new Error("pendingFlip attacker != awaited seat");
+  } else if (s.pendingFlip) {
+    throw new Error("pendingFlip set outside a SPLASH_DRAW window");
+  }
+
   // --- living / over consistency (the soft-lock detector) ---
   const living = livingSeats(s);
   if (!s.over && living.length <= 1) throw new Error(`<= 1 living but game not over (living=${living.length})`);
@@ -83,10 +91,12 @@ export function assertInvariants(s: GameState): void {
     if (s.awaiting.seats.length === 0) throw new Error("not over but nobody is awaited");
     const seat = s.awaiting.seats[0]!;
     const ap = s.players[seat];
-    // A Storm Cloud legitimately acts while `out`: its MOVE turn, and ATTACKER_RESPOND
-    // while it is splashing (it may play Hit). Any other await of an out seat
-    // (DEFEND/REACT/DISCARD/EXTRA_THROW) is a bug.
-    const stormOk = ap?.stormCloud && (s.awaiting.kind === "MOVE" || s.awaiting.kind === "ATTACKER_RESPOND");
+    // A Storm Cloud legitimately acts while `out`: its MOVE turn, its own SPLASH_DRAW
+    // (STORM_THROW reuses startThrow), and ATTACKER_RESPOND while it is splashing (it
+    // may play Hit). Any other await of an out seat (DEFEND/REACT/DISCARD/EXTRA_THROW)
+    // is a bug.
+    const stormOk = ap?.stormCloud &&
+      (s.awaiting.kind === "MOVE" || s.awaiting.kind === "SPLASH_DRAW" || s.awaiting.kind === "ATTACKER_RESPOND");
     if (ap?.out && !stormOk) {
       throw new Error(`awaiting a soaked seat ${seat} (kind ${s.awaiting.kind})`);
     }

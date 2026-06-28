@@ -554,10 +554,15 @@ function offerReaction(s: GameState, pending: PendingAction): void {
   resolvePending(s);
 }
 
-/** Flip the Splash Pile for a basic throw, then resolve a Miss or open the ladder.
- *  A spread is consumed only on a Hit (E3) and opens per-target reaction windows. */
-function resolveThrowFlip(s: GameState, attacker: number, target: number, soaker: boolean, spread?: Spread): void {
+/** Resolve the attacker's interactive Splash flip (the DRAW_SPLASH action): flip the
+ *  Splash Pile, record the verdict for the synced reveal, then resolve a Miss or open
+ *  the ladder. Reads the committed throw from `s.pendingFlip`. A spread is consumed
+ *  only on a Hit (E3) and opens per-target reaction windows. */
+function resolveThrowFlip(s: GameState): void {
+  const { attacker, target, soaker, spread } = s.pendingFlip!;
+  s.pendingFlip = null;
   const verdict = flipSplash(s);
+  s.lastSplash = { seq: (s.lastSplash?.seq ?? 0) + 1, attacker, target, verdict };
   s.log.push(`seat ${attacker} throws at ${target}: splash ${verdict}`);
   if (verdict === "miss") {
     afterAttack(s, "basic"); // spread NOT consumed on a Miss
@@ -571,6 +576,13 @@ function resolveThrowFlip(s: GameState, attacker: number, target: number, soaker
   }
 }
 
+/** Commit a throw to the interactive Splash flip: the ATTACKER must now DRAW_SPLASH
+ *  to see hit/miss. (Replaces an immediate flip so the draw is a felt player action.) */
+function armSplashDraw(s: GameState, attacker: number, target: number, soaker: boolean, spread?: Spread): void {
+  s.pendingFlip = { attacker, target, soaker, ...(spread ? { spread } : {}) };
+  s.awaiting = { seats: [attacker], kind: "SPLASH_DRAW" };
+}
+
 /** Execute a committed SINGLE-target action after its pre-flip reaction window
  *  passed (spread attacks skip pending — they open per-target windows instead). */
 function resolvePending(s: GameState): void {
@@ -582,7 +594,7 @@ function resolvePending(s: GameState): void {
     return;
   }
   if (pa.kind === "THROW") {
-    resolveThrowFlip(s, pa.attacker, pa.target, !!pa.soaker);
+    armSplashDraw(s, pa.attacker, pa.target, !!pa.soaker);
     return;
   }
   // PLAY_BIG auto-connects (E2), single target
@@ -595,7 +607,7 @@ function resolvePending(s: GameState): void {
 function startThrow(s: GameState, attacker: number, target: number, soaker: boolean, spread?: Spread): void {
   spendKind(s, attacker, "balloon");
   if (soaker) spendKind(s, attacker, "soaker"); // R2: declared pre-flip (wasted on a Miss)
-  if (spread) resolveThrowFlip(s, attacker, target, soaker, spread);
+  if (spread) armSplashDraw(s, attacker, target, soaker, spread);
   else offerReaction(s, { kind: "THROW", attacker, target, soaker, redirectedSeats: [] });
 }
 
@@ -670,6 +682,7 @@ export function legalResolutions(s: GameState): Resolution[] {
   const seat = actingSeat(s);
   if (seat < 0) return [];
   const p = s.players[seat]!;
+  if (s.awaiting.kind === "SPLASH_DRAW") return [{ kind: "DRAW_SPLASH" }]; // only the draw is legal
   if (s.awaiting.kind === "REACT") {
     const out: Resolution[] = [{ kind: "REACT", action: "pass" }];
     if (handHas(p, "towel")) out.push({ kind: "REACT", action: "towel" });
@@ -837,6 +850,14 @@ function validateResolution(s: GameState, res: Resolution): void {
     return;
   }
   if (res.kind === "EXTRA") throw new Error("not awaiting an extra throw");
+  // SPLASH_DRAW: only the attacker's DRAW_SPLASH is legal. Keep this branch + guard
+  // BEFORE the legalResolutions() fallthrough below, whose matcher only accepts
+  // DEFEND/ATTACKER_RESPOND (a DRAW_SPLASH would otherwise mis-report there).
+  if (s.awaiting.kind === "SPLASH_DRAW") {
+    if (res.kind !== "DRAW_SPLASH") throw new Error("must draw the splash");
+    return;
+  }
+  if (res.kind === "DRAW_SPLASH") throw new Error("not awaiting a splash draw");
   const allowed = legalResolutions(s);
   const ok = allowed.some((r) =>
     r.kind === res.kind &&
@@ -954,6 +975,10 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
   s.reveals = [];
   const seat = actingSeat(s);
   const events: GameEvent[] = [{ type: res.kind, seat, detail: res }];
+  if (res.kind === "DRAW_SPLASH") {
+    resolveThrowFlip(s); // flip the committed throw in s.pendingFlip; resolves Miss/Hit
+    return { state: s, awaiting: s.awaiting, events };
+  }
   if (res.kind === "DISCARD") {
     const hand = s.players[seat]!.hand;
     for (const id of res.cardIds) {

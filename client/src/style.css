@@ -2265,6 +2265,51 @@ button.spl-gem.selected {
   text-align: center;
 }
 
+/* Water Fight lobby settings + steppers (rendered in the lobby, where the in-game
+   WaterFightView <style> is not mounted — so these must be global). */
+.wf-lobby-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 14px;
+}
+.wf-lobby-setting > span:first-child {
+  color: var(--muted);
+}
+.wf-lobby-setting.muted {
+  color: var(--muted);
+  justify-content: center;
+}
+.wf-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.wf-stepper button {
+  min-width: 40px;
+  padding: 4px 10px;
+}
+.wf-stepper .wf-val {
+  min-width: 40px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.wf-add-bot {
+  margin-top: 6px;
+}
+.wf-summary {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 4px 0;
+}
+.wf-summary td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+}
+
 .pio-summary {
   width: 100%;
   border-collapse: collapse;

@@ -6,8 +6,8 @@ import { WaterFightEngine as WF } from "@backbone/shared";
 
 const {
   createGame,
-  applyMove,
-  applyResolution,
+  applyMove: applyMoveRaw,
+  applyResolution: applyResolutionRaw,
   legalMoves,
   legalResolutions,
   isGameOver,
@@ -23,6 +23,24 @@ type GameState = WF.GameState;
 type CardKind = WF.CardKind;
 type SplashCard = WF.SplashCard;
 type Policy = WF.Policy;
+
+// Throwing is now a TWO-step action: the throw commits, then the attacker flips the
+// Splash Pile via DRAW_SPLASH. These thin wrappers auto-advance that trivial draw step
+// so the combat unit tests below read the same post-flip ladder/miss outcome they did
+// when the flip was automatic. (The fuzz harness uses the RAW engine so it still asserts
+// invariants on the intermediate SPLASH_DRAW state. New tests that want to observe the
+// draw explicitly call WF.applyMove / WF.applyResolution.)
+function autoFlip(r: WF.ApplyResult): WF.ApplyResult {
+  return r.awaiting.kind === "SPLASH_DRAW"
+    ? applyResolutionRaw(r.state, { kind: "DRAW_SPLASH" })
+    : r;
+}
+function applyMove(g: GameState, move: WF.Move): WF.ApplyResult {
+  return autoFlip(applyMoveRaw(g, move));
+}
+function applyResolution(g: GameState, res: WF.Resolution): WF.ApplyResult {
+  return autoFlip(applyResolutionRaw(g, res));
+}
 
 // --- helpers (combat unit tests inject hands + force the splash; they do not
 //     assert full card conservation, like Splendor's injected-card tests) ---
@@ -118,6 +136,46 @@ describe("water fight engine: combat", () => {
     assert.equal(r.awaiting.seats[0], 1);
     r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
     assert.equal(r.state.players[1]!.lives, 2);
+  });
+
+  it("a throw awaits the attacker's interactive Splash draw, then resolves on DRAW_SPLASH", () => {
+    // MISS: throw -> SPLASH_DRAW on the thrower -> DRAW_SPLASH -> turn advances, no ladder.
+    let g = game(2, 5);
+    setHand(g, 0, ["balloon"]);
+    forceSplash(g, "miss");
+    let r = applyMoveRaw(g, { kind: "THROW", target: 1 });
+    assert.equal(r.awaiting.kind, "SPLASH_DRAW", "the throw waits for the draw");
+    assert.equal(r.awaiting.seats[0], 0, "the ATTACKER draws");
+    assert.equal(r.state.lastSplash, null, "no flip recorded until the draw");
+    r = applyResolutionRaw(r.state, { kind: "DRAW_SPLASH" });
+    assert.equal(r.state.lastSplash?.verdict, "miss");
+    assert.equal(r.state.lastSplash?.seq, 1, "seq advances on the flip");
+    assert.equal(r.awaiting.kind, "MOVE", "a Miss ends the attack");
+    assert.equal(r.state.players[1]!.lives, 3);
+
+    // HIT: throw -> SPLASH_DRAW -> DRAW_SPLASH opens the defense ladder.
+    g = game(2, 5);
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, []);
+    forceSplash(g, "hit");
+    r = applyMoveRaw(g, { kind: "THROW", target: 1 });
+    assert.equal(r.awaiting.kind, "SPLASH_DRAW");
+    r = applyResolutionRaw(r.state, { kind: "DRAW_SPLASH" });
+    assert.equal(r.state.lastSplash?.verdict, "hit");
+    assert.equal(r.awaiting.kind, "DEFEND", "a Hit opens the ladder");
+    assert.equal(r.awaiting.seats[0], 1, "the defender now acts");
+  });
+
+  it("DRAW_SPLASH is illegal unless the engine awaits a Splash draw", () => {
+    const g = game(2, 5);
+    setHand(g, 0, ["balloon"]);
+    // At MOVE, DRAW_SPLASH must be rejected.
+    assert.throws(() => applyResolutionRaw(g, { kind: "DRAW_SPLASH" }), /not awaiting a splash draw|must draw/);
+    // During SPLASH_DRAW, only DRAW_SPLASH is legal.
+    forceSplash(g, "hit");
+    const r = applyMoveRaw(g, { kind: "THROW", target: 1 });
+    assert.deepEqual(legalResolutions(r.state), [{ kind: "DRAW_SPLASH" }]);
+    assert.throws(() => applyResolutionRaw(r.state, { kind: "DEFEND", defense: "pass" }), /must draw the splash/);
   });
 
   it("HIT, Miss, attacker passes -> the block holds (miss)", () => {
@@ -1367,7 +1425,9 @@ describe("water fight engine: fuzz", () => {
       // Each attack's ladder is bounded by the players' hand cards; a generous
       // guard catches a real non-termination bug without false positives.
       if (++guard > turnCap * 200) throw new Error("engine failed to terminate");
-      g = g.awaiting.kind === "MOVE" ? applyMove(g, policy.move(g)).state : applyResolution(g, policy.resolve(g)).state;
+      // Raw engine: each reduce (incl. the SPLASH_DRAW flip) is its own step so the
+      // invariant check runs on the intermediate draw state too.
+      g = g.awaiting.kind === "MOVE" ? applyMoveRaw(g, policy.move(g)).state : applyResolutionRaw(g, policy.resolve(g)).state;
       assertInvariants(g);
     }
     return g;
