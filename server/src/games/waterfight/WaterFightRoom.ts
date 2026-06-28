@@ -474,12 +474,13 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
     this.state.pendingKind = e.pending ? e.pending.kind : "";
 
     // Mirror the last Splash flip so every client can show the HIT/MISS reveal.
-    if (e.lastSplash) {
-      this.state.lastSplashSeq = e.lastSplash.seq;
-      this.state.lastSplashVerdict = e.lastSplash.verdict;
-      this.state.lastSplashAttacker = e.lastSplash.attacker;
-      this.state.lastSplashTarget = e.lastSplash.target;
-    }
+    // ALWAYS project (reset to 0/"" when null) — the WaterFightState instance is
+    // reused across games, so on a rematch/load a stale seq would otherwise suppress
+    // the new game's reveals (client gates on lastSplashSeq rising past what it saw).
+    const ls = e.lastSplash;
+    this.state.lastSplashSeq = ls?.seq ?? 0;
+    this.state.lastSplashVerdict = ls?.verdict ?? "";
+    this.state.lastSplashTarget = ls?.target ?? 0;
 
     this.state.suddenDeath = e.phase === "sudden-death";
     this.state.turnCount = e.turnCount;

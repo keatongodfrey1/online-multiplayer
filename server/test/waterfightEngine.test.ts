@@ -178,6 +178,24 @@ describe("water fight engine: combat", () => {
     assert.throws(() => applyResolutionRaw(r.state, { kind: "DEFEND", defense: "pass" }), /must draw the splash/);
   });
 
+  it("a Storm Cloud's STORM_THROW awaits its OWN interactive Splash draw (an out seat is legal here)", () => {
+    const g = game(3, 5);
+    g.players[2]!.lives = 0;
+    g.players[2]!.out = true;
+    g.players[2]!.stormCloud = true;
+    setHand(g, 0, []);
+    setHand(g, 1, []);
+    setHand(g, 2, ["balloon"]);
+    g.turnSeat = 2;
+    g.awaiting = { seats: [2], kind: "MOVE" };
+    // No splash override: STORM_THROW stops at SPLASH_DRAW before any flip, so the
+    // default 20-card pile stays conserved for assertInvariants below.
+    const r = applyMoveRaw(g, { kind: "STORM_THROW" });
+    assert.equal(r.awaiting.kind, "SPLASH_DRAW");
+    assert.equal(r.awaiting.seats[0], 2, "the soaked Storm Cloud draws its own flip");
+    assertInvariants(r.state); // exercises the relaxed stormOk branch for SPLASH_DRAW
+  });
+
   it("HIT, Miss, attacker passes -> the block holds (miss)", () => {
     const g = game(2, 5);
     setHand(g, 0, ["balloon"]);

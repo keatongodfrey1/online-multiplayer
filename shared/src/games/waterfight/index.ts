@@ -138,7 +138,7 @@ export class WaterFightState extends BaseState {
   @type("uint16") lastSplashSeq = 0;
   /** "hit" | "miss" | "" (none yet). */
   @type("string") lastSplashVerdict = "";
-  @type("uint8") lastSplashAttacker = 0;
+  /** The seat that was splashed (named in the reveal banner). */
   @type("uint8") lastSplashTarget = 0;
 
   // ---- phase / progress ----

@@ -22,6 +22,8 @@ import { flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAl
 import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
 
 const WF_SAVES_KEY = "waterfight-saves";
+/** How long the HIT/MISS splash reveal stays on screen. */
+const SPLASH_REVEAL_MS = 2600;
 const wfTurnLabel = (blob: any): number => (blob?.engine?.turnCount ?? 0) + 1;
 
 // MIRROR of the engine's TARGETED_SUPPORTS / implemented supports (engine.ts) —
@@ -282,13 +284,13 @@ export class WaterFightView implements GameView {
         seq: state.lastSplashSeq,
         verdict: state.lastSplashVerdict,
         target: state.lastSplashTarget,
-        until: Date.now() + 2600,
+        until: Date.now() + SPLASH_REVEAL_MS,
       };
       if (this.splashTimer) clearTimeout(this.splashTimer);
       this.splashTimer = setTimeout(() => {
         this.splashReveal = undefined;
         this.render();
-      }, 2600);
+      }, SPLASH_REVEAL_MS);
     } else if (this.splashReveal && Date.now() >= this.splashReveal.until) {
       this.splashReveal = undefined; // safety net if the timer was superseded
     }

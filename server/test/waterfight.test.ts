@@ -490,6 +490,43 @@ describe("water fight room", () => {
     await until(() => room2.engine.awaiting.kind === "DEFEND");
   });
 
+  it("rematch clears the stale Splash reveal (seq resets so the next game's draws show)", async () => {
+    const { room, clients } = await startedGame(3);
+    const [a, b] = clients;
+    // Quick finish: a flipped Hit soaks seat 1, which populates lastSplash*.
+    room.engine.players[1]!.lives = 1;
+    room.engine.players[0]!.hand = [{ id: 10000, kind: "balloon" }] as never;
+    room.engine.players[1]!.hand = [] as never;
+    room.engine.splashPile = ["hit", "hit"];
+    a!.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "SPLASH_DRAW");
+    a!.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
+    await until(() => room.engine.awaiting.kind === "DEFEND");
+    b!.send(WaterFightMsg.RESOLVE, { kind: "DEFEND", defense: "pass" });
+    await until(() => room.state.phase === Phase.ENDED);
+    assert.ok(room.state.lastSplashSeq > 0, "a flip happened in game 1");
+
+    a!.send(LobbyMsg.REMATCH, {});
+    b!.send(LobbyMsg.REMATCH, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    assert.strictEqual(room.state.lastSplashSeq, 0, "seq reset — the new game's first flip (seq 1) will be > what a fresh client seeds");
+    assert.strictEqual(room.state.lastSplashVerdict, "", "no stale HIT/MISS verdict carried into the rematch");
+  });
+
+  it("an attacker who disconnects at SPLASH_DRAW is auto-drawn (the table never stalls)", async function () {
+    this.timeout(8000);
+    const { room, clients } = await startedGame(81);
+    const a = clients[0]!;
+    room.engine.players[0]!.hand = [{ id: 10000, kind: "balloon" }] as never;
+    room.engine.players[1]!.hand = [] as never;
+    room.engine.splashPile = ["hit", "hit"];
+    a.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "SPLASH_DRAW" && room.engine.awaiting.seats[0] === 0);
+    await a.leave(false); // attacker drops mid-draw -> becomes an auto seat
+    await until(() => room.engine.awaiting.kind === "DEFEND", 5000); // applyGentle auto-drew -> ladder opened
+    assert.strictEqual(room.engine.awaiting.seats[0], 1);
+  });
+
   it("a game against a bot reaches a winner (the bot self-advances)", async function () {
     this.timeout(60000);
     const room = (await colyseus.createRoom(WATER_FIGHT, { seed: 88 })) as unknown as WaterFightRoom;

@@ -317,7 +317,9 @@ function rebuildPendingFlip(f: unknown, n: number): GameState["pendingFlip"] {
 function rebuildLastSplash(ls: unknown, n: number): GameState["lastSplash"] {
   if (ls == null) return null;
   need(isObj(ls), "lastSplash");
-  need(isInt(ls.seq) && (ls.seq as number) >= 0, "lastSplash seq");
+  // Bounded to the uint16 the schema projects — a tampered seq beyond that would
+  // wrap on sync and desync the client's reveal gate.
+  need(intIn(ls.seq, 0, 65535), "lastSplash seq");
   need(intIn(ls.attacker, 0, n - 1) && intIn(ls.target, 0, n - 1), "lastSplash seats");
   need(ls.verdict === "hit" || ls.verdict === "miss", "lastSplash verdict");
   return {
