@@ -44,19 +44,48 @@ function ensurePopover(): HTMLElement {
   return el;
 }
 
-/** Position the (already-shown) popover near its anchor, clamped to the viewport. */
+/**
+ * Does getBoundingClientRect() already include CSS `zoom`? It does on Safari 26.4+
+ * and Chrome 126+, but returns PRE-zoom coords on older engines. The lobby anchors
+ * sit inside a `zoom: var(--ui-scale)` container while this popover is on un-zoomed
+ * `document.body`, so we must know which space the rect is in. Measured once with an
+ * offscreen zoom:2 probe (100px wide → ~200px rect means rects include zoom).
+ */
+let _rectsIncludeZoom: boolean | null = null;
+function rectsIncludeZoom(): boolean {
+  if (_rectsIncludeZoom !== null) return _rectsIncludeZoom;
+  const probe = document.createElement("div");
+  probe.style.cssText = "position:absolute;left:-9999px;top:0;width:100px;height:1px;zoom:2;";
+  document.body.appendChild(probe);
+  _rectsIncludeZoom = probe.getBoundingClientRect().width > 150;
+  probe.remove();
+  return _rectsIncludeZoom;
+}
+
+/**
+ * Position the (already-shown) popover near its anchor, clamped to the viewport.
+ * The anchor is magnified by `--ui-scale`; the popover (on body) is not — so bring
+ * the anchor's rect into the body's visual-pixel space before clamping. On engines
+ * whose rect already includes zoom, k=1; on older engines, multiply by the scale.
+ */
 function place(anchor: HTMLElement): void {
   const el = popover!;
   const margin = 8;
+  const uiScale =
+    parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--ui-scale")) || 1;
+  const k = rectsIncludeZoom() ? 1 : uiScale;
   const r = anchor.getBoundingClientRect();
+  const aLeft = r.left * k;
+  const aTop = r.top * k;
+  const aBottom = r.bottom * k;
   const pw = el.offsetWidth;
   const ph = el.offsetHeight;
-  let left = r.left;
+  let left = aLeft;
   if (left + pw > window.innerWidth - margin) left = window.innerWidth - margin - pw;
   if (left < margin) left = margin;
   // Below the button by default; flip above if it would overflow the bottom.
-  let top = r.bottom + 6;
-  if (top + ph > window.innerHeight - margin) top = r.top - ph - 6;
+  let top = aBottom + 6;
+  if (top + ph > window.innerHeight - margin) top = aTop - ph - 6;
   if (top < margin) top = margin;
   el.style.left = `${Math.round(left)}px`;
   el.style.top = `${Math.round(top)}px`;

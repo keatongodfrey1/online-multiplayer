@@ -10,7 +10,15 @@
   --ok: #41c98a;
   --warn: #e3b341;
   --line: #353a4f;
+  /* UI magnification for big tablets (see the zoom rules below). 1 = the
+     iPad-mini-portrait reference size. Bumped up by the ladder; only on coarse
+     pointers tall enough to be a tablet (so landscape phones stay at 1). */
+  --ui-scale: 1;
 }
+@media (min-width: 834px) and (pointer: coarse) and (min-height: 700px) { :root { --ui-scale: 1.12; } }
+@media (min-width: 1024px) and (pointer: coarse) and (min-height: 700px) { :root { --ui-scale: 1.3; } }
+@media (min-width: 1194px) and (pointer: coarse) and (min-height: 700px) { :root { --ui-scale: 1.42; } }
+@media (min-width: 1366px) and (pointer: coarse) and (min-height: 700px) { :root { --ui-scale: 1.5; } }
 
 * {
   box-sizing: border-box;
@@ -2259,24 +2267,33 @@ button.spl-gem.selected {
   text-align: left;
 }
 
-/* Water Fight: give the in-game dashboard more room on tablets/laptops. Scoped to
-   `.wf`, which is only mounted during PLAYING — so the lobby stays the narrow column.
-   The two-column grid itself lives in WaterFightView's injected <style>. */
-#app:has(.wf) {
-  max-width: 1040px;
-  padding: 12px 16px;
+/* In-game screens that MAGNIFY on tablets (Water Fight, Tic-Tac-Toe): same
+   `--ui-scale` zoom pattern as the lobby chrome below — zoom the header + phase
+   body, center via .room's flex, fluid cap so the zoomed width can't overflow.
+   The full-screen games (Perfect Palace `100dvh`, Paper.io / Dot Arena canvas)
+   are deliberately NOT listed, so they keep rendering un-zoomed at full bleed.
+   Scoped to `.wf`/`.ttt`, only mounted during PLAYING — the lobby is handled
+   separately by `.lobby-screen`. WaterFight's 2-column grid lives in its <style>. */
+#app:has(.wf),
+#app:has(.ttt) {
+  max-width: none;
+  padding: 12px;
 }
-@media (min-width: 900px) {
-  #app:has(.wf) {
-    max-width: 1180px;
-    padding: 16px 24px;
-  }
+#app:has(.wf) .room,
+#app:has(.ttt) .room {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
-@media (max-width: 768px) {
-  #app:has(.wf) {
-    max-width: 100%;
-    padding: 12px;
-  }
+#app:has(.wf) .room-header,
+#app:has(.wf) #phase-root {
+  zoom: var(--ui-scale);
+  width: min(920px, calc(96vw / var(--ui-scale)));
+}
+#app:has(.ttt) .room-header,
+#app:has(.ttt) #phase-root {
+  zoom: var(--ui-scale);
+  width: min(480px, calc(92vw / var(--ui-scale)));
 }
 
 .pio-summary {
@@ -2568,13 +2585,45 @@ button.spl-gem.selected {
     grid-template-columns: 1fr;
   }
 }
-/* Tablets / landscape: the global #app cap of 480px leaves the lobby a scrunched
-   strip on an iPad. Widen just the lobby (scoped via :has so in-game width — a
-   separate follow-up — is untouched) so the dial grid and cards breathe. */
-@media (min-width: 720px) {
-  #app:has(.lobby-screen) {
-    max-width: 720px;
-  }
+/* ── Tablet magnification (--ui-scale) ──────────────────────────────────────
+   On bigger tablets the fixed-size design wastes space, so we `zoom` the content
+   (px spacing + rem text alike) to scale it up; the iPad-mini-portrait reference
+   stays at scale 1. Centering is done by an UN-zoomed flex parent — zoom's
+   top-left origin breaks margin:auto — and the width is a fluid cap
+   `min(comfort, calc(NNvw / var(--ui-scale)))` so the zoomed width equals NNvw:
+   it can never overflow and auto-fills. The reconnect overlay (position:fixed,
+   sibling of #phase-root) is out of flow and NOT zoomed, so it stays full-screen.
+   In-game canvas / 100dvh games are deliberately excluded. */
+
+/* Home (Join / Create) — #app flex-centers the single .home child. */
+#app:has(.home) {
+  max-width: none;
+  display: flex;
+  justify-content: center;
+  padding: 12px;
+}
+.home {
+  zoom: var(--ui-scale);
+  width: min(460px, calc(94vw / var(--ui-scale)));
+}
+
+/* Lobby + results — zoom the header AND the phase body together and center each
+   via .room's flex column (the fixed overlay is out of flow → still full-screen).
+   Scoped to `.lobby-screen`, which is only present in LOBBY/ENDED, so in-game is
+   untouched. */
+#app:has(.lobby-screen) {
+  max-width: none;
+  padding: 12px;
+}
+#app:has(.lobby-screen) .room {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+#app:has(.lobby-screen) .room-header,
+#app:has(.lobby-screen) #phase-root {
+  zoom: var(--ui-scale);
+  width: min(720px, calc(94vw / var(--ui-scale)));
 }
 
 /* big primary start button */
