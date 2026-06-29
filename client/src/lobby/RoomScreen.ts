@@ -18,12 +18,16 @@ import {
   ServerMsg,
 } from "@backbone/shared";
 import type { GameDefinition, GameView } from "../framework/GameView.js";
-import { escapeHtml } from "./HomeScreen.js";
+import { closeInfoPopover } from "../framework/infoPopover.js";
+import { escapeAttr, escapeHtml } from "./HomeScreen.js";
 
 export interface RoomScreenHandlers {
   /** Player chose to leave (or was kicked / room closed). */
   onExit(notice?: string): void;
 }
+
+/** Avatar background colours, picked by seat so a player's colour is stable. */
+const AVATAR_PALETTE = ["#5b8cff", "#e3b341", "#41c98a", "#e35d6a", "#a98bff", "#3fb6c9"];
 
 export class RoomScreen {
   private root?: HTMLElement;
@@ -108,6 +112,9 @@ export class RoomScreen {
 
   /** Full re-render of the phase area; cheap at lobby scale. */
   private render(): void {
+    // The ⓘ hint popover lives on document.body and anchors to a lobby button
+    // that this re-render is about to destroy. Close it first so it can't orphan.
+    closeInfoPopover();
     if (!this.root) return;
     const state = this.room.state;
     if (!state || !state.players) return; // first state not arrived yet
@@ -142,48 +149,66 @@ export class RoomScreen {
     const isHost = !!me?.isHost;
     const players = this.sortedPlayers();
     const enough = players.length >= state.minPlayers;
+    // Only games that ship a settings renderer get a "Game setup" card; without
+    // this guard TicTacToe / Dot Arena would show an empty titled box.
+    const hasSettings = typeof this.game.renderLobbySettings === "function";
 
     phaseRoot.innerHTML = `
-      <div class="card">
-        <h2>Lobby <span class="muted">(${players.length}/${state.maxPlayers} players)</span></h2>
-        <p class="muted">Friends join at this address with code
-           <strong>${escapeHtml(state.roomCode)}</strong></p>
-        <ul class="roster">
-          ${players
-            .map(
-              (p) => `
-            <li class="${p.connected ? "" : "disconnected"}">
-              <span class="dot ${p.connected ? "on" : "off"}"></span>
-              ${escapeHtml(p.nickname)}
-              ${p.isHost ? '<span class="badge">host</span>' : ""}
-              ${p.isBot ? '<span class="badge">AI</span>' : ""}
-              ${!p.connected ? '<span class="badge warn">reconnecting</span>' : ""}
-              ${
-                isHost && p.sessionId !== this.room.sessionId
-                  ? `<button class="kick subtle" data-session="${escapeHtml(p.sessionId)}">kick</button>`
-                  : ""
-              }
-            </li>`
-            )
-            .join("")}
-        </ul>
-        <div id="lobby-settings"></div>
+      <div class="lobby-screen">
+        <div class="lobby-card lobby-invite">
+          <div class="lobby-invite-text">
+            <div class="lobby-invite-h">Invite your friends 💌</div>
+            <div class="lobby-invite-s">They open the same web address and type this code to join.</div>
+          </div>
+          <div class="codepill">
+            <div class="lobby-code">${escapeHtml(state.roomCode)}</div>
+            <button id="copy-link" type="button" class="lobby-copy">📋 Copy link</button>
+          </div>
+        </div>
+
+        <div class="lobby-card">
+          <div class="lobby-section-label">
+            <span>Players</span><span>${players.length} / ${state.maxPlayers}</span>
+          </div>
+          <div class="lobby-players">
+            ${players.map((p) => this.playerRow(p, isHost)).join("")}
+          </div>
+        </div>
+
+        ${
+          hasSettings
+            ? `<div class="lobby-card">
+                 <div class="lobby-section-label">
+                   <span>Game setup</span><span>${isHost ? "host sets the dials" : ""}</span>
+                 </div>
+                 <div id="lobby-settings"></div>
+               </div>`
+            : ""
+        }
+
         ${
           isHost
-            ? `<button id="start-btn" class="primary" ${enough ? "" : "disabled"}>
-                 ${enough ? "Start game" : `Waiting for players (need ${state.minPlayers})`}
+            ? `<button id="start-btn" class="lobby-start" ${enough ? "" : "disabled"}>
+                 ${enough ? "▶  Start game" : `Waiting for players (need ${state.minPlayers})`}
                </button>`
-            : `<p class="muted">Waiting for the host to start&hellip;</p>`
+            : `<p class="lobby-wait">Waiting for the host to start&hellip;</p>`
         }
       </div>
     `;
 
-    this.game.renderLobbySettings?.(
-      phaseRoot.querySelector<HTMLElement>("#lobby-settings")!,
-      this.room,
-      { mySessionId: this.room.sessionId, isHost }
-    );
+    if (hasSettings) {
+      const settingsEl = phaseRoot.querySelector<HTMLElement>("#lobby-settings");
+      if (settingsEl) {
+        this.game.renderLobbySettings!(settingsEl, this.room, {
+          mySessionId: this.room.sessionId,
+          isHost,
+        });
+      }
+    }
 
+    phaseRoot.querySelector<HTMLButtonElement>("#copy-link")?.addEventListener("click", (e) => {
+      void this.copyInviteLink(e.currentTarget as HTMLButtonElement, state.roomCode);
+    });
     phaseRoot.querySelector<HTMLButtonElement>("#start-btn")?.addEventListener("click", () => {
       this.room.send(LobbyMsg.START, {});
     });
@@ -194,20 +219,82 @@ export class RoomScreen {
     });
   }
 
+  /** One roster row: colour avatar + name + YOU/HOST/AI/reconnecting badges + kick. */
+  private playerRow(p: BasePlayer, isHost: boolean): string {
+    const me = p.sessionId === this.room.sessionId;
+    const color = AVATAR_PALETTE[p.seat % AVATAR_PALETTE.length];
+    const nm = (p.nickname ?? "").trim();
+    const initial = escapeHtml((nm.charAt(0) || "?").toUpperCase());
+    const badges =
+      (me ? `<span class="lobby-badge lobby-badge-you">YOU</span>` : "") +
+      (p.isHost ? `<span class="lobby-badge lobby-badge-host">HOST</span>` : "") +
+      (p.isBot ? `<span class="lobby-badge lobby-badge-ai">🤖 AI</span>` : "") +
+      (!p.connected ? `<span class="lobby-badge lobby-badge-warn">reconnecting&hellip;</span>` : "");
+    const kick =
+      isHost && !me
+        ? `<button class="kick" data-session="${escapeAttr(p.sessionId)}" aria-label="Remove ${escapeAttr(nm)}">Kick</button>`
+        : "";
+    return `<div class="lobby-player${p.connected ? "" : " lobby-player--off"}">
+      <div class="lobby-avatar" style="background:${color}">${initial}</div>
+      <span class="lobby-player-name">${escapeHtml(nm)}</span>
+      ${badges}
+      ${kick}
+    </div>`;
+  }
+
+  /**
+   * Copy a one-tap join link for this room. The link points at the CLIENT origin
+   * (where this app is served) so opening it pre-fills the join code. Clipboard
+   * is blocked in insecure contexts (a LAN http dev server), so fall back to the
+   * iOS share sheet, then to a read-the-code-aloud prompt (the code is on screen).
+   */
+  private async copyInviteLink(btn: HTMLButtonElement, code: string): Promise<void> {
+    const url = `${location.origin}${location.pathname}?code=${encodeURIComponent(code)}`;
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(url);
+      ok = true;
+    } catch {
+      /* clipboard unavailable — try the share sheet below */
+    }
+    if (!ok && typeof navigator.share === "function") {
+      try {
+        await navigator.share({ text: url });
+        ok = true;
+      } catch {
+        /* user dismissed the share sheet */
+      }
+    }
+    btn.textContent = ok ? "Copied ✓" : "Couldn't copy — read the code aloud";
+    setTimeout(() => {
+      if (btn.isConnected) btn.textContent = "📋 Copy link";
+    }, 2200);
+  }
+
   private renderEnded(phaseRoot: HTMLElement): void {
     const state = this.room.state;
     const players = this.sortedPlayers();
     const votes = players.filter((p) => p.wantsRematch).length;
     const iVoted = !!state.players.get(this.room.sessionId)?.wantsRematch;
 
+    const reason = state.endReason;
+    const icon = reason.startsWith(EndReason.WIN_PREFIX)
+      ? "🏆"
+      : reason === EndReason.DRAW
+        ? "🤝"
+        : "🏁";
+
     phaseRoot.innerHTML = `
-      <div class="card center">
-        <h2>${escapeHtml(this.endReasonText())}</h2>
-        <div id="game-summary"></div>
-        <button id="rematch-btn" class="primary" ${iVoted ? "disabled" : ""}>
-          ${iVoted ? "Waiting for the others…" : "Play again"}
-        </button>
-        <p class="muted">${votes}/${players.length} want a rematch</p>
+      <div class="lobby-screen results-screen">
+        <div class="lobby-card results-card">
+          <div class="results-trophy">${icon}</div>
+          <h2 class="results-title">${escapeHtml(this.endReasonText())}</h2>
+          <div id="game-summary"></div>
+          <button id="rematch-btn" class="lobby-start" ${iVoted ? "disabled" : ""}>
+            ${iVoted ? "Waiting for the others&hellip;" : "▶  Play again"}
+          </button>
+          <p class="results-votes">${votes}/${players.length} want a rematch</p>
+        </div>
       </div>
     `;
     this.game.renderGameSummary?.(
@@ -258,6 +345,9 @@ export class RoomScreen {
   }
 
   private teardownView(): void {
+    // Covers phase changes (LOBBY→PLAYING) and leaving: drop any open hint popover
+    // so it can't linger over the game or the home screen.
+    closeInfoPopover();
     this.view?.unmount();
     this.view = undefined;
   }

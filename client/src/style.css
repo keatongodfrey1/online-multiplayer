@@ -9,6 +9,7 @@
   --danger: #e35d6a;
   --ok: #41c98a;
   --warn: #e3b341;
+  --line: #353a4f;
 }
 
 * {
@@ -2352,4 +2353,364 @@ button.spl-gem.selected {
   border-radius: 3px;
   margin-right: 8px;
   vertical-align: middle;
+}
+
+/* ============================================================================
+   Polished pre/post-game chrome — lobby, home, results, header — plus the shared
+   ⓘ hint popover. Scoped under .lobby-screen / .home / .results-screen (or by id)
+   so the shared .card/.primary/.badge/.subtle rules that in-game views reuse stay
+   untouched. Tokens only.
+   ============================================================================ */
+
+/* --- header (shown on every screen, incl. in-game — keep it tasteful) --- */
+.room-code {
+  border: 1px solid #2c3a66;
+  background: #161b2e;
+  color: var(--accent);
+  letter-spacing: 0.22em;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+#leave-btn {
+  background: #191c28;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 10px;
+  font-size: 0.82rem;
+}
+
+/* --- home (Join / Create) --- */
+.home-brand {
+  text-align: center;
+  margin: 14px 0 18px;
+}
+.home-title {
+  font-weight: 800;
+  font-size: 1.7rem;
+  letter-spacing: -0.01em;
+}
+.home-tagline {
+  color: var(--muted);
+  font-size: 0.86rem;
+  margin-top: 5px;
+}
+.home-card {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+}
+.home-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  margin-bottom: -4px;
+}
+.home-code {
+  color: var(--accent);
+  font-weight: 800;
+}
+.home-or {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin: -2px 0 12px;
+}
+.home-foot {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-top: 4px;
+}
+
+/* --- lobby screen --- */
+.lobby-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+.lobby-section-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+/* invite hero */
+.lobby-invite {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.lobby-invite-text {
+  flex: 1;
+}
+.lobby-invite-h {
+  font-weight: 700;
+  font-size: 0.95rem;
+  margin-bottom: 3px;
+}
+.lobby-invite-s {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.codepill {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.lobby-code {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  letter-spacing: 0.32em;
+  font-size: 1.7rem;
+  font-weight: 800;
+  color: var(--accent);
+  background: #161b2e;
+  border: 1px solid #2c3a66;
+  border-radius: 12px;
+  padding: 10px 14px 10px 20px;
+}
+.lobby-copy {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 0.78rem;
+  min-height: 36px;
+  padding: 0 6px;
+}
+
+/* players */
+.lobby-players {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lobby-player {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  background: #191c28;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 8px 11px;
+}
+.lobby-player--off {
+  opacity: 0.55;
+}
+.lobby-avatar {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 0.85rem;
+  color: #0e1017;
+}
+.lobby-player-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  flex: 1;
+}
+.lobby-badge {
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 99px;
+  white-space: nowrap;
+}
+.lobby-badge-you {
+  background: var(--accent);
+  color: #fff;
+}
+.lobby-badge-host {
+  background: #2a2f45;
+  color: #aeb6e0;
+  border: 1px solid #3a4470;
+}
+.lobby-badge-ai {
+  background: #191c28;
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+.lobby-badge-warn {
+  background: transparent;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+}
+.lobby-player .kick {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.72rem;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+}
+
+/* game-setup add-bot (rendered per game; styled here as the dashed affordance) */
+.wf-add-bot {
+  margin-top: 10px;
+  width: 100%;
+  background: transparent;
+  border: 1px dashed var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+  min-height: 44px;
+  border-radius: 11px;
+}
+.wf-lobby-note {
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-align: center;
+  margin-top: 8px;
+}
+
+/* the 2-column dial grid (Water Fight). #app caps at 480px, so collapse to one
+   column on phones by viewport width (the owner's iPad is >=768 → stays 2-col). */
+.wf-setgrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 18px;
+}
+.wf-setrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 44px;
+  font-size: 0.84rem;
+}
+.wf-setlabel {
+  color: #cfd4e4;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.wf-setgrid .wf-stepper {
+  gap: 6px;
+}
+.wf-setgrid .wf-stepper button {
+  min-width: 38px;
+  min-height: 40px;
+  padding: 0;
+  background: #161927;
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 1.1rem;
+  line-height: 1;
+}
+.wf-setgrid .wf-val {
+  min-width: 28px;
+}
+@media (max-width: 560px) {
+  .wf-setgrid {
+    grid-template-columns: 1fr;
+  }
+}
+/* Tablets / landscape: the global #app cap of 480px leaves the lobby a scrunched
+   strip on an iPad. Widen just the lobby (scoped via :has so in-game width — a
+   separate follow-up — is untouched) so the dial grid and cards breathe. */
+@media (min-width: 720px) {
+  #app:has(.lobby-screen) {
+    max-width: 720px;
+  }
+}
+
+/* big primary start button */
+.lobby-start {
+  width: 100%;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 800;
+  font-size: 1.05rem;
+  min-height: 54px;
+  border-radius: 14px;
+  box-shadow: 0 6px 18px rgba(91, 140, 255, 0.2);
+}
+.lobby-start:active {
+  background: var(--accent-press);
+}
+.lobby-start:disabled {
+  background: #353a4f;
+  color: var(--muted);
+  cursor: default;
+  box-shadow: none;
+}
+.lobby-wait {
+  text-align: center;
+  color: var(--muted);
+}
+
+/* results / ended screen */
+.results-card {
+  text-align: center;
+  padding: 24px 18px;
+}
+.results-trophy {
+  font-size: 2.6rem;
+  line-height: 1;
+  margin-bottom: 6px;
+}
+.results-title {
+  font-size: 1.4rem;
+  font-weight: 800;
+  margin: 0 0 14px;
+}
+.results-votes {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin-top: 12px;
+}
+
+/* --- shared ⓘ info button + tap popover (framework/infoPopover.ts) --- */
+.fw-info {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  min-width: 0;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--muted);
+  background: transparent;
+  color: var(--muted);
+  font: italic 700 0.72rem/1 Georgia, "Times New Roman", serif;
+  flex: 0 0 auto;
+}
+/* enlarge the tap target to ~40px without enlarging the visible circle */
+.fw-info::after {
+  content: "";
+  position: absolute;
+  inset: -10px;
+}
+.fw-info:active {
+  color: var(--text);
+  border-color: var(--text);
+}
+.fw-info-popover {
+  position: fixed;
+  z-index: 95;
+  max-width: 250px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--text);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+.fw-info-popover:focus {
+  outline: none;
 }
