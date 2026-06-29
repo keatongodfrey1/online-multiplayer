@@ -104,7 +104,7 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
         stormDraw: this.state.stormDraw,
         stormThrows: this.state.stormThrows,
         maxReactions: this.state.maxReactions,
-      });
+      }, players.map((p) => p.nickname)); // names → readable opening-draw log
       this.seatOrder = players.map((p) => p.sessionId);
       this.frameworkSeatByEngineSeat = players.map((p) => p.seat);
     }
@@ -128,8 +128,20 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
       this.state.seats.push(seat);
       if (sid) this.regrantHand(sid, seat.hand);
     });
+    this.applyEngineNames(); // make the engine log read real nicknames (fresh + load)
 
     this.afterApply();
+  }
+
+  /** Mirror each seat's current nickname into the engine so log lines read names,
+   *  not "seat N". Safe to call any time after the engine + seats exist (start,
+   *  load, reclaim/rename) — guards a length mismatch or a missing seat. */
+  private applyEngineNames(): void {
+    if (!this.engine) return;
+    this.state.seats.forEach((seat, i) => {
+      const p = this.engine!.players[i];
+      if (p && seat) p.name = seat.nickname;
+    });
   }
 
   // ---- save / resume ------------------------------------------------------
@@ -547,6 +559,7 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
     s.sessionId = player.sessionId;
     s.nickname = player.nickname;
     s.gone = false;
+    this.applyEngineNames(); // the reclaimer's real name now shows in the log
     this.regrantHand(player.sessionId, s.hand);
     this.afterApply();
   }
