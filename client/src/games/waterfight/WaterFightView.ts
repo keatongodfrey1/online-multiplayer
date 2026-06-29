@@ -7,6 +7,7 @@
 import type { Room } from "@colyseus/sdk";
 import {
   type BaseState,
+  CARD_INFO,
   COIN_VALUES,
   LobbyMsg,
   Phase,
@@ -48,50 +49,105 @@ const SUPPORT_LABELS: Record<string, string> = {
   sneakypeek: "Sneaky Peek",
   switcheroo: "Switcheroo",
 };
-const CARD_LABELS: Record<string, string> = {
-  balloon: "💧 Balloon", miss: "🛡 Miss", hit: "💥 Hit", treasure: "💎 Treasure", wild: "🃏 Wild",
-  umbrella: "☂️ Umbrella", backpack: "🎒 Backpack", firstaid: "➕ First Aid", towel: "🧻 Towel",
-  goggles: "🥽 Goggles", needle: "📌 Needle", lifeguard: "🛟 Lifeguard", pickpocket: "🫳 Pickpocket",
-  sabotage: "💣 Sabotage", cardswap: "🔄 Card Swap", freezeout: "❄️ Freeze Out", hiddenstash: "📦 Hidden Stash",
-  redirect: "↪️ Redirect", lemonadespill: "🍋 Lemonade Spill", sneakypeek: "👀 Sneaky Peek",
-  watertrap: "🪤 Water Trap", switcheroo: "🌀 Switcheroo", mega: "🌊 Mega", launcher: "🔫 Launcher",
-  triplesplash: "💦 Triple Splash", golden: "🏆 Golden", rapidfire: "⚡ Rapid Fire", splashzone: "🌐 Splash Zone",
-  giant: "🗿 Giant", soaker: "🚿 Soaker", flashflood: "🌧 Flash Flood", event: "🎲 Event",
-};
+// Labels + one-line descriptions both come from the shared CARD_INFO table (single
+// source of truth — the hand tiles, tap-to-review modal, and ❓ Help all read it).
+const CARD_LABELS: Record<string, string> = Object.fromEntries(
+  Object.entries(CARD_INFO).map(([k, v]) => [k, v.label]),
+);
+const cardLabel = (kind: string): string => CARD_INFO[kind as keyof typeof CARD_INFO]?.label ?? kind;
+const cardDesc = (kind: string): string => CARD_INFO[kind as keyof typeof CARD_INFO]?.desc ?? "";
+const cardEmoji = (kind: string): string => cardLabel(kind).split(" ")[0] ?? "🃏";
+const cardName = (kind: string): string => cardLabel(kind).split(" ").slice(1).join(" ") || kind;
+/** Which shop stack a card belongs to → drives the card-tile category color band. */
+const cardCategory = (kind: string): string => CARD_INFO[kind as keyof typeof CARD_INFO]?.stack ?? "basic";
+const NUDGE_KEY = "waterfight-card-hint-seen";
 
 // In-game styles only (injected by mount(), present during PLAYING). The lobby
 // stepper/settings rules live in the GLOBAL style.css — the lobby renders this
 // game's settings while this view is unmounted, so an inline <style> wouldn't apply.
+// In-game styles, injected by mount() and present only during PLAYING. Category
+// band colors (basic/defense/mischief/attack) are the through-line that teaches new
+// players — they repeat on card tiles, the help legend, and the detail modal accent.
 const STYLE = `
-.wf { font-family: system-ui, sans-serif; display: flex; flex-direction: column; gap: 12px; color: var(--text); }
-.wf-banner { padding: 8px 12px; border-radius: 8px; background: var(--card); color: var(--text); font-weight: 600; }
-.wf-banner.act { background: #1d3a2a; }
-.wf-banner.sudden { background: #3a1d22; }
-.wf-reveal { padding: 8px 12px; border-radius: 8px; background: var(--card); border: 1px solid var(--warn); color: var(--text); font-size: 13px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.wf-reveal button { padding: 2px 8px; }
-.wf-splash { padding: 10px 12px; border-radius: 8px; font-weight: 700; font-size: 15px; text-align: center; color: var(--text); animation: wf-pop 0.25s ease-out; }
+.wf { font-family: system-ui, sans-serif; display: flex; flex-direction: column; gap: 14px; color: var(--text); }
+@media (min-width: 900px) {
+  .wf { display: grid; grid-template-columns: 1fr minmax(280px, 340px); gap: 18px; align-items: start; }
+}
+.wf-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.wf-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.wf-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.wf-banner { flex: 1; padding: 12px 16px; border-radius: 12px; background: var(--card); color: var(--text); font-weight: 600; font-size: 15px; border-left: 4px solid transparent; }
+.wf-banner.act { background: #1d3a2a; border-left-color: var(--ok); }
+.wf-banner.defend { background: #3a1d22; border-left-color: var(--danger); }
+.wf-banner.act.rise { animation: wf-pulse 0.9s ease-out; }
+.wf-banner .atk-chip { display: inline-block; margin-top: 6px; font-size: 13px; font-weight: 700; color: #ffd9dd; background: #4a232b; border: 1px solid var(--danger); border-radius: 99px; padding: 2px 10px; }
+.wf-banner.sudden { background: #3a1d22; border-left-color: var(--danger); font-weight: 700; }
+@keyframes wf-pulse { 0% { box-shadow: 0 0 0 0 #41c98a66; } 100% { box-shadow: 0 0 0 10px #41c98a00; } }
+.wf-controls { display: flex; gap: 8px; }
+.wf-ic { width: 44px; height: 44px; border-radius: 10px; border: 1px solid #353a4f; background: #191c28; color: var(--text); font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.wf-ic.help { border-color: var(--accent); color: var(--accent); }
+.wf-reveal { padding: 10px 12px; border-radius: 10px; background: var(--card); border: 1px solid var(--warn); color: var(--text); font-size: 13px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.wf-reveal button { padding: 4px 10px; min-height: 32px; }
+.wf-splash { max-width: 560px; margin: 0 auto; padding: 12px 14px; border-radius: 10px; font-weight: 800; font-size: 16px; text-align: center; color: var(--text); animation: wf-pop 0.25s ease-out; }
 .wf-splash.hit { background: #3a1d22; border: 1px solid var(--danger); }
 .wf-splash.miss { background: #1d2740; border: 1px solid var(--accent); }
 @keyframes wf-pop { from { transform: scale(0.82); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-.wf-seats { display: flex; flex-wrap: wrap; gap: 8px; }
-.wf-seat { border: 1px solid #353a4f; border-radius: 8px; padding: 8px 10px; min-width: 120px; background: var(--card); }
+.wf-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); margin: 2px 0 -2px; }
+.wf-seats { display: flex; flex-wrap: wrap; gap: 10px; }
+.wf-seat { flex: 1 1 140px; border: 1px solid #353a4f; border-radius: 12px; padding: 10px 12px; min-width: 130px; background: var(--card); }
 .wf-seat.turn { border-color: var(--accent); box-shadow: 0 0 0 2px #5b8cff33; }
-.wf-seat.out { opacity: 0.6; }
-.wf-seat .nm { font-weight: 700; }
-.wf-seat .lives { font-size: 16px; }
+.wf-seat.out { opacity: 0.55; }
+.wf-seat .nm { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wf-seat .lives { font-size: 17px; margin: 6px 0 4px; }
 .wf-seat .tags { font-size: 12px; color: var(--muted); }
-.wf-decks { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 10px; }
-.wf-hand { display: flex; flex-wrap: wrap; gap: 6px; }
-.wf-card { border: 1px solid #353a4f; border-radius: 6px; padding: 4px 8px; background: var(--bg); color: var(--text); font-size: 13px; cursor: default; }
-.wf-card.sel { background: var(--warn); border-color: var(--warn); color: var(--bg); cursor: pointer; }
-.wf-card.pick { cursor: pointer; }
-.wf-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.wf-actions button { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; font-size: 13px; }
-.wf-actions button.ghost { background: transparent; color: var(--accent); }
-.wf-actions button.draw { background: var(--warn); border-color: var(--warn); color: var(--bg); font-weight: 700; font-size: 14px; }
+.wf-decks { font-size: 13px; color: var(--muted); background: var(--card); border: 1px solid #353a4f; border-radius: 12px; padding: 12px 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 7px 14px; }
+.wf-decks b { color: var(--text); }
+.wf-hand { display: flex; flex-wrap: wrap; gap: 10px; }
+@media (max-width: 760px) { .wf-hand { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; } }
+.wf-card { position: relative; width: 92px; min-height: 112px; flex: 0 0 auto; border: 1px solid #353a4f; border-top: 4px solid #7f8aa8; border-radius: 11px; padding: 12px 8px 10px; background: var(--card); color: var(--text); display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; transition: transform 0.12s, border-color 0.12s, box-shadow 0.12s; }
+.wf-card:hover { transform: translateY(-3px); box-shadow: 0 6px 16px #0006; }
+.wf-card .ce { font-size: 28px; line-height: 1; }
+.wf-card .cn { font-weight: 700; font-size: 12px; text-align: center; }
+.wf-card .ci { position: absolute; top: 4px; right: 4px; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; opacity: 0.75; }
+.wf-card.cat-defense { border-top-color: var(--accent); }
+.wf-card.cat-mischief { border-top-color: #b07bff; }
+.wf-card.cat-attack { border-top-color: var(--warn); }
+.wf-card.sel { background: var(--warn); border-color: var(--warn); color: var(--bg); }
+.wf-card.sel .cn { color: var(--bg); }
+.wf-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.wf-actions button { min-height: 44px; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; font-size: 14px; font-weight: 600; display: inline-flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+.wf-actions button.ghost { background: transparent; color: var(--accent); font-weight: 500; }
+.wf-actions button.draw { background: var(--warn); border-color: var(--warn); color: #241c00; font-weight: 800; font-size: 15px; box-shadow: 0 0 0 3px #e3b34122; }
+.wf-actions button.primary { font-size: 15px; font-weight: 700; }
+.wf-actions button .gloss { font-size: 11px; font-weight: 500; opacity: 0.85; }
 .wf-actions button:disabled { opacity: 0.5; cursor: default; }
-.wf-log { font-size: 12px; color: var(--muted); max-height: 110px; overflow-y: auto; border-top: 1px solid #353a4f; padding-top: 6px; }
-.wf-mute { align-self: flex-end; background: none; border: none; cursor: pointer; font-size: 18px; }
+.wf-log { font-size: 13px; color: #cfd4e4; background: var(--card); border: 1px solid #353a4f; border-radius: 12px; padding: 12px 14px; max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; line-height: 1.35; }
+.wf-log .ln b { color: var(--text); }
+.wf-mute { background: none; border: none; cursor: pointer; font-size: 18px; }
+.wf-nudge { font-size: 13px; color: var(--muted); background: #191c28; border: 1px dashed #3a4470; border-radius: 10px; padding: 9px 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.wf-nudge button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 16px; min-width: 32px; }
+/* ---- modal (dark, NOT the light .pp-modal skin) ---- */
+.wf-modal-backdrop { position: fixed; inset: 0; z-index: 70; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; padding: 16px; }
+.wf-modal { background: var(--card); border: 1px solid #353a4f; border-radius: 16px; max-width: 300px; width: 100%; position: relative; box-shadow: 0 18px 50px #000a; animation: wf-pop 0.2s ease-out; }
+.wf-modal.help { max-width: 400px; max-height: 80vh; display: flex; flex-direction: column; }
+.wf-modal .x { position: absolute; top: 8px; right: 12px; background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer; min-width: 32px; min-height: 32px; }
+.wf-cd { padding: 22px 20px; text-align: center; }
+.wf-cd .ce { font-size: 52px; }
+.wf-cd .nm { font-weight: 800; font-size: 20px; margin-top: 8px; }
+.wf-cd .stack { display: inline-block; margin: 10px 0; font-size: 11px; font-weight: 700; color: #cdd6ff; background: #26305a; border: 1px solid #3a478a; padding: 3px 11px; border-radius: 99px; }
+.wf-cd .desc { font-size: 15px; line-height: 1.5; color: #d4d9e8; }
+.wf-mh { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid #353a4f; }
+.wf-mh h2 { font-size: 17px; margin: 0; }
+.wf-mbody { padding: 14px 18px 18px; overflow-y: auto; }
+.wf-flow { font-size: 13px; color: #cfd4e4; line-height: 1.5; background: #191c28; border: 1px solid #353a4f; border-radius: 10px; padding: 11px 13px; margin-bottom: 16px; }
+.wf-grp { margin-bottom: 14px; }
+.wf-grp h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 8px; display: flex; align-items: center; gap: 7px; }
+.wf-grp .gd { width: 10px; height: 10px; border-radius: 3px; }
+.wf-grp .row { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; border-bottom: 1px solid #222636; }
+.wf-grp .row:last-child { border-bottom: none; }
+.wf-grp .row .re { font-size: 19px; width: 26px; text-align: center; flex: 0 0 auto; }
+.wf-grp .row .rt { font-weight: 700; font-size: 13px; width: 108px; flex: 0 0 auto; }
+.wf-grp .row .rd { font-size: 12.5px; color: var(--muted); line-height: 1.35; }
 `;
 
 function countKind(hand: { kind: string }[], kind: string): number {
@@ -130,13 +186,19 @@ export class WaterFightView implements GameView {
   /** Highest splash seq we've already shown — seeded from current state on mount so a
    *  refresh/resume/late-join into a game that already threw never replays a stale flip. */
   private lastSeenSplashSeq = 0;
+  /** Open modal: a card-detail (by kind) or the ❓ Help legend. Static content, so the
+   *  guarded modal-host paints it only when this identity changes (survives opponent deltas). */
+  private cardDetail?: { kind: string };
+  private showRules = false;
+  /** First-run "tap a card" hint, dismissed for good once seen (localStorage). */
+  private nudgeSeen = (() => { try { return localStorage.getItem(NUDGE_KEY) === "1"; } catch { return false; } })();
 
   mount(root: HTMLElement, room: Room<any, BaseState>, ctx: GameViewContext): void {
     this.root = root;
     this.room = room as unknown as Room<any, WaterFightState>;
     this.ctx = ctx;
     this.lastSeenSplashSeq = this.room.state.lastSplashSeq ?? 0; // seed BEFORE first render
-    root.innerHTML = `<style>${STYLE}</style><div class="wf-splash-host"></div><div class="wf"></div>`;
+    root.innerHTML = `<style>${STYLE}</style><div class="wf-splash-host"></div><div class="wf-modal-host"></div><div class="wf"></div>`;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
     this.room.onMessage(WaterFightMsg.REVEAL, (payload: { kind: string; ofSeat: number; cards: { id: number; kind: string }[] }) => {
@@ -154,6 +216,8 @@ export class WaterFightView implements GameView {
     if (this.splashTimer) clearTimeout(this.splashTimer);
     this.splashTimer = undefined;
     this.splashReveal = undefined;
+    this.cardDetail = undefined;
+    this.showRules = false;
     this.root = undefined;
     this.room = undefined;
   }
@@ -164,12 +228,38 @@ export class WaterFightView implements GameView {
   }
 
   private handleClick(ev: Event): void {
+    // Backdrop click closes any open modal — MUST be first, before the [data-act]
+    // lookup (the backdrop has no data-act, so it would otherwise be ignored).
+    if ((ev.target as HTMLElement | null)?.classList.contains("wf-modal-backdrop")) {
+      this.cardDetail = undefined;
+      this.showRules = false;
+      this.render();
+      return;
+    }
     const el = (ev.target as HTMLElement | null)?.closest<HTMLElement>("[data-act]");
     if (!el || !this.room) return;
     const room = this.room;
     const d = el.dataset;
     const target = d.target !== undefined ? Number(d.target) : undefined;
     switch (d.act) {
+      case "review":
+        this.cardDetail = { kind: d.kind ?? "" };
+        this.render();
+        return;
+      case "rules":
+        this.showRules = true;
+        this.render();
+        return;
+      case "close-modal":
+        this.cardDetail = undefined;
+        this.showRules = false;
+        this.render();
+        return;
+      case "dismiss-nudge":
+        this.nudgeSeen = true;
+        try { localStorage.setItem(NUDGE_KEY, "1"); } catch { /* ignore */ }
+        this.render();
+        return;
       case "mute":
         setMuted(!isMuted());
         this.render();
@@ -245,6 +335,7 @@ export class WaterFightView implements GameView {
     if (!wrap || state.phase !== Phase.PLAYING) {
       if (wrap && state.phase !== Phase.PLAYING) wrap.innerHTML = "";
       this.renderSplash();
+      this.renderModal();
       return;
     }
     this.detectSplash(state);
@@ -253,27 +344,95 @@ export class WaterFightView implements GameView {
     const awaiting = [...state.awaitingSeats];
     const myMoment = mySeat >= 0 && awaiting.includes(mySeat) && state.awaitingKind !== "";
 
-    // turn alert on the rising edge of "my moment to act"
+    // turn alert + auto-close any open modal on the rising edge of "my moment to act",
+    // so an incoming attack / my turn surfaces the action buttons.
     if (myMoment && !this.wasMyMoment) {
+      this.cardDetail = undefined;
+      this.showRules = false;
       turnChime();
       flashToast(this.root, this.momentLabel(state));
     }
     this.wasMyMoment = myMoment;
 
     const isHost = state.hostSessionId === this.ctx.mySessionId;
-    wrap.innerHTML = [
-      `<div style="display:flex;gap:6px;align-self:flex-end">${
-        isHost ? `<button class="wf-mute" data-act="save" title="Save game">💾</button>` : ""
-      }<button class="wf-mute" data-act="mute" title="Sound">${isMuted() ? "🔕" : "🔔"}</button></div>`,
-      this.renderBanner(state, mySeat, myMoment),
+    const header = `<div class="wf-head">${this.renderBanner(state, myMoment)}<div class="wf-controls">${
+      isHost ? `<button class="wf-ic" data-act="save" title="Save game">💾</button>` : ""
+    }<button class="wf-ic" data-act="mute" title="Sound">${isMuted() ? "🔕" : "🔔"}</button>` +
+      `<button class="wf-ic help" data-act="rules" title="How to play">❓</button></div></div>`;
+
+    const main = [
+      header,
+      state.suddenDeath ? `<div class="wf-banner sudden">⚡ SUDDEN-DEATH — single-target hits only</div>` : "",
       this.renderReveal(seats),
+      `<div class="wf-label">Players</div>`,
       this.renderSeats(state, seats, mySeat),
-      this.renderDecks(state),
+      myMoment ? `<div class="wf-label">Your move</div><div class="wf-actions">${this.renderActions(state, seats, mySeat)}</div>` : "",
+      `<div class="wf-label">Your hand · tap a card to learn it</div>`,
       this.renderHand(state, seats, mySeat, myMoment),
-      myMoment ? `<div class="wf-actions">${this.renderActions(state, seats, mySeat)}</div>` : "",
-      this.renderLog(state),
+      this.renderNudge(),
     ].join("");
+
+    const side = [
+      `<div class="wf-label">Game log</div>`,
+      this.renderLog(state),
+      this.renderDecks(state),
+    ].join("");
+
+    wrap.innerHTML = `<div class="wf-main">${main}</div><div class="wf-side">${side}</div>`;
     this.renderSplash();
+    this.renderModal();
+  }
+
+  /** Paint the dark card-detail / Help modal into its own host node, only when the
+   *  modal identity changes (static content → survives opponents' state deltas). */
+  private renderModal(): void {
+    const host = this.root?.querySelector<HTMLElement>(".wf-modal-host");
+    if (!host) return;
+    const key = this.showRules ? "rules" : this.cardDetail ? `card:${this.cardDetail.kind}` : "";
+    if (host.dataset.key === key) return;
+    host.dataset.key = key;
+    if (!key) { host.innerHTML = ""; return; }
+    host.innerHTML = `<div class="wf-modal-backdrop">${this.showRules ? this.renderRulesModal() : this.renderCardDetail()}</div>`;
+  }
+
+  /** One-time "tap a card" hint for first-timers (push, not pull). */
+  private renderNudge(): string {
+    if (this.nudgeSeen) return "";
+    return `<div class="wf-nudge"><span>👆 Tap any card to see what it does — and ❓ up top explains the whole game.</span><button data-act="dismiss-nudge" title="Got it">✕</button></div>`;
+  }
+
+  private renderCardDetail(): string {
+    const kind = this.cardDetail?.kind ?? "";
+    const stack = cardCategory(kind);
+    const stackLabel: Record<string, string> = {
+      defense: "🛡 Defense Depot", mischief: "😈 Mischief Market", attack: "🌊 Attack Arsenal", basic: "🎴 Main deck",
+    };
+    return `<div class="wf-modal"><button class="x" data-act="close-modal" title="Close">✕</button>
+      <div class="wf-cd"><div class="ce">${cardEmoji(kind)}</div>
+        <div class="nm">${escapeHtml(cardName(kind))}</div>
+        <div class="stack">${stackLabel[stack] ?? "🎴 Main deck"}</div>
+        <div class="desc">${escapeHtml(cardDesc(kind)) || "—"}</div></div></div>`;
+  }
+
+  private renderRulesModal(): string {
+    const groups: { id: string; title: string; color: string }[] = [
+      { id: "basic", title: "Main deck", color: "#7f8aa8" },
+      { id: "defense", title: "🛡 Defense Depot", color: "var(--accent)" },
+      { id: "mischief", title: "😈 Mischief Market", color: "#b07bff" },
+      { id: "attack", title: "🌊 Attack Arsenal", color: "var(--warn)" },
+    ];
+    const sections = groups.map((g) => {
+      const rows = Object.keys(CARD_INFO)
+        .filter((k) => cardCategory(k) === g.id)
+        .map((k) => `<div class="row"><span class="re">${cardEmoji(k)}</span><span class="rt">${escapeHtml(cardName(k))}</span><span class="rd">${escapeHtml(cardDesc(k))}</span></div>`)
+        .join("");
+      return `<div class="wf-grp"><h4><span class="gd" style="background:${g.color}"></span>${g.title}</h4>${rows}</div>`;
+    }).join("");
+    return `<div class="wf-modal help"><div class="wf-mh"><h2>📖 How to play</h2><button class="x" data-act="close-modal" title="Close">✕</button></div>
+      <div class="wf-mbody">
+        <div class="wf-flow">Each turn: <b>draw 2</b> → play an optional <b>Support</b> card → take <b>one main action</b> (throw a balloon, play a big attack, shop, or pass) → if you throw, <b>draw the Splash card</b> to see hit or miss → defenders <b>block</b> → discard down to your hand limit. Last player with hearts wins.</div>
+        ${sections}
+      </div></div>`;
   }
 
   /** Arm a transient HIT/MISS reveal when a NEW Splash flip lands (seq rose). */
@@ -338,8 +497,7 @@ export class WaterFightView implements GameView {
     return `<div class="wf-reveal">👀 <b>${who}:</b> ${cards || "(empty)"} <button data-act="dismiss-reveal" class="ghost">dismiss</button></div>`;
   }
 
-  private renderBanner(state: WaterFightState, mySeat: number, myMoment: boolean): string {
-    const sudden = state.suddenDeath ? `<div class="wf-banner sudden">⚡ SUDDEN-DEATH — single-target hits only</div>` : "";
+  private renderBanner(state: WaterFightState, myMoment: boolean): string {
     let msg: string;
     if (myMoment) msg = this.momentLabel(state);
     else {
@@ -350,10 +508,13 @@ export class WaterFightView implements GameView {
         : "is reacting";
       msg = `${escapeHtml(who?.nickname ?? "Someone")} ${verb}…`;
     }
-    const atk = state.attackActive
-      ? ` &nbsp;|&nbsp; incoming <b>${escapeHtml(state.attackKind)}</b> balloon (block ${state.attackBlockNumber}${state.attackSoaker ? ", Soaker!" : ""})`
+    const danger = myMoment && (state.awaitingKind === "DEFEND" || state.awaitingKind === "REACT");
+    const cls = myMoment ? (danger ? "defend rise" : "act rise") : "";
+    const atkName = state.attackKind === "basic" ? "balloon" : cardName(state.attackKind);
+    const chip = state.attackActive
+      ? `<br><span class="atk-chip">💥 incoming ${escapeHtml(atkName)} · block ${state.attackBlockNumber}${state.attackSoaker ? " · Soaker" : ""}</span>`
       : "";
-    return `<div class="wf-banner ${myMoment ? "act" : ""}">${escapeHtml(msg)}${atk}</div>${sudden}`;
+    return `<div class="wf-banner ${cls}">${escapeHtml(msg)}${chip}</div>`;
   }
 
   private renderSeats(state: WaterFightState, seats: WaterFightSeat[], mySeat: number): string {
@@ -380,10 +541,14 @@ export class WaterFightView implements GameView {
 
   private renderDecks(state: WaterFightState): string {
     return `<div class="wf-decks">
-      <span>Deck ${state.mainDeckCount} (discard ${state.mainDiscardCount})</span>
-      <span>Splash ${state.splashPileCount}/${state.splashPileCount + state.splashDiscardCount}</span>
-      <span>Shop 🛡${state.stackCounts[0] ?? 0} 🃏${state.stackCounts[1] ?? 0} 🌊${state.stackCounts[2] ?? 0} (cost ${state.shopCost})</span>
-      <span>Turn ${state.turnCount}</span>
+      <span>Draw deck <b>${state.mainDeckCount}</b></span>
+      <span>Splash <b>${state.splashPileCount}/${state.splashPileCount + state.splashDiscardCount}</b></span>
+      <span>Discard <b>${state.mainDiscardCount}</b></span>
+      <span>Turn <b>${state.turnCount}</b></span>
+      <span>🛡 Defense <b>${state.stackCounts[0] ?? 0}</b></span>
+      <span>😈 Mischief <b>${state.stackCounts[1] ?? 0}</b></span>
+      <span>🌊 Attack <b>${state.stackCounts[2] ?? 0}</b></span>
+      <span>Shop cost <b>${state.shopCost}</b></span>
     </div>`;
   }
 
@@ -395,13 +560,13 @@ export class WaterFightView implements GameView {
     return `<div class="wf-hand">${hand
       .map((c) => {
         const sel = this.discardSel.has(c.id);
-        const cls = ["wf-card"];
-        if (picking) cls.push("pick");
+        const cls = ["wf-card", `cat-${cardCategory(c.kind)}`];
         if (sel) cls.push("sel");
-        const attr = picking ? `data-act="togglecard" data-id="${c.id}"` : "";
-        // CARD_LABELS values are static/safe; escape the fallback (kind could be
-        // an unrecognized string from a tampered save blob).
-        return `<span class="${cls.join(" ")}" ${attr}>${CARD_LABELS[c.kind] ?? escapeHtml(c.kind)}</span>`;
+        // During DISCARD the tile toggles selection; the ⓘ child still opens review.
+        // Otherwise the whole tile opens the review modal.
+        const tileAct = picking ? `data-act="togglecard" data-id="${c.id}"` : `data-act="review" data-kind="${escapeHtml(c.kind)}"`;
+        const info = picking ? `<span class="ci" data-act="review" data-kind="${escapeHtml(c.kind)}">ⓘ</span>` : `<span class="ci">ⓘ</span>`;
+        return `<div class="${cls.join(" ")}" ${tileAct}>${info}<span class="ce">${cardEmoji(c.kind)}</span><span class="cn">${escapeHtml(cardName(c.kind))}</span></div>`;
       })
       .join("")}</div>`;
   }
@@ -410,8 +575,8 @@ export class WaterFightView implements GameView {
     const hand = [...(seats[mySeat]?.hand ?? [])];
     const opp = (extra = mySeat) => seats.filter((s) => !s.out && s.seat !== extra);
     const has = (k: string) => countKind(hand, k) > 0;
-    const btn = (act: string, label: string, attrs = "", ghost = false) =>
-      `<button data-act="${act}" ${attrs} class="${ghost ? "ghost" : ""}">${label}</button>`;
+    const btn = (act: string, label: string, attrs = "", ghost = false, gloss = "") =>
+      `<button data-act="${act}" ${attrs} class="${ghost ? "ghost" : ""}">${label}${gloss ? `<span class="gloss">${escapeHtml(gloss)}</span>` : ""}</button>`;
     const out: string[] = [];
 
     switch (state.awaitingKind) {
@@ -454,9 +619,15 @@ export class WaterFightView implements GameView {
         if (!me.noShop) {
           const sell = minimalSell(hand, state.shopCost);
           if (sell) {
+            const SHOP_LABEL: Record<string, string> = { defense: "🛡 Defense Depot", mischief: "😈 Mischief Market", attack: "🌊 Attack Arsenal" };
+            const SHOP_GLOSS: Record<string, string> = {
+              defense: "blocks & heals (umbrella, towel, goggles…)",
+              mischief: "steal, swap, freeze (water trap, redirect…)",
+              attack: "big throws (mega, soaker, triple splash…)",
+            };
             WF_STACK_IDS.forEach((name, idx) => {
               if ((state.stackCounts[idx] ?? 0) > 0) {
-                out.push(btn("shop", `🛒 Buy ${name}`, `data-stack="${name}" data-sell='${JSON.stringify(sell)}'`, true));
+                out.push(btn("shop", `${SHOP_LABEL[name] ?? name}`, `data-stack="${name}" data-sell='${JSON.stringify(sell)}'`, true, SHOP_GLOSS[name] ?? ""));
               }
             });
           }
@@ -465,25 +636,25 @@ export class WaterFightView implements GameView {
         break;
       }
       case "DEFEND": {
-        if (has("miss") && !state.attackSoaker) out.push(btn("defend", "🛡 Block (Miss)", `data-defense="miss"`));
-        if (has("umbrella")) out.push(btn("defend", "☂️ Umbrella", `data-defense="umbrella"`));
-        if (has("wild")) out.push(btn("defend", "🃏 Wild (miss)", `data-defense="wild_miss"`));
-        out.push(btn("defend", "Take the hit (pass)", `data-defense="pass"`, true));
+        if (has("miss") && !state.attackSoaker) out.push(btn("defend", "🛡 Block (Miss)", `data-defense="miss"`, false, cardDesc("miss")));
+        if (has("umbrella")) out.push(btn("defend", "☂️ Umbrella", `data-defense="umbrella"`, false, cardDesc("umbrella")));
+        if (has("wild")) out.push(btn("defend", "🃏 Wild (block)", `data-defense="wild_miss"`, false, cardDesc("wild")));
+        out.push(btn("defend", "Take the hit", `data-defense="pass"`, true));
         break;
       }
       case "ATTACKER_RESPOND": {
-        if (has("hit")) out.push(btn("respond", "💥 Hit (chip a block)", `data-respond="hit"`));
-        if (has("wild")) out.push(btn("respond", "🃏 Wild (hit)", `data-respond="wild_hit"`));
-        out.push(btn("respond", "Stop (pass)", `data-respond="pass"`, true));
+        if (has("hit")) out.push(btn("respond", "💥 Hit", `data-respond="hit"`, false, cardDesc("hit")));
+        if (has("wild")) out.push(btn("respond", "🃏 Wild (hit)", `data-respond="wild_hit"`, false, cardDesc("wild")));
+        out.push(btn("respond", "Stop", `data-respond="pass"`, true));
         break;
       }
       case "REACT": {
-        if (has("towel")) out.push(btn("react", "🧻 Towel (cancel)", `data-action="towel"`));
+        if (has("towel")) out.push(btn("react", "🧻 Towel", `data-action="towel"`, false, cardDesc("towel")));
         if (state.pendingKind !== "SUPPORT" && has("redirect")) {
-          for (const t of opp()) out.push(btn("react", `↪️ Redirect → ${escapeHtml(t.nickname)}`, `data-action="redirect" data-target="${t.seat}"`));
+          for (const t of opp()) out.push(btn("react", `↪️ Redirect → ${escapeHtml(t.nickname)}`, `data-action="redirect" data-target="${t.seat}"`, false, cardDesc("redirect")));
         }
-        if (state.pendingKind !== "SUPPORT" && has("watertrap")) out.push(btn("react", "🪤 Water Trap (bounce)", `data-action="watertrap"`));
-        out.push(btn("react", "Let it through (pass)", `data-action="pass"`, true));
+        if (state.pendingKind !== "SUPPORT" && has("watertrap")) out.push(btn("react", "🪤 Water Trap", `data-action="watertrap"`, false, cardDesc("watertrap")));
+        out.push(btn("react", "Let it through", `data-action="pass"`, true));
         break;
       }
       case "EXTRA_THROW": {
@@ -502,8 +673,18 @@ export class WaterFightView implements GameView {
   }
 
   private renderLog(state: WaterFightState): string {
-    const lines = [...state.log].slice(-8).reverse();
-    return `<div class="wf-log">${lines.map((l) => escapeHtml(l)).join("<br>")}</div>`;
+    const names = [...state.seats].map((s) => s.nickname).filter(Boolean);
+    const lines = [...state.log].slice(-16).reverse();
+    // Bold any player name that appears in a line, for scan-ability.
+    const emph = (line: string): string => {
+      let html = escapeHtml(line);
+      for (const n of names) {
+        if (!n) continue;
+        html = html.split(escapeHtml(n)).join(`<b>${escapeHtml(n)}</b>`);
+      }
+      return html;
+    };
+    return `<div class="wf-log">${lines.map((l) => `<div class="ln">${emph(l)}</div>`).join("")}</div>`;
   }
 }
 

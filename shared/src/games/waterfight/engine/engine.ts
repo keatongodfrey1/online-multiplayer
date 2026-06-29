@@ -30,6 +30,12 @@ import {
 
 const STACK_IDS: readonly StackId[] = WF_STACK_IDS;
 
+/** Log-friendly player name for a seat index — falls back to "seat N" if a name
+ *  was never set. The room populates real nicknames before any action is logged. */
+function who(s: GameState, i: number): string {
+  return s.players[i]?.name?.trim() || `seat ${i}`;
+}
+
 /** Keep the in-memory log bounded so structuredClone (per reduce) and the save
  *  blob don't grow with game length. Only the last ~80 are ever synced. */
 const ENGINE_LOG_CAP = 200;
@@ -120,19 +126,19 @@ function damageSeat(s: GameState, seat: number, dmg: number): void {
   const t = s.players[seat]!;
   if (t.out) return;
   t.lives = Math.max(0, t.lives - dmg);
-  s.log.push(`seat ${seat} -${dmg} -> ${t.lives} lives`);
+  s.log.push(`${who(s, seat)} -${dmg} -> ${t.lives} lives`);
   if (t.lives <= 0) {
     if (handHas(t, "lifeguard")) {
       spendKind(s, seat, "lifeguard");
       t.lives = 1;
-      s.log.push(`seat ${seat} saved by Lifeguard (-> 1 life)`);
+      s.log.push(`${who(s, seat)} saved by Lifeguard (-> 1 life)`);
     } else {
       t.out = true;
       if (s.phase !== "sudden-death") {
         t.stormCloud = true; // soft elimination (D5): keeps playing from the sideline
-        s.log.push(`seat ${seat} SOAKED -> Storm Cloud`);
+        s.log.push(`${who(s, seat)} SOAKED -> Storm Cloud`);
       } else {
-        s.log.push(`seat ${seat} SOAKED (out)`); // Sudden-Death: fully removed
+        s.log.push(`${who(s, seat)} SOAKED (out)`); // Sudden-Death: fully removed
       }
     }
   }
@@ -204,7 +210,7 @@ function lostAndFound(s: GameState, seat: number): void {
 /** Resolve one Event immediately on draw (D3). All effects are self-contained
  *  (no awaiting), so this is safe to run inside a draw. */
 function resolveEvent(s: GameState, drawer: number, event: EventKind): void {
-  s.log.push(`seat ${drawer} draws Event: ${event}`);
+  s.log.push(`${who(s, drawer)} draws Event: ${event}`);
   switch (event) {
     case "mudslide":
     case "stormsurge":
@@ -402,7 +408,7 @@ function endGame(s: GameState, winner: number | null, reason: GameState["endReas
   s.winner = winner;
   s.endReason = reason;
   s.awaiting = { seats: [], kind: "GAME_OVER" };
-  s.log.push(`game over: ${reason}, winner seat ${winner}`);
+  s.log.push(`game over: ${reason}, winner ${winner === null ? "no winner" : who(s, winner)}`);
 }
 
 /** Whether a seat takes a turn now: living players always; Storm Clouds in normal
@@ -457,7 +463,7 @@ function afterAttack(s: GameState, kind: AttackKind): void {
   const owner = s.turnSeat;
   if (kind === "golden" && !s.players[owner]!.out) {
     drawCards(s, owner, 2); // Golden draws 2 whether it hit or missed (E2)
-    s.log.push(`seat ${owner} draws 2 (Golden)`);
+    s.log.push(`${who(s, owner)} draws 2 (Golden)`);
     if (s.over) return; // a Golden-drawn Event ended the game
   }
   s.awaiting = { seats: [], kind: "GAME_OVER" }; // clears the attack
@@ -528,7 +534,7 @@ function resolveTarget(s: GameState, hit: boolean): void {
   // E9: in Sudden-Death, multi-target attacks deal no damage (single-target only).
   const suppressed = s.phase === "sudden-death" && atk.targets.length > 1;
   if (hit && !suppressed) damageSeat(s, tSeat, atk.damage);
-  else s.log.push(`attack on seat ${tSeat} ${hit ? "suppressed (Sudden-Death AoE)" : "missed"}`);
+  else s.log.push(`attack on ${who(s, tSeat)} ${hit ? "suppressed (Sudden-Death AoE)" : "missed"}`);
   nextTargetOrFinish(s);
 }
 
@@ -563,7 +569,7 @@ function resolveThrowFlip(s: GameState): void {
   s.pendingFlip = null;
   const verdict = flipSplash(s);
   s.lastSplash = { seq: (s.lastSplash?.seq ?? 0) + 1, attacker, target, verdict };
-  s.log.push(`seat ${attacker} throws at ${target}: splash ${verdict}`);
+  s.log.push(`${who(s, attacker)} throws at ${who(s, target)}: splash ${verdict}`);
   if (verdict === "miss") {
     afterAttack(s, "basic"); // spread NOT consumed on a Miss
     return;
@@ -900,7 +906,7 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
     const targets = livingSeats(s);
     const target = targets[Math.floor(rand(s) * targets.length)]!;
     s.stormThrowsUsed += 1;
-    s.log.push(`Storm Cloud seat ${seat} splashes random target ${target}`);
+    s.log.push(`Storm Cloud ${who(s, seat)} splashes random target ${who(s, target)}`);
     startThrow(s, seat, target, false);
     return { state: s, awaiting: s.awaiting, events };
   }
@@ -911,7 +917,7 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
     // it is suppressed in Sudden-Death (multi-target).
     spendKind(s, seat, "flashflood");
     const targets = livingSeats(s).filter((t) => t !== seat);
-    s.log.push(`seat ${seat} unleashes a Flash Flood on ${targets.length} opponents`);
+    s.log.push(`${who(s, seat)} unleashes a Flash Flood on ${targets.length} opponents`);
     launchAttack(s, seat, targets, "flashflood", FLASH_FLOOD_BLOCK, FLASH_FLOOD_DAMAGE, false, true);
     return { state: s, awaiting: s.awaiting, events };
   }
@@ -954,7 +960,7 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
       const card = s.stacks[st].pop();
       if (card) hand.push(card);
     }
-    s.log.push(`seat ${seat} shops -> buys [${move.buy.join(", ")}]`);
+    s.log.push(`${who(s, seat)} shops -> buys [${move.buy.join(", ")}]`);
     endActiveTurn(s);
     return { state: s, awaiting: s.awaiting, events };
   }
@@ -1000,7 +1006,7 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
       }
       if (res.action === "towel") {
         spendKind(s, seat, "towel");
-        s.log.push(`seat ${seat} Towels their splash`);
+        s.log.push(`${who(s, seat)} Towels their splash`);
         nextTargetOrFinish(s); // THIS instance cancelled; the rest still land
         return { state: s, awaiting: s.awaiting, events };
       }
@@ -1008,11 +1014,11 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
       if (res.action === "redirect") {
         spendKind(s, seat, "redirect");
         atk.targets[atk.targetIdx] = res.target!;
-        s.log.push(`seat ${seat} Redirects their splash to ${res.target}`);
+        s.log.push(`${who(s, seat)} Redirects their splash to ${who(s, res.target!)}`);
       } else {
         spendKind(s, seat, "watertrap");
         atk.targets[atk.targetIdx] = atk.attackerSeat; // bounce this instance to the attacker
-        s.log.push(`seat ${seat} Water Traps their splash back at ${atk.attackerSeat}`);
+        s.log.push(`${who(s, seat)} Water Traps their splash back at ${who(s, atk.attackerSeat)}`);
       }
       // The rerouted/bounced victim gets its OWN reaction window (bounded by the
       // once-per-seat redirectedSeats cap), mirroring the pre-flip pending path.
@@ -1027,7 +1033,7 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
     }
     if (res.action === "towel") {
       spendKind(s, seat, "towel"); // E11: cancel the targeting card outright
-      s.log.push(`seat ${seat} Towels the ${pa.kind}`);
+      s.log.push(`${who(s, seat)} Towels the ${pa.kind}`);
       s.pending = null;
       if (pa.kind === "SUPPORT") s.awaiting = { seats: [pa.attacker], kind: "MOVE" };
       else afterAttack(s, pa.kind === "PLAY_BIG" ? pa.big! : "basic");
@@ -1039,11 +1045,11 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
     pa.redirectedSeats.push(seat);
     if (res.action === "redirect") {
       spendKind(s, seat, "redirect");
-      s.log.push(`seat ${seat} Redirects to ${res.target}`);
+      s.log.push(`${who(s, seat)} Redirects to ${who(s, res.target!)}`);
       pa.target = res.target!;
     } else {
       spendKind(s, seat, "watertrap");
-      s.log.push(`seat ${seat} Water Traps -> bounces to ${pa.attacker}`);
+      s.log.push(`${who(s, seat)} Water Traps -> bounces to ${who(s, pa.attacker)}`);
       pa.target = pa.attacker; // the original attacker must now defend
       pa.attacker = seat; // the trapper's Hits resolve in the ladder
     }

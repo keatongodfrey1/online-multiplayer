@@ -16,6 +16,9 @@ export function createGame(
   playerCount: number,
   seed: number,
   options?: Partial<GameOptions>,
+  /** Real player nicknames by seat (for log readability). Falls back to "Player N".
+   *  Passed in here so names exist before the opening draw can log an Event. */
+  names?: string[],
 ): GameState {
   if (playerCount < 2 || playerCount > 5) throw new Error("playerCount must be 2..5");
   const opts: GameOptions = { ...DEFAULT_OPTIONS, ...(options ?? {}) };
@@ -29,7 +32,7 @@ export function createGame(
   for (let i = 0; i < playerCount; i++) {
     players.push({
       seat: i,
-      name: `Player ${i + 1}`,
+      name: names?.[i]?.trim() || `Player ${i + 1}`,
       lives: opts.startingLives,
       hand: [],
       out: false,

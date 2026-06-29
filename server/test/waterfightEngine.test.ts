@@ -2,7 +2,7 @@
 // Mirrors splendorEngine.test.ts: rules unit tests + a fuzz suite that asserts
 // every structural invariant after every reduce.
 import assert from "node:assert/strict";
-import { WaterFightEngine as WF } from "@backbone/shared";
+import { WaterFightEngine as WF, CARD_INFO } from "@backbone/shared";
 
 const {
   createGame,
@@ -1477,6 +1477,69 @@ describe("water fight engine: fuzz", () => {
         if (g.endReason === "last-standing") lastStanding++;
       }
       assert.ok(lastStanding >= N * 0.8, `${pc}p: only ${lastStanding}/${N} greedy games ended by soaking`);
+    }
+  });
+});
+
+describe("water fight: log shows player names", () => {
+  it("a throw logs the players' names, not 'seat N'", () => {
+    const g = game(2, 5);
+    g.players[0]!.name = "Alice";
+    g.players[1]!.name = "Bob";
+    setHand(g, 0, ["balloon"]);
+    forceSplash(g, "miss");
+    let r = applyMoveRaw(g, { kind: "THROW", target: 1 });
+    r = applyResolutionRaw(r.state, { kind: "DRAW_SPLASH" });
+    const line = r.state.log.find((l) => l.includes("throws at"));
+    assert.ok(line, "a throw line was logged");
+    assert.ok(line!.includes("Alice") && line!.includes("Bob"), `names in the log line: ${line}`);
+    assert.ok(!line!.includes("seat 0") && !line!.includes("seat 1"), `no raw seat index: ${line}`);
+  });
+
+  it("a blank name falls back to 'seat N'", () => {
+    const g = game(2, 6);
+    g.players[0]!.name = "  "; // blank
+    setHand(g, 0, ["balloon"]);
+    forceSplash(g, "miss");
+    let r = applyMoveRaw(g, { kind: "THROW", target: 1 });
+    r = applyResolutionRaw(r.state, { kind: "DRAW_SPLASH" });
+    const line = r.state.log.find((l) => l.includes("throws at"));
+    assert.ok(line && line.includes("seat 0"), `blank name → seat fallback: ${line}`);
+  });
+});
+
+describe("water fight: CARD_INFO (player-facing card reference)", () => {
+  // The canonical set of every card kind a player can draw or buy, derived from the
+  // authoritative deck/stack data — NOT a re-typed list (so it can't drift). `event`
+  // is a real CardKind that lives in no composition (seeded separately, see save.ts).
+  const expectedKinds = [
+    ...Object.keys(WF.MAIN_DECK_COMPOSITION),
+    "event",
+    ...Object.keys(WF.STACK_COMPOSITIONS.defense),
+    ...Object.keys(WF.STACK_COMPOSITIONS.mischief),
+    ...Object.keys(WF.STACK_COMPOSITIONS.attack),
+  ];
+  const info = CARD_INFO as Record<string, { label: string; desc: string; stack?: string } | undefined>;
+
+  it("has a labelled, non-empty description for every card kind", () => {
+    for (const kind of expectedKinds) {
+      assert.ok(info[kind], `CARD_INFO missing entry for "${kind}"`);
+      assert.ok((info[kind]!.desc ?? "").trim().length > 0, `CARD_INFO["${kind}"] has an empty desc`);
+      assert.ok((info[kind]!.label ?? "").trim().length > 0, `CARD_INFO["${kind}"] has an empty label`);
+    }
+  });
+
+  it("tags each shop card with the stack it actually appears in (Help groups by this)", () => {
+    for (const stack of ["defense", "mischief", "attack"] as const) {
+      for (const kind of Object.keys(WF.STACK_COMPOSITIONS[stack])) {
+        assert.equal(info[kind]?.stack, stack, `CARD_INFO["${kind}"].stack should be "${stack}"`);
+      }
+    }
+  });
+
+  it("leaves main-deck cards (incl. event) without a stack", () => {
+    for (const kind of [...Object.keys(WF.MAIN_DECK_COMPOSITION), "event"]) {
+      assert.equal(info[kind]?.stack, undefined, `CARD_INFO["${kind}"] should have no stack`);
     }
   });
 });

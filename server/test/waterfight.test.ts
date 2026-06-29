@@ -527,6 +527,21 @@ describe("water fight room", () => {
     assert.strictEqual(room.engine.awaiting.seats[0], 1);
   });
 
+  it("the synced log shows player nicknames, not 'seat N'", async () => {
+    const { room, clients } = await startedGame(91);
+    const a = clients[0]!;
+    room.engine.players[0]!.hand = [{ id: 10000, kind: "balloon" }] as never;
+    room.engine.players[1]!.hand = [] as never;
+    room.engine.splashPile = ["hit", "hit"];
+    a.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "SPLASH_DRAW");
+    a.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
+    await until(() => [...room.state.log].some((l) => l.includes("throws at")));
+    const line = [...room.state.log].find((l) => l.includes("throws at"))!;
+    assert.ok(line.includes("Player0") && line.includes("Player1"), `nicknames in log: ${line}`);
+    assert.ok(!line.includes("seat "), `no raw seat index: ${line}`);
+  });
+
   it("a game against a bot reaches a winner (the bot self-advances)", async function () {
     this.timeout(60000);
     const room = (await colyseus.createRoom(WATER_FIGHT, { seed: 88 })) as unknown as WaterFightRoom;
