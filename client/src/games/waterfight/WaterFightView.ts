@@ -162,13 +162,16 @@ export function emphasizeNames(line: string, seatNames: readonly string[]): stri
   const names = [...new Set(seatNames.filter((n) => n && n.trim().length > 0))]
     .sort((a, b) => b.length - a.length); // longest-first so "Bob" wins over "b"
   if (names.length === 0) return escapeHtml(line);
+  const alnum = (c: string | undefined) => c !== undefined && /[A-Za-z0-9]/.test(c);
   let out = "";
   let plain = "";
   const flush = () => { if (plain) { out += escapeHtml(plain); plain = ""; } };
   let i = 0;
   outer: while (i < line.length) {
     for (const n of names) {
-      if (line.startsWith(n, i)) {
+      // Only bold a whole-word match — a 1-char or word-like nickname ("a", "hit")
+      // must not bold the letters inside "spl-a-sh" / "draws Event: ...".
+      if (line.startsWith(n, i) && !alnum(line[i - 1]) && !alnum(line[i + n.length])) {
         flush();
         out += `<b>${escapeHtml(n)}</b>`;
         i += n.length;
@@ -361,6 +364,8 @@ export class WaterFightView implements GameView {
     const wrap = this.root.querySelector<HTMLElement>(".wf");
     if (!wrap || state.phase !== Phase.PLAYING) {
       if (wrap && state.phase !== Phase.PLAYING) wrap.innerHTML = "";
+      this.cardDetail = undefined; // never leave a modal over the game-over screen
+      this.showRules = false;
       this.renderSplash();
       this.renderModal();
       return;
