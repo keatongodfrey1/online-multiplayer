@@ -113,7 +113,7 @@ export class WaterFightState extends BaseState {
   @type("uint8") turnSeat = 0;
   /** sessionId of the turn player (for turn alerts). */
   @type("string") currentTurn = "";
-  /** MOVE | REACT | DEFEND | ATTACKER_RESPOND | DISCARD | EXTRA_THROW | GAME_OVER. */
+  /** MOVE | REACT | DEFEND | ATTACKER_RESPOND | DISCARD | EXTRA_THROW | SPLASH_DRAW | GAME_OVER. */
   @type("string") awaitingKind = "";
   /** Engine seats who may act right now (defenders/reactors may be non-current). */
   @type(["uint8"]) awaitingSeats = new ArraySchema<number>();
@@ -132,6 +132,14 @@ export class WaterFightState extends BaseState {
   @type("boolean") attackSoaker = false;
   /** During a REACT window: the kind of card being reacted to ("THROW"|"PLAY_BIG"|"SUPPORT"). */
   @type("string") pendingKind = "";
+
+  // ---- last Splash flip (the interactive hit/miss draw reveal) ----
+  /** Advances on every flip so clients can detect a NEW draw (0 = none yet). */
+  @type("uint16") lastSplashSeq = 0;
+  /** "hit" | "miss" | "" (none yet). */
+  @type("string") lastSplashVerdict = "";
+  /** The seat that was splashed (named in the reveal banner). */
+  @type("uint8") lastSplashTarget = 0;
 
   // ---- phase / progress ----
   @type("boolean") suddenDeath = false;

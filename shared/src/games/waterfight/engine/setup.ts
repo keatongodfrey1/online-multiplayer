@@ -61,12 +61,14 @@ export function createGame(
     supportUsed: false,
     stormThrowsUsed: 0,
     pending: null,
+    pendingFlip: null,
     awaiting: { seats: [0], kind: "MOVE" },
     turnCount: 0,
     over: false,
     winner: null,
     endReason: null,
     log: [],
+    lastSplash: null,
     reveals: [],
   };
 

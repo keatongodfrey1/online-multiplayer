@@ -33,6 +33,9 @@ type EngineCard = WF.Card;
 type Resolution = WF.Resolution;
 
 const LOG_CAP = 80;
+/** Fallback auto-draw deadline for an idle attacker when the turn timer is off, so the
+ *  interactive Splash draw can never stall the table indefinitely. */
+const SPLASH_DRAW_FLOOR_MS = 10_000;
 
 export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
   state = new WaterFightState();
@@ -286,7 +289,11 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
   }
 
   private timeoutSecondsFor(kind: string): number {
-    return kind === "MOVE" || kind === "DISCARD" ? this.state.turnSeconds : this.state.reactionSeconds;
+    // SPLASH_DRAW is the turn player's own action, so it honors the turn timer
+    // (and "turn timer off"), like MOVE/DISCARD — not the reaction timer.
+    return kind === "MOVE" || kind === "DISCARD" || kind === "SPLASH_DRAW"
+      ? this.state.turnSeconds
+      : this.state.reactionSeconds;
   }
 
   private scheduleAuto(): void {
@@ -301,12 +308,17 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
       this.autoTimer = this.clock.setTimeout(() => this.autoPlay(seat), this.botDelayMs);
       return;
     }
-    const seconds = this.timeoutSecondsFor(this.engine.awaiting.kind);
-    if (seconds <= 0) {
-      this.state.actionDeadline = 0; // wait for the human
-      return;
+    let ms = this.timeoutSecondsFor(this.engine.awaiting.kind) * 1000;
+    if (ms <= 0) {
+      // The interactive Splash draw must always make progress: even with the turn
+      // timer off, cap a connected-but-idle attacker's wait so the table can't
+      // stall forever (applyGentle then auto-draws). Other awaits wait for the human.
+      if (this.engine.awaiting.kind === "SPLASH_DRAW") ms = SPLASH_DRAW_FLOOR_MS;
+      else {
+        this.state.actionDeadline = 0; // wait for the human
+        return;
+      }
     }
-    const ms = seconds * 1000;
     this.state.actionDeadline = Date.now() + ms;
     this.autoTimer = this.clock.setTimeout(() => this.autoPlay(seat), ms);
   }
@@ -356,6 +368,9 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
         break;
       case "EXTRA_THROW":
         res = { kind: "EXTRA", action: "pass" };
+        break;
+      case "SPLASH_DRAW":
+        res = { kind: "DRAW_SPLASH" }; // a vacated/disconnected/idle attacker auto-flips
         break;
       case "DISCARD": {
         const hand = this.engine.players[seat]!.hand;
@@ -457,6 +472,15 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
       this.state.attackSoaker = false;
     }
     this.state.pendingKind = e.pending ? e.pending.kind : "";
+
+    // Mirror the last Splash flip so every client can show the HIT/MISS reveal.
+    // ALWAYS project (reset to 0/"" when null) — the WaterFightState instance is
+    // reused across games, so on a rematch/load a stale seq would otherwise suppress
+    // the new game's reveals (client gates on lastSplashSeq rising past what it saw).
+    const ls = e.lastSplash;
+    this.state.lastSplashSeq = ls?.seq ?? 0;
+    this.state.lastSplashVerdict = ls?.verdict ?? "";
+    this.state.lastSplashTarget = ls?.target ?? 0;
 
     this.state.suddenDeath = e.phase === "sudden-death";
     this.state.turnCount = e.turnCount;

@@ -49,7 +49,7 @@ const isBool = (x: unknown): x is boolean => typeof x === "boolean";
 const intIn = (x: unknown, lo: number, hi: number): x is number => isInt(x) && x >= lo && x <= hi;
 
 const ATTACK_KINDS = new Set(["basic", "flashflood", "mega", "giant", "golden"]);
-const AWAIT_KINDS = new Set(["MOVE", "REACT", "DEFEND", "ATTACKER_RESPOND", "DISCARD", "EXTRA_THROW", "GAME_OVER"]);
+const AWAIT_KINDS = new Set(["MOVE", "REACT", "DEFEND", "ATTACKER_RESPOND", "DISCARD", "EXTRA_THROW", "SPLASH_DRAW", "GAME_OVER"]);
 const PENDING_KINDS = new Set(["THROW", "PLAY_BIG", "SUPPORT"]);
 const BIG_KINDS = new Set(["mega", "giant", "golden"]);
 const SPREAD_MODS = new Set(["triplesplash", "splashzone"]);
@@ -154,6 +154,8 @@ function rebuildEngine(e: unknown): GameState {
 
   const awaiting = rebuildAwaiting(e.awaiting, players.length);
   const pending = rebuildPending(e.pending, players.length);
+  const pendingFlip = rebuildPendingFlip(e.pendingFlip, players.length);
+  const lastSplash = rebuildLastSplash(e.lastSplash, players.length);
 
   need(isInt(e.turnCount) && e.turnCount >= 0, "turnCount");
   need(isBool(e.over), "over");
@@ -188,6 +190,12 @@ function rebuildEngine(e: unknown): GameState {
   } else {
     need(!pending, "a pending action is present without a REACT await");
   }
+  if (awaiting.kind === "SPLASH_DRAW") {
+    need(pendingFlip, "a SPLASH_DRAW await needs a pendingFlip");
+    need(head === pendingFlip!.attacker, "the SPLASH_DRAW attacker must head the await");
+  } else {
+    need(!pendingFlip, "a pendingFlip is present without a SPLASH_DRAW await");
+  }
   if (awaiting.kind === "DISCARD") {
     need(head !== undefined && players[head]!.hand.length > options.handLimit, "a DISCARD await with nothing to discard");
   }
@@ -209,6 +217,7 @@ function rebuildEngine(e: unknown): GameState {
     supportUsed: e.supportUsed as boolean,
     stormThrowsUsed: clampInt(e.stormThrowsUsed ?? 0, 0, options.stormThrows),
     pending,
+    pendingFlip,
     phase: e.phase as "playing" | "sudden-death",
     awaiting,
     turnCount: e.turnCount as number,
@@ -216,6 +225,7 @@ function rebuildEngine(e: unknown): GameState {
     winner: (e.winner ?? null) as number | null,
     endReason: (e.endReason ?? null) as GameState["endReason"],
     log: (e.log as unknown[]).filter(isStr).slice(-200) as string[],
+    lastSplash,
     reveals: [], // peeks are ephemeral; never resumed from a save
   } as unknown as GameState;
   return state;
@@ -283,6 +293,41 @@ function rebuildPending(p: unknown, n: number): GameState["pending"] {
     };
   }
   return out;
+}
+
+function rebuildPendingFlip(f: unknown, n: number): GameState["pendingFlip"] {
+  if (f == null) return null;
+  need(isObj(f), "pendingFlip");
+  need(intIn(f.attacker, 0, n - 1) && intIn(f.target, 0, n - 1), "pendingFlip seats");
+  const out = {
+    attacker: f.attacker as number,
+    target: f.target as number,
+    soaker: f.soaker === true,
+  } as NonNullable<GameState["pendingFlip"]>;
+  if (isObj(f.spread)) {
+    need(isStr(f.spread.modifier) && SPREAD_MODS.has(f.spread.modifier), "pendingFlip spread modifier");
+    (out as { spread?: unknown }).spread = {
+      modifier: f.spread.modifier,
+      extraTargets: Array.isArray(f.spread.extraTargets) ? (f.spread.extraTargets as unknown[]).filter((v) => intIn(v, 0, n - 1)) : [],
+    };
+  }
+  return out;
+}
+
+function rebuildLastSplash(ls: unknown, n: number): GameState["lastSplash"] {
+  if (ls == null) return null;
+  need(isObj(ls), "lastSplash");
+  // Bounded to the uint16 the schema projects — a tampered seq beyond that would
+  // wrap on sync and desync the client's reveal gate.
+  need(intIn(ls.seq, 0, 65535), "lastSplash seq");
+  need(intIn(ls.attacker, 0, n - 1) && intIn(ls.target, 0, n - 1), "lastSplash seats");
+  need(ls.verdict === "hit" || ls.verdict === "miss", "lastSplash verdict");
+  return {
+    seq: ls.seq as number,
+    attacker: ls.attacker as number,
+    target: ls.target as number,
+    verdict: ls.verdict as "hit" | "miss",
+  };
 }
 
 function clampInt(x: unknown, lo: number, hi: number): number {

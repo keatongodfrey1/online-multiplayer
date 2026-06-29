@@ -22,6 +22,8 @@ import { flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAl
 import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
 
 const WF_SAVES_KEY = "waterfight-saves";
+/** How long the HIT/MISS splash reveal stays on screen. */
+const SPLASH_REVEAL_MS = 2600;
 const wfTurnLabel = (blob: any): number => (blob?.engine?.turnCount ?? 0) + 1;
 
 // MIRROR of the engine's TARGETED_SUPPORTS / implemented supports (engine.ts) —
@@ -57,34 +59,39 @@ const CARD_LABELS: Record<string, string> = {
   giant: "🗿 Giant", soaker: "🚿 Soaker", flashflood: "🌧 Flash Flood", event: "🎲 Event",
 };
 
+// In-game styles only (injected by mount(), present during PLAYING). The lobby
+// stepper/settings rules live in the GLOBAL style.css — the lobby renders this
+// game's settings while this view is unmounted, so an inline <style> wouldn't apply.
 const STYLE = `
-.wf { font-family: system-ui, sans-serif; display: flex; flex-direction: column; gap: 12px; color: var(--text, #1a1a1a); }
-.wf-banner { padding: 8px 12px; border-radius: 8px; background: #eef3ff; font-weight: 600; }
-.wf-banner.act { background: #d6f5d6; }
-.wf-banner.sudden { background: #ffe0e0; }
-.wf-reveal { padding: 8px 12px; border-radius: 8px; background: #fff7d6; border: 1px solid #e0c060; font-size: 13px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.wf { font-family: system-ui, sans-serif; display: flex; flex-direction: column; gap: 12px; color: var(--text); }
+.wf-banner { padding: 8px 12px; border-radius: 8px; background: var(--card); color: var(--text); font-weight: 600; }
+.wf-banner.act { background: #1d3a2a; }
+.wf-banner.sudden { background: #3a1d22; }
+.wf-reveal { padding: 8px 12px; border-radius: 8px; background: var(--card); border: 1px solid var(--warn); color: var(--text); font-size: 13px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .wf-reveal button { padding: 2px 8px; }
+.wf-splash { padding: 10px 12px; border-radius: 8px; font-weight: 700; font-size: 15px; text-align: center; color: var(--text); animation: wf-pop 0.25s ease-out; }
+.wf-splash.hit { background: #3a1d22; border: 1px solid var(--danger); }
+.wf-splash.miss { background: #1d2740; border: 1px solid var(--accent); }
+@keyframes wf-pop { from { transform: scale(0.82); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 .wf-seats { display: flex; flex-wrap: wrap; gap: 8px; }
-.wf-seat { border: 1px solid #ccd; border-radius: 8px; padding: 8px 10px; min-width: 120px; background: #fafbff; }
-.wf-seat.turn { border-color: #4a80ff; box-shadow: 0 0 0 2px #4a80ff33; }
+.wf-seat { border: 1px solid #353a4f; border-radius: 8px; padding: 8px 10px; min-width: 120px; background: var(--card); }
+.wf-seat.turn { border-color: var(--accent); box-shadow: 0 0 0 2px #5b8cff33; }
 .wf-seat.out { opacity: 0.6; }
 .wf-seat .nm { font-weight: 700; }
 .wf-seat .lives { font-size: 16px; }
-.wf-seat .tags { font-size: 12px; color: #667; }
-.wf-decks { font-size: 12px; color: #556; display: flex; flex-wrap: wrap; gap: 10px; }
+.wf-seat .tags { font-size: 12px; color: var(--muted); }
+.wf-decks { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 10px; }
 .wf-hand { display: flex; flex-wrap: wrap; gap: 6px; }
-.wf-card { border: 1px solid #bcd; border-radius: 6px; padding: 4px 8px; background: #fff; font-size: 13px; cursor: default; }
-.wf-card.sel { background: #ffe9a8; border-color: #e0a800; cursor: pointer; }
+.wf-card { border: 1px solid #353a4f; border-radius: 6px; padding: 4px 8px; background: var(--bg); color: var(--text); font-size: 13px; cursor: default; }
+.wf-card.sel { background: var(--warn); border-color: var(--warn); color: var(--bg); cursor: pointer; }
 .wf-card.pick { cursor: pointer; }
 .wf-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.wf-actions button { padding: 6px 10px; border-radius: 6px; border: 1px solid #4a80ff; background: #4a80ff; color: #fff; cursor: pointer; font-size: 13px; }
-.wf-actions button.ghost { background: #fff; color: #4a80ff; }
+.wf-actions button { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; font-size: 13px; }
+.wf-actions button.ghost { background: transparent; color: var(--accent); }
+.wf-actions button.draw { background: var(--warn); border-color: var(--warn); color: var(--bg); font-weight: 700; font-size: 14px; }
 .wf-actions button:disabled { opacity: 0.5; cursor: default; }
-.wf-log { font-size: 12px; color: #667; max-height: 110px; overflow-y: auto; border-top: 1px solid #eee; padding-top: 6px; }
+.wf-log { font-size: 12px; color: var(--muted); max-height: 110px; overflow-y: auto; border-top: 1px solid #353a4f; padding-top: 6px; }
 .wf-mute { align-self: flex-end; background: none; border: none; cursor: pointer; font-size: 18px; }
-.wf-lobby-setting { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 0; font-size: 14px; }
-.wf-lobby-setting input { width: 80px; }
-.wf-add-bot { margin-left: 6px; }
 `;
 
 function countKind(hand: { kind: string }[], kind: string): number {
@@ -115,12 +122,21 @@ export class WaterFightView implements GameView {
   private discardSel = new Set<number>();
   /** The last private peek (Goggles / Sneaky Peek), shown until dismissed/acted. */
   private reveal?: { kind: string; ofSeat: number; cards: { id: number; kind: string }[] };
+  /** Splash-flip reveal: shown briefly when a NEW flip (rising lastSplashSeq) lands.
+   *  Rendered into its own DOM node (not the rebuilt .wf) so the pop animation only
+   *  fires once per draw, not on every state delta. */
+  private splashReveal?: { seq: number; verdict: string; target: number; until: number };
+  private splashTimer?: ReturnType<typeof setTimeout>;
+  /** Highest splash seq we've already shown — seeded from current state on mount so a
+   *  refresh/resume/late-join into a game that already threw never replays a stale flip. */
+  private lastSeenSplashSeq = 0;
 
   mount(root: HTMLElement, room: Room<any, BaseState>, ctx: GameViewContext): void {
     this.root = root;
     this.room = room as unknown as Room<any, WaterFightState>;
     this.ctx = ctx;
-    root.innerHTML = `<style>${STYLE}</style><div class="wf"></div>`;
+    this.lastSeenSplashSeq = this.room.state.lastSplashSeq ?? 0; // seed BEFORE first render
+    root.innerHTML = `<style>${STYLE}</style><div class="wf-splash-host"></div><div class="wf"></div>`;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
     this.room.onMessage(WaterFightMsg.REVEAL, (payload: { kind: string; ofSeat: number; cards: { id: number; kind: string }[] }) => {
@@ -135,6 +151,9 @@ export class WaterFightView implements GameView {
   unmount(): void {
     this.room?.onStateChange.remove(this.onState);
     this.root?.removeEventListener("click", this.onClick);
+    if (this.splashTimer) clearTimeout(this.splashTimer);
+    this.splashTimer = undefined;
+    this.splashReveal = undefined;
     this.root = undefined;
     this.room = undefined;
   }
@@ -161,6 +180,9 @@ export class WaterFightView implements GameView {
       case "dismiss-reveal":
         this.reveal = undefined;
         this.render();
+        return;
+      case "draw":
+        room.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
         return;
       case "end":
         room.send(WaterFightMsg.MOVE, { kind: "END_TURN" });
@@ -222,8 +244,10 @@ export class WaterFightView implements GameView {
     const wrap = this.root.querySelector<HTMLElement>(".wf");
     if (!wrap || state.phase !== Phase.PLAYING) {
       if (wrap && state.phase !== Phase.PLAYING) wrap.innerHTML = "";
+      this.renderSplash();
       return;
     }
+    this.detectSplash(state);
     const seats = [...state.seats];
     const mySeat = this.mySeatIndex(state);
     const awaiting = [...state.awaitingSeats];
@@ -249,6 +273,46 @@ export class WaterFightView implements GameView {
       myMoment ? `<div class="wf-actions">${this.renderActions(state, seats, mySeat)}</div>` : "",
       this.renderLog(state),
     ].join("");
+    this.renderSplash();
+  }
+
+  /** Arm a transient HIT/MISS reveal when a NEW Splash flip lands (seq rose). */
+  private detectSplash(state: WaterFightState): void {
+    if (state.lastSplashSeq > this.lastSeenSplashSeq) {
+      this.lastSeenSplashSeq = state.lastSplashSeq;
+      this.splashReveal = {
+        seq: state.lastSplashSeq,
+        verdict: state.lastSplashVerdict,
+        target: state.lastSplashTarget,
+        until: Date.now() + SPLASH_REVEAL_MS,
+      };
+      if (this.splashTimer) clearTimeout(this.splashTimer);
+      this.splashTimer = setTimeout(() => {
+        this.splashReveal = undefined;
+        this.render();
+      }, SPLASH_REVEAL_MS);
+    } else if (this.splashReveal && Date.now() >= this.splashReveal.until) {
+      this.splashReveal = undefined; // safety net if the timer was superseded
+    }
+  }
+
+  /** Paint the splash reveal into its OWN node, only when it changes — so the pop
+   *  animation fires once per draw, not on every unrelated state delta. */
+  private renderSplash(): void {
+    const host = this.root?.querySelector<HTMLElement>(".wf-splash-host");
+    if (!host) return;
+    const r = this.splashReveal;
+    const key = r ? String(r.seq) : "";
+    if (host.dataset.seq === key) return; // unchanged — leave the (possibly animating) node
+    host.dataset.seq = key;
+    if (!r) {
+      host.innerHTML = "";
+      return;
+    }
+    const seats = [...(this.room?.state.seats ?? [])];
+    const who = escapeHtml(seats.find((s) => s.seat === r.target)?.nickname ?? `Seat ${r.target + 1}`);
+    const label = r.verdict === "hit" ? `💥 SPLASH on ${who} — HIT!` : `💦 SPLASH on ${who} — MISS`;
+    host.innerHTML = `<div class="wf-splash ${r.verdict === "hit" ? "hit" : "miss"}">${label}</div>`;
   }
 
   private momentLabel(state: WaterFightState): string {
@@ -258,6 +322,7 @@ export class WaterFightView implements GameView {
       case "ATTACKER_RESPOND": return "Push your attack?";
       case "REACT": return "React!";
       case "EXTRA_THROW": return "Throw again?";
+      case "SPLASH_DRAW": return "Draw the Splash card!";
       case "DISCARD": return "Discard down";
       default: return "Your move";
     }
@@ -279,7 +344,10 @@ export class WaterFightView implements GameView {
     if (myMoment) msg = this.momentLabel(state);
     else {
       const who = [...state.seats].find((s) => s.seat === (state.awaitingSeats[0] ?? state.turnSeat));
-      const verb = state.awaitingKind === "MOVE" ? "is choosing" : "is reacting";
+      const verb =
+        state.awaitingKind === "MOVE" ? "is choosing"
+        : state.awaitingKind === "SPLASH_DRAW" ? "is drawing the splash"
+        : "is reacting";
       msg = `${escapeHtml(who?.nickname ?? "Someone")} ${verb}…`;
     }
     const atk = state.attackActive
@@ -347,6 +415,11 @@ export class WaterFightView implements GameView {
     const out: string[] = [];
 
     switch (state.awaitingKind) {
+      case "SPLASH_DRAW": {
+        // The attacker flips the Splash Pile to see hit/miss for the throw they committed.
+        out.push(`<button data-act="draw" class="draw">🎴 Draw from the Splash Pile</button>`);
+        break;
+      }
       case "MOVE": {
         const me = seats[mySeat]!;
         if (me.stormCloud) {
@@ -442,13 +515,20 @@ export function renderWaterFightLobbySettings(
   ctx: LobbySettingsContext,
 ): void {
   const state = room.state as unknown as WaterFightState & Record<string, number>;
+  const dis = ctx.isHost ? "" : "disabled";
+  // −/value/+ steppers (native number-input arrows don't render on mobile). Mirrors
+  // Paper.io's stepper; CSS lives in the global style.css (this runs in the lobby,
+  // where this game's in-game <style> is not mounted).
   const rows = WF_SETTINGS.map((s) => {
     const value = (state as Record<string, number>)[s.key] ?? s.default;
-    const disabled = ctx.isHost ? "" : "disabled";
-    return `<label class="wf-lobby-setting" title="${escapeHtml(s.hint)}">
+    return `<div class="wf-lobby-setting" title="${escapeHtml(s.hint)}">
       <span>${escapeHtml(s.label)}</span>
-      <input type="number" data-key="${s.key}" min="${s.min}" max="${s.max}" step="${s.step}" value="${value}" ${disabled}>
-    </label>`;
+      <span class="wf-stepper">
+        <button class="secondary" data-step data-key="${s.key}" data-dir="-1" ${dis}>−</button>
+        <b class="wf-val">${value}</b>
+        <button class="secondary" data-step data-key="${s.key}" data-dir="1" ${dis}>+</button>
+      </span>
+    </div>`;
   }).join("");
   const seatsLeft = state.maxPlayers - state.players.size;
   const addBot = ctx.isHost && seatsLeft > 0 ? `<button class="wf-add-bot" data-addbot>+ Add AI</button>` : "";
@@ -461,11 +541,20 @@ export function renderWaterFightLobbySettings(
     isHost: ctx.isHost,
     loadedSave: state.loadedSave,
   });
-  container.querySelectorAll<HTMLInputElement>("input[data-key]").forEach((input) => {
-    input.addEventListener("change", () => {
-      room.send(WaterFightMsg.CONFIG, { key: input.dataset.key, value: Number(input.value) });
+  // Per-element listeners (re-attached each render; the lobby has no [data-act]
+  // root delegation). Read the value LIVE from room.state to avoid a stale closure.
+  if (ctx.isHost) {
+    container.querySelectorAll<HTMLButtonElement>("button[data-step]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.dataset.key!;
+        const desc = WF_SETTINGS.find((s) => s.key === key);
+        if (!desc) return;
+        const cur = (room.state as unknown as Record<string, number>)[key] ?? desc.default;
+        const next = Math.min(desc.max, Math.max(desc.min, cur + Number(btn.dataset.dir) * desc.step));
+        if (next !== cur) room.send(WaterFightMsg.CONFIG, { key, value: next });
+      });
     });
-  });
+  }
   container.querySelector<HTMLButtonElement>("[data-addbot]")?.addEventListener("click", () => {
     room.send(LobbyMsg.ADD_BOT, {});
   });

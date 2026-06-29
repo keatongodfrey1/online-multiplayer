@@ -168,6 +168,8 @@ describe("water fight room", () => {
     room.engine.players[1]!.hand = [];
     room.engine.splashPile = ["hit", "hit"];
     a.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "SPLASH_DRAW");
+    a.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
     await until(() => room.engine.awaiting.kind === "DEFEND");
     b.send(WaterFightMsg.RESOLVE, { kind: "DEFEND", defense: "pass" });
     await until(() => room.state.phase === Phase.ENDED);
@@ -197,6 +199,9 @@ describe("water fight room", () => {
     room.engine.players[1]!.hand = defenderHand as never;
     room.engine.splashPile = ["hit", "hit", "hit"];
     a.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    // The throw now waits for the attacker (seat 0) to flip the Splash Pile.
+    await until(() => room.engine.awaiting.kind === "SPLASH_DRAW" && room.engine.awaiting.seats[0] === 0);
+    a.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
     await until(() => room.engine.awaiting.kind === "DEFEND" && room.engine.awaiting.seats[0] === 1);
   }
 
@@ -342,6 +347,8 @@ describe("water fight room", () => {
     room.engine.players[0]!.hand.push(room.engine.mainDeck.splice(idx, 1)[0]!);
     room.engine.splashPile[room.engine.splashPile.length - 1] = "hit"; // force the flip, keep the count
     a!.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "SPLASH_DRAW");
+    a!.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
     await until(() => room.engine.awaiting.kind === "DEFEND" && room.engine.awaiting.seats[0] === 1);
 
     let saved: any = null;
@@ -399,6 +406,8 @@ describe("water fight room", () => {
     room.engine.players[0]!.hand.push(room.engine.mainDeck.splice(bi, 1)[0]!);
     room.engine.splashPile[room.engine.splashPile.length - 1] = "hit"; // force the flip, keep the count
     a.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1, spread: { modifier: "splashzone", extraTargets: [] } });
+    await until(() => room.engine.awaiting.kind === "SPLASH_DRAW");
+    a.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
     await until(() => room.engine.awaiting.attack?.perTargetReactions === true);
 
     let saved: any = null;
@@ -420,6 +429,102 @@ describe("water fight room", () => {
     await until(() => room2.state.phase === Phase.PLAYING);
     assert.strictEqual(room2.engine.awaiting.attack!.perTargetReactions, true, "resumed the multi-target attack");
     assert.strictEqual(room2.engine.awaiting.attack!.targets.length, 2, "both splash targets preserved");
+  });
+
+  it("the attacker's DRAW_SPLASH flips over the wire; a bystander's is ignored", async () => {
+    // Regression guard for the sanitizer: a human's DRAW_SPLASH must reach the engine
+    // (bots bypass the sanitizer, so a bot-only test would miss a dropped human payload).
+    const { room, clients } = await startedGame(71);
+    const a = clients[0]!;
+    const b = clients[1]!;
+    room.engine.players[0]!.hand = [{ id: 10000, kind: "balloon" }] as never;
+    room.engine.players[1]!.hand = [] as never;
+    room.engine.splashPile = ["hit", "hit"];
+    a.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "SPLASH_DRAW" && room.engine.awaiting.seats[0] === 0);
+    const seqBefore = room.state.lastSplashSeq;
+
+    // A non-attacker's draw is ignored (not the awaited seat).
+    b.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
+    await sleep(120);
+    assert.strictEqual(room.engine.awaiting.kind, "SPLASH_DRAW", "bystander draw did nothing");
+
+    // The attacker's draw flips: the synced reveal advances and the ladder opens.
+    a.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
+    await until(() => room.engine.awaiting.kind === "DEFEND");
+    assert.strictEqual(room.state.lastSplashVerdict, "hit", "verdict synced to clients");
+    assert.ok(room.state.lastSplashSeq > seqBefore, "lastSplashSeq advanced");
+    await until(() => (a.state as unknown as { lastSplashSeq: number }).lastSplashSeq > seqBefore);
+  });
+
+  it("saves and resumes a mid-SPLASH_DRAW state", async () => {
+    const { room, clients } = await startedGame(73);
+    const a = clients[0]!;
+    // Real balloon from the deck (conservation) + forced Hit so the blob passes the validator.
+    const idx = room.engine.mainDeck.findIndex((c) => c.kind === "balloon");
+    room.engine.players[0]!.hand.push(room.engine.mainDeck.splice(idx, 1)[0]!);
+    room.engine.splashPile[room.engine.splashPile.length - 1] = "hit";
+    a.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "SPLASH_DRAW" && room.engine.awaiting.seats[0] === 0);
+
+    let saved: any = null;
+    a.onMessage(ServerMsg.SAVE_DATA, (blob: unknown) => (saved = blob));
+    a.send(LobbyMsg.SAVE, {});
+    await until(() => saved !== null);
+    const parsed = parseSave(saved);
+    assert.ok(parsed, "the mid-SPLASH_DRAW blob validates");
+    assert.strictEqual(parsed!.engine.awaiting.kind, "SPLASH_DRAW");
+    assert.ok(parsed!.engine.pendingFlip, "the committed throw (pendingFlip) is preserved");
+    assert.strictEqual(parsed!.engine.pendingFlip!.attacker, 0);
+
+    const room2 = (await colyseus.createRoom(WATER_FIGHT, {})) as unknown as WaterFightRoom;
+    const c0 = await colyseus.connectTo(room2, { nickname: "Player0" });
+    await colyseus.connectTo(room2, { nickname: "Player1" });
+    c0.send(LobbyMsg.LOAD, saved);
+    await until(() => room2.state.loadedSave !== "");
+    c0.send(LobbyMsg.START, {});
+    await until(() => room2.state.phase === Phase.PLAYING);
+    assert.strictEqual(room2.engine.awaiting.kind, "SPLASH_DRAW", "resumed awaiting the draw");
+    // And the resumed draw still works.
+    c0.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
+    await until(() => room2.engine.awaiting.kind === "DEFEND");
+  });
+
+  it("rematch clears the stale Splash reveal (seq resets so the next game's draws show)", async () => {
+    const { room, clients } = await startedGame(3);
+    const [a, b] = clients;
+    // Quick finish: a flipped Hit soaks seat 1, which populates lastSplash*.
+    room.engine.players[1]!.lives = 1;
+    room.engine.players[0]!.hand = [{ id: 10000, kind: "balloon" }] as never;
+    room.engine.players[1]!.hand = [] as never;
+    room.engine.splashPile = ["hit", "hit"];
+    a!.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "SPLASH_DRAW");
+    a!.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
+    await until(() => room.engine.awaiting.kind === "DEFEND");
+    b!.send(WaterFightMsg.RESOLVE, { kind: "DEFEND", defense: "pass" });
+    await until(() => room.state.phase === Phase.ENDED);
+    assert.ok(room.state.lastSplashSeq > 0, "a flip happened in game 1");
+
+    a!.send(LobbyMsg.REMATCH, {});
+    b!.send(LobbyMsg.REMATCH, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    assert.strictEqual(room.state.lastSplashSeq, 0, "seq reset — the new game's first flip (seq 1) will be > what a fresh client seeds");
+    assert.strictEqual(room.state.lastSplashVerdict, "", "no stale HIT/MISS verdict carried into the rematch");
+  });
+
+  it("an attacker who disconnects at SPLASH_DRAW is auto-drawn (the table never stalls)", async function () {
+    this.timeout(8000);
+    const { room, clients } = await startedGame(81);
+    const a = clients[0]!;
+    room.engine.players[0]!.hand = [{ id: 10000, kind: "balloon" }] as never;
+    room.engine.players[1]!.hand = [] as never;
+    room.engine.splashPile = ["hit", "hit"];
+    a.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "SPLASH_DRAW" && room.engine.awaiting.seats[0] === 0);
+    await a.leave(false); // attacker drops mid-draw -> becomes an auto seat
+    await until(() => room.engine.awaiting.kind === "DEFEND", 5000); // applyGentle auto-drew -> ladder opened
+    assert.strictEqual(room.engine.awaiting.seats[0], 1);
   });
 
   it("a game against a bot reaches a winner (the bot self-advances)", async function () {

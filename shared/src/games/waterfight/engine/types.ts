@@ -128,7 +128,7 @@ export const DEFAULT_OPTIONS: GameOptions = {
 /** Who/what the engine is waiting on. `seats` holds the single seat acting now
  *  (a multi-target attack resolves its targets one at a time, not all at once). */
 export type AwaitKind =
-  | "MOVE" | "REACT" | "DEFEND" | "ATTACKER_RESPOND" | "DISCARD" | "EXTRA_THROW" | "GAME_OVER";
+  | "MOVE" | "REACT" | "DEFEND" | "ATTACKER_RESPOND" | "DISCARD" | "EXTRA_THROW" | "SPLASH_DRAW" | "GAME_OVER";
 
 /** A SINGLE-target card committed but not yet resolved — held during the pre-effect
  *  reaction window (E10/E11). On pass it resolves; Towel cancels it; Redirect /
@@ -143,6 +143,26 @@ export interface PendingAction {
   support?: SupportKind;
   /** Seats that already spent a discrete reaction (Redirect/Water Trap) — caps the chain. */
   redirectedSeats: number[];
+}
+
+/** A throw committed and past its pre-flip reaction window, now waiting for the
+ *  ATTACKER to flip the Splash Pile (the interactive hit/miss draw). Held in its
+ *  own slot — never `s.pending`, which an invariant forbids outside a REACT window.
+ *  On DRAW_SPLASH the engine flips, records `lastSplash`, and resolves Miss/Hit. */
+export interface PendingFlip {
+  attacker: number;
+  target: number;
+  soaker: boolean;
+  spread?: Spread;
+}
+
+/** The most recent Splash flip, mirrored to all clients so the table can show the
+ *  HIT/MISS reveal. `seq` advances on every flip so a client can detect a NEW draw. */
+export interface SplashReveal {
+  seq: number;
+  attacker: number;
+  target: number;
+  verdict: SplashCard;
 }
 
 /** The dedicated attack state machine's persistent state (Issue 1bA). */
@@ -209,12 +229,18 @@ export interface GameState {
   stormThrowsUsed: number;
   /** A committed targeting action awaiting its reaction window (null otherwise). */
   pending: PendingAction | null;
+  /** A committed throw awaiting the attacker's interactive Splash flip (null otherwise);
+   *  set iff `awaiting.kind === "SPLASH_DRAW"`. */
+  pendingFlip: PendingFlip | null;
   awaiting: Awaiting;
   turnCount: number;
   over: boolean;
   winner: number | null;
   endReason: EndReason | null;
   log: string[];
+  /** The most recent Splash flip (for the synced HIT/MISS reveal); null until the
+   *  first throw flips. */
+  lastSplash: SplashReveal | null;
   /** Private peek output of the LAST reduce (forwarded to one seat, not synced). */
   reveals: Reveal[];
 }
@@ -246,7 +272,8 @@ export type Resolution =
   | { kind: "DEFEND"; defense: Defense }
   | { kind: "ATTACKER_RESPOND"; respond: Respond }
   | { kind: "DISCARD"; cardIds: number[] }
-  | { kind: "EXTRA"; action: "throw" | "pass"; target?: number; soaker?: boolean };
+  | { kind: "EXTRA"; action: "throw" | "pass"; target?: number; soaker?: boolean }
+  | { kind: "DRAW_SPLASH" }; // the attacker flips the Splash Pile for a committed throw
 
 export interface GameEvent {
   type: string;

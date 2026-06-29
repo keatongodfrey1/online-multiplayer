@@ -110,6 +110,8 @@ export function parseResolution(payload: unknown): Resolution | null {
       const cardIds = payload.cardIds.filter((id) => typeof id === "number" && Number.isInteger(id)).slice(0, 50);
       return { kind: "DISCARD", cardIds };
     }
+    case "DRAW_SPLASH":
+      return { kind: "DRAW_SPLASH" }; // no fields to validate; engine gates it to the awaited attacker
     default:
       return null;
   }
