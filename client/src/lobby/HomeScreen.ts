@@ -4,6 +4,7 @@
  */
 import { NICKNAME_MAX_LENGTH } from "@backbone/shared";
 import { games } from "../games/registry.js";
+import { escapeAttr, escapeHtml } from "../framework/dom.js";
 import { loadNickname } from "../framework/session.js";
 
 export interface HomeScreenHandlers {
@@ -113,12 +114,6 @@ export class HomeScreen {
   }
 }
 
-export function escapeHtml(text: string): string {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
-}
-
-export function escapeAttr(text: string): string {
-  return escapeHtml(text).replace(/"/g, "&quot;");
-}
+// Re-exported from the framework helper so existing importers (RoomScreen,
+// WaterFightView) keep working; dom.ts is the single source of truth.
+export { escapeAttr, escapeHtml };

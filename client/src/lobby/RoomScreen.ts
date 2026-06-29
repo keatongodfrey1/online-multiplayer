@@ -224,7 +224,9 @@ export class RoomScreen {
     const me = p.sessionId === this.room.sessionId;
     const color = AVATAR_PALETTE[p.seat % AVATAR_PALETTE.length];
     const nm = (p.nickname ?? "").trim();
-    const initial = escapeHtml((nm.charAt(0) || "?").toUpperCase());
+    // [...nm][0] is code-point aware so an emoji first letter isn't split into a
+    // lone surrogate (which would render as a "�" in the avatar).
+    const initial = escapeHtml(([...nm][0] || "?").toUpperCase());
     const badges =
       (me ? `<span class="lobby-badge lobby-badge-you">YOU</span>` : "") +
       (p.isHost ? `<span class="lobby-badge lobby-badge-host">HOST</span>` : "") +

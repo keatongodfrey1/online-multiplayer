@@ -732,9 +732,9 @@ export function renderWaterFightLobbySettings(
     return `<div class="wf-setrow">
       <span class="wf-setlabel">${escapeHtml(s.label)}${infoButton(s.hint, s.label)}</span>
       <span class="wf-stepper">
-        <button data-step data-key="${s.key}" data-dir="-1" ${dis} aria-label="Less ${escapeHtml(s.label)}">−</button>
+        <button data-step data-key="${s.key}" data-dir="-1" ${dis} aria-label="Less ${escapeAttr(s.label)}">−</button>
         <b class="wf-val">${value}</b>
-        <button data-step data-key="${s.key}" data-dir="1" ${dis} aria-label="More ${escapeHtml(s.label)}">+</button>
+        <button data-step data-key="${s.key}" data-dir="1" ${dis} aria-label="More ${escapeAttr(s.label)}">+</button>
       </span>
     </div>`;
   }).join("");
@@ -750,7 +750,7 @@ export function renderWaterFightLobbySettings(
     <div class="wf-saves-block"></div>
   </div>`;
 
-  // Tappable ⓘ hints: one delegated listener on the (persistent) container.
+  // Tappable ⓘ hints: one delegated click listener on this render's settings container.
   wireInfoButtons(container);
 
   renderSaveSlots(container.querySelector<HTMLElement>(".wf-saves-block")!, room, {

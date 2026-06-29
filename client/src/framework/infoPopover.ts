@@ -15,14 +15,14 @@
  *
  * Usage in a game's renderLobbySettings:
  *   `<span>${escapeHtml(label)}${infoButton(hint, label)}</span>` ... then
- *   `wireInfoButtons(container)` once per render (cheap; guarded against re-bind).
+ *   `wireInfoButtons(container)` once per render (cheap; each render passes a fresh container).
  */
 import { escapeAttr } from "./dom.js";
 
 /** Markup for one ⓘ trigger. The hint is read back from the data attribute on tap. */
 export function infoButton(hint: string, label: string): string {
   if (!hint) return "";
-  return `<button type="button" class="fw-info" data-info-hint="${escapeAttr(hint)}" aria-label="What does ${escapeAttr(label)} do?">i</button>`;
+  return `<button type="button" class="fw-info" data-info-hint="${escapeAttr(hint)}" aria-haspopup="true" aria-expanded="false" aria-label="What does ${escapeAttr(label)} do?">i</button>`;
 }
 
 /** Containers we've already attached the delegated listener to. */
@@ -36,7 +36,7 @@ function ensurePopover(): HTMLElement {
   if (popover) return popover;
   const el = document.createElement("div");
   el.className = "fw-info-popover";
-  el.setAttribute("role", "dialog");
+  el.setAttribute("role", "tooltip"); // a one-line hint, not a modal dialog
   el.tabIndex = -1;
   el.hidden = true;
   document.body.appendChild(el);
@@ -89,6 +89,7 @@ function openInfoPopover(anchor: HTMLElement): void {
   el.textContent = hint; // text node — no HTML injection from the hint
   el.hidden = false;
   openAnchor = anchor;
+  anchor.setAttribute("aria-expanded", "true");
   restoreFocus = (document.activeElement as HTMLElement) ?? anchor;
   place(anchor);
   el.focus();
@@ -110,6 +111,7 @@ export function closeInfoPopover(): void {
   window.removeEventListener("scroll", onReflow, true);
   window.removeEventListener("resize", onReflow, true);
   if (popover) popover.hidden = true;
+  if (openAnchor) openAnchor.setAttribute("aria-expanded", "false");
   const focusBack = restoreFocus;
   openAnchor = null;
   restoreFocus = null;
@@ -120,8 +122,9 @@ export function closeInfoPopover(): void {
 
 /**
  * Attach one delegated click listener to `container` that toggles the shared
- * popover for any ⓘ inside it. Cheap and idempotent — re-binding the same
- * element is a no-op, so games may call it every render.
+ * popover for any ⓘ inside it. The lobby replaces this container on every
+ * re-render, so each call gets a fresh element; the WeakSet only guards against
+ * double-binding within a single render.
  */
 export function wireInfoButtons(container: HTMLElement): void {
   if (wired.has(container)) return;

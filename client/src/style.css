@@ -171,43 +171,6 @@ button.subtle {
   font-weight: 700;
 }
 
-.roster {
-  list-style: none;
-  margin: 0 0 16px;
-  padding: 0;
-}
-
-.roster li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 4px;
-  border-bottom: 1px solid #2a2e40;
-}
-
-.roster li.disconnected {
-  opacity: 0.6;
-}
-
-.roster .kick {
-  margin-left: auto;
-}
-
-.dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  display: inline-block;
-}
-
-.dot.on {
-  background: var(--ok);
-}
-
-.dot.off {
-  background: var(--warn);
-}
-
 .badge {
   font-size: 0.75rem;
   background: #2a2e40;
@@ -2266,23 +2229,8 @@ button.spl-gem.selected {
   text-align: center;
 }
 
-/* Water Fight lobby settings + steppers (rendered in the lobby, where the in-game
+/* Water Fight lobby steppers (rendered in the lobby, where the in-game
    WaterFightView <style> is not mounted — so these must be global). */
-.wf-lobby-setting {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 4px 0;
-  font-size: 14px;
-}
-.wf-lobby-setting > span:first-child {
-  color: var(--muted);
-}
-.wf-lobby-setting.muted {
-  color: var(--muted);
-  justify-content: center;
-}
 .wf-stepper {
   display: inline-flex;
   align-items: center;
@@ -2519,6 +2467,10 @@ button.spl-gem.selected {
   font-weight: 600;
   font-size: 0.95rem;
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .lobby-badge {
   font-size: 0.62rem;
