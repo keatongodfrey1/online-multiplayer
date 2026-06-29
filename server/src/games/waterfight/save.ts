@@ -347,7 +347,8 @@ export function parseSave(raw: unknown): ParsedSave | null {
     need(Array.isArray(raw.seats), "seats");
     const seats: SaveSeat[] = (raw.seats as unknown[]).map((s) => {
       need(isObj(s) && isStr(s.nickname) && isBool(s.isBot) && isBool(s.gone), "seat");
-      return { nickname: s.nickname as string, isBot: s.isBot as boolean, gone: s.gone as boolean };
+      // Cap the (host-supplied) nickname — it is displayed and fed into the engine log.
+      return { nickname: (s.nickname as string).slice(0, 24), isBot: s.isBot as boolean, gone: s.gone as boolean };
     });
     const o = isObj(raw.options) ? raw.options : {};
     const options = {

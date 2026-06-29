@@ -18,7 +18,7 @@ import {
   type WaterFightState,
 } from "@backbone/shared";
 import type { GameView, GameViewContext, LobbySettingsContext } from "../../framework/GameView.js";
-import { escapeHtml } from "../../lobby/HomeScreen.js";
+import { escapeAttr, escapeHtml } from "../../lobby/HomeScreen.js";
 import { flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
 import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
 
@@ -123,7 +123,6 @@ const STYLE = `
 .wf-actions button:disabled { opacity: 0.5; cursor: default; }
 .wf-log { font-size: 13px; color: #cfd4e4; background: var(--card); border: 1px solid #353a4f; border-radius: 12px; padding: 12px 14px; max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; line-height: 1.35; }
 .wf-log .ln b { color: var(--text); }
-.wf-mute { background: none; border: none; cursor: pointer; font-size: 18px; }
 .wf-nudge { font-size: 13px; color: var(--muted); background: #191c28; border: 1px dashed #3a4470; border-radius: 10px; padding: 9px 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .wf-nudge button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 16px; min-width: 32px; }
 /* ---- modal (dark, NOT the light .pp-modal skin) ---- */
@@ -152,6 +151,34 @@ const STYLE = `
 
 function countKind(hand: { kind: string }[], kind: string): number {
   return hand.reduce((n, c) => n + (c.kind === kind ? 1 : 0), 0);
+}
+
+/** Bold every player nickname inside a log line, scan-ably. Scans the RAW line and
+ *  escapes name vs. non-name segments SEPARATELY, so it never re-scans inserted <b>
+ *  tags or HTML entities — a 1-char name like "b" or a name that's a substring of
+ *  another can't corrupt the markup (the round-1 split/join approach could). Exported
+ *  for testing. */
+export function emphasizeNames(line: string, seatNames: readonly string[]): string {
+  const names = [...new Set(seatNames.filter((n) => n && n.trim().length > 0))]
+    .sort((a, b) => b.length - a.length); // longest-first so "Bob" wins over "b"
+  if (names.length === 0) return escapeHtml(line);
+  let out = "";
+  let plain = "";
+  const flush = () => { if (plain) { out += escapeHtml(plain); plain = ""; } };
+  let i = 0;
+  outer: while (i < line.length) {
+    for (const n of names) {
+      if (line.startsWith(n, i)) {
+        flush();
+        out += `<b>${escapeHtml(n)}</b>`;
+        i += n.length;
+        continue outer;
+      }
+    }
+    plain += line[i++];
+  }
+  flush();
+  return out;
 }
 
 /** Minimal sell to reach `cost` coins, or null. UI-only MIRROR of the engine's
@@ -564,8 +591,8 @@ export class WaterFightView implements GameView {
         if (sel) cls.push("sel");
         // During DISCARD the tile toggles selection; the ⓘ child still opens review.
         // Otherwise the whole tile opens the review modal.
-        const tileAct = picking ? `data-act="togglecard" data-id="${c.id}"` : `data-act="review" data-kind="${escapeHtml(c.kind)}"`;
-        const info = picking ? `<span class="ci" data-act="review" data-kind="${escapeHtml(c.kind)}">ⓘ</span>` : `<span class="ci">ⓘ</span>`;
+        const tileAct = picking ? `data-act="togglecard" data-id="${c.id}"` : `data-act="review" data-kind="${escapeAttr(c.kind)}"`;
+        const info = picking ? `<span class="ci" data-act="review" data-kind="${escapeAttr(c.kind)}">ⓘ</span>` : `<span class="ci">ⓘ</span>`;
         return `<div class="${cls.join(" ")}" ${tileAct}>${info}<span class="ce">${cardEmoji(c.kind)}</span><span class="cn">${escapeHtml(cardName(c.kind))}</span></div>`;
       })
       .join("")}</div>`;
@@ -673,18 +700,9 @@ export class WaterFightView implements GameView {
   }
 
   private renderLog(state: WaterFightState): string {
-    const names = [...state.seats].map((s) => s.nickname).filter(Boolean);
+    const names = [...state.seats].map((s) => s.nickname);
     const lines = [...state.log].slice(-16).reverse();
-    // Bold any player name that appears in a line, for scan-ability.
-    const emph = (line: string): string => {
-      let html = escapeHtml(line);
-      for (const n of names) {
-        if (!n) continue;
-        html = html.split(escapeHtml(n)).join(`<b>${escapeHtml(n)}</b>`);
-      }
-      return html;
-    };
-    return `<div class="wf-log">${lines.map((l) => `<div class="ln">${emph(l)}</div>`).join("")}</div>`;
+    return `<div class="wf-log">${lines.map((l) => `<div class="ln">${emphasizeNames(l, names)}</div>`).join("")}</div>`;
   }
 }
 
