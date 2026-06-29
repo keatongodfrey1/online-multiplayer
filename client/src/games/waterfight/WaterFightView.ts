@@ -21,6 +21,7 @@ import type { GameView, GameViewContext, LobbySettingsContext } from "../../fram
 import { escapeAttr, escapeHtml } from "../../lobby/HomeScreen.js";
 import { flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
 import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
+import { infoButton, wireInfoButtons } from "../../framework/infoPopover.js";
 
 const WF_SAVES_KEY = "waterfight-saves";
 /** How long the HIT/MISS splash reveal stays on screen. */
@@ -723,22 +724,34 @@ export function renderWaterFightLobbySettings(
   // −/value/+ steppers (native number-input arrows don't render on mobile). Mirrors
   // Paper.io's stepper; CSS lives in the global style.css (this runs in the lobby,
   // where this game's in-game <style> is not mounted).
+  // 2-column grid of −/value/+ steppers (native number-input arrows don't render
+  // on mobile). Each dial carries a tappable ⓘ that reveals its hint — the owner
+  // is on an iPad, where the old hover `title=` tooltip never showed.
   const rows = WF_SETTINGS.map((s) => {
     const value = (state as Record<string, number>)[s.key] ?? s.default;
-    return `<div class="wf-lobby-setting" title="${escapeHtml(s.hint)}">
-      <span>${escapeHtml(s.label)}</span>
+    return `<div class="wf-setrow">
+      <span class="wf-setlabel">${escapeHtml(s.label)}${infoButton(s.hint, s.label)}</span>
       <span class="wf-stepper">
-        <button class="secondary" data-step data-key="${s.key}" data-dir="-1" ${dis}>−</button>
+        <button data-step data-key="${s.key}" data-dir="-1" ${dis} aria-label="Less ${escapeAttr(s.label)}">−</button>
         <b class="wf-val">${value}</b>
-        <button class="secondary" data-step data-key="${s.key}" data-dir="1" ${dis}>+</button>
+        <button data-step data-key="${s.key}" data-dir="1" ${dis} aria-label="More ${escapeAttr(s.label)}">+</button>
       </span>
     </div>`;
   }).join("");
   const seatsLeft = state.maxPlayers - state.players.size;
-  const addBot = ctx.isHost && seatsLeft > 0 ? `<button class="wf-add-bot" data-addbot>+ Add AI</button>` : "";
-  container.innerHTML = `<div class="wf-lobby">${rows}${addBot}${
-    ctx.isHost ? "" : '<div class="wf-lobby-setting muted">(host sets the dials)</div>'
-  }<div class="wf-saves-block"></div></div>`;
+  const addBot =
+    ctx.isHost && seatsLeft > 0
+      ? `<button class="wf-add-bot" data-addbot>+ Add an AI player</button>`
+      : "";
+  container.innerHTML = `<div class="wf-lobby">
+    <div class="wf-setgrid">${rows}</div>
+    ${addBot}
+    ${ctx.isHost ? "" : '<div class="wf-lobby-note">The host sets the dials.</div>'}
+    <div class="wf-saves-block"></div>
+  </div>`;
+
+  // Tappable ⓘ hints: one delegated click listener on this render's settings container.
+  wireInfoButtons(container);
 
   renderSaveSlots(container.querySelector<HTMLElement>(".wf-saves-block")!, room, {
     key: WF_SAVES_KEY,

@@ -21,7 +21,7 @@ const client = new GameClient();
 let currentRoom: Room<any, BaseState> | undefined;
 installWakeUpHandler(() => currentRoom);
 
-function showHome(notice?: string): void {
+function showHome(notice?: string, prefillCode?: string): void {
   const home = new HomeScreen({
     async onCreate(gameType, nickname) {
       try {
@@ -40,7 +40,23 @@ function showHome(notice?: string): void {
       }
     },
   });
-  home.mount(app, notice);
+  home.mount(app, notice, prefillCode);
+}
+
+/**
+ * Read a one-tap invite code from the URL (?code=XXXX), normalise it to the
+ * 4-letter room-code shape, and strip the param from the address bar so it is
+ * consumed exactly once (a later refresh resumes the live session instead).
+ * Returns "" when absent or unusable.
+ */
+function takeInviteCode(): string {
+  const params = new URLSearchParams(location.search);
+  if (!params.has("code")) return "";
+  const code = (params.get("code") ?? "").toUpperCase().replace(/[^A-Z]/g, "").slice(0, 4);
+  params.delete("code");
+  const qs = params.toString();
+  history.replaceState(null, "", `${location.pathname}${qs ? `?${qs}` : ""}${location.hash}`);
+  return code;
 }
 
 function enterRoom(room: Room<any, BaseState>, gameType: string): void {
@@ -65,11 +81,14 @@ function enterRoom(room: Room<any, BaseState>, gameType: string): void {
 
 async function boot(): Promise<void> {
   app.innerHTML = `<div class="center muted boot">Connecting&hellip;</div>`;
+  // Consume + strip any invite ?code= up front: a refresh resumes the live session,
+  // so the param must never re-trigger a join. Resume wins over the invite code.
+  const inviteCode = takeInviteCode();
   const resumed = await client.tryResume();
   if (resumed) {
     enterRoom(resumed.room, resumed.gameType);
   } else {
-    showHome();
+    showHome(undefined, inviteCode || undefined);
   }
 }
 
