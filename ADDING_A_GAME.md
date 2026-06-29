@@ -76,6 +76,11 @@ export class FooRoom extends BaseGameRoom<FooState> {
 }
 ```
 
+For an engine-backed room: a new engine `Move`/`Resolution` kind must be
+added to the room's `sanitize.ts` whitelist (and `AWAIT_KINDS` in `save.ts`)
+or the client message is silently dropped - and bots bypass sanitize, so AI
+tests won't catch it. See `GAME_BUILD_PLAYBOOK.md`.
+
 Available hooks (all optional): `onPlayerJoinedMidGame`, `onPlayerDropped`,
 `onPlayerReconnected`, `onPlayerLeftForGood`, `syncPrivate`, `onGameEnded`.
 Turn-based? Instantiate a `TurnManager` (copy TicTacToeRoom). Real-time?
@@ -102,6 +107,11 @@ Rules of the road: render from `room.state`, send messages on user
 actions, never mutate state locally. The framework already renders the
 lobby, the "Reconnecting..." overlay, and the game-over/rematch screen -
 your view only covers the playing phase.
+
+**UI house rules** (dark theme tokens, tablet-wide layout, `−`/`+` lobby
+steppers, 44px targets, shared card-info table, show-don't-hide reveals):
+read `GAME_BUILD_PLAYBOOK.md` before building the view - it has the
+copy-from references.
 
 Turn alerts are a default, not an extra: players on other tablets need to
 hear/see when it is their moment. Use `client/src/framework/turnAlert.ts` -
