@@ -6,6 +6,9 @@ be plain, and you must verify before declaring success.
 
 ## Read first
 
+- GAME_BUILD_PLAYBOOK.md - START HERE for any game work. The UI/UX house
+  rules + protocol/architecture rework-savers learned the hard way, each
+  with a copy-from reference. Includes a paste-at-kickoff brief.
 - ARCHITECTURE.md - how everything fits; pinned versions; API gotchas.
 - ADDING_A_GAME.md - the exact recipe for new games. Follow it literally.
 
@@ -31,6 +34,20 @@ be plain, and you must verify before declaring success.
    (two browser windows, including a mid-game refresh).
 6. Schema subclasses with no new `@type` fields need `@entity`.
 7. ESM imports end in `.js` even between TypeScript files.
+8. **UI + protocol rework-savers (full detail in GAME_BUILD_PLAYBOOK.md).**
+   New game views: dark theme tokens only (`style.css` `:root`), mobile-first
+   AND tablet-wide (`#app:has(.<game>)`), 44px touch targets, `−`/`+` steppers
+   not native number inputs, no `title` tooltips on touch (use `infoButton`),
+   one shared card-info table, animated overlays in a guarded sibling host.
+   **Show, don't hide:** no behind-the-scenes dice rolls / card draws / flips /
+   turn-order / life or purchase changes - reveal them (interactive or animated)
+   and toast who did what; the log is a backup. But respect secrecy - show
+   secret info only to the player who should know it (generic version for
+   everyone else), and never put secrets in the synced `log`. A new engine
+   `Move`/`Resolution` kind must be whitelisted in the room's `sanitize.ts`
+   (and `AWAIT_KINDS` in `save.ts`) or it's silently dropped - **bots bypass
+   sanitize**, so cover it with a wire-level room test. `syncFromEngine` mirrors
+   engine→schema unconditionally (counters must reset on rematch).
 
 ## Before you write a new game: lock four decisions
 
@@ -81,6 +98,15 @@ mid-game refresh, and for drop-in games a fresh-browser rejoin) and **send
 the owner screenshots** of the actual result - they are a non-coder and the
 screenshot is how they confirm it works. Never declare a UI change done on
 green tests alone.
+
+## Keep the playbook current (living doc)
+
+After a game build, a non-trivial game fix, or a `/review` that surfaces a
+real class of bug, propose the durable learnings to the owner
+(AskUserQuestion: Add to GAME_BUILD_PLAYBOOK.md / Skip, per item) and append
+the approved ones. Capture bug classes, conventions, and rework-causing
+gotchas - not one-off facts. Never edit the playbook silently; the owner
+decides what goes in.
 
 ## Testing notes
 

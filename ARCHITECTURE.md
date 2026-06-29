@@ -243,6 +243,14 @@ together - they are deliberately the same shape:
 When you build a third engine-backed game, copy one of these rooms wholesale
 and swap the engine - do not start from the thin TicTacToe room.
 
+> Two traps that bit Water Fight (full detail + copy-from in
+> `GAME_BUILD_PLAYBOOK.md`): a new `Move`/`Resolution` kind not added to the
+> `sanitize.ts` whitelist is silently dropped over the wire - and **bots bypass
+> sanitize**, so AI tests pass while human play fails (cover it with a wire-level
+> room test). And `syncFromEngine` must project EVERY derived field every sync
+> (reset to default when null); a conditional write keeps the prior game's value
+> across a rematch, since the `State` instance is reused.
+
 **Engine-backed games ship a stack of safety nets** (Splendor and Water Fight
 are the reference; the others were back-ported). They are not optional polish -
 a rules-heavy engine without them ships soft-locks and state corruption that
@@ -309,6 +317,10 @@ conditional on what the game has:
   and hang/desync). Use the `until(() => condition)` helper from
   `StubRoom.ts` to wait on observable state, and `sleep(80)` before
   asserting that something did NOT change.
+- **Git worktrees:** `npm test`/`dev` in a worktree needs the local
+  `@backbone/*` workspace symlinks present, or the schema decorators crash at
+  load. Run `npm install` in the worktree (or copy the symlinks) before
+  testing there.
 
 ## Security/abuse posture
 
