@@ -33,6 +33,7 @@ import {
   ServerMsg,
 } from "@backbone/shared";
 import { generateUniqueRoomCode, releaseRoomCode } from "./roomCodes.js";
+import "./encoderConfig.js"; // side effect: raise the schema encode buffer (see file)
 
 /**
  * The seat lineup a save carries, used by the framework to gate the resume
