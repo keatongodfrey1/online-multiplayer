@@ -118,6 +118,9 @@ export class WaterFightEvent extends Schema {
   @type("uint16") amount = 0;
   /** PUBLIC, GENERIC, pre-built human line. */
   @type("string") text = "";
+  /** The SPECIFIC public card/event/defense kind (so the client can show its name + effect);
+   *  "" when none or secret. NEVER a hidden card identity. */
+  @type("string") detailKind = "";
 }
 
 /** One seat's public status, plus the owner-only hand. */

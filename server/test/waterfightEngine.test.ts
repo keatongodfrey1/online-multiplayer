@@ -2,7 +2,7 @@
 // Mirrors splendorEngine.test.ts: rules unit tests + a fuzz suite that asserts
 // every structural invariant after every reduce.
 import assert from "node:assert/strict";
-import { WaterFightEngine as WF, CARD_INFO } from "@backbone/shared";
+import { WaterFightEngine as WF, CARD_INFO, EVENT_DESCRIPTIONS, EVENT_NAMES } from "@backbone/shared";
 
 const {
   createGame,
@@ -226,6 +226,71 @@ describe("water fight engine: event stream + two-tier secrecy", () => {
     assert.ok(Array.isArray(r1.state.events), "events is an array");
     const r2 = applyMove(r1.state, { kind: "END_TURN" });
     assert.ok(Array.isArray(r2.state.events) && r2.state.events.every((e) => typeof e.kind === "string"), "fresh events only");
+  });
+
+  it("Shop: the PUBLIC buy event never names the bought card; the buyer learns it privately", () => {
+    const g = game(2, 5, { shopCost: 4 });
+    moveFromDeck(g, 0, "treasure", 2); // 2 Treasure = 4 coins
+    g.stacks.defense.push({ id: 30001, kind: "umbrella" }); // SHOP pops the end → buys this
+    const r = applyMove(g, { kind: "SHOP", sell: { balloons: 0, treasures: 2, wild: 0 }, buy: ["defense"] });
+    const pub = r.state.events.find((e) => e.kind === "shop");
+    assert.ok(pub, "a public shop event fired (the COUNT + stack is public)");
+    assert.ok(!mentions(pub!.text, "umbrella"), "the public shop event never names the bought card");
+    assert.strictEqual(pub!.detailKind, "", "shop carries no detailKind (the card is secret)");
+    const bought = r.state.reveals.find((rv) => rv.kind === "bought" && rv.seat === 0);
+    assert.ok(bought, "the buyer gets a private 'bought' reveal");
+    assert.ok(bought!.cards.some((c) => c.kind === "umbrella"), "the specific bought card is named privately to the buyer");
+  });
+
+  it("a defensive Umbrella block emits a 'defend' event (detailKind=umbrella)", () => {
+    const g = game(2, 5);
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, ["umbrella"]);
+    forceSplash(g, "hit");
+    let r = applyMoveRaw(g, { kind: "THROW", target: 1 });
+    r = applyResolutionRaw(r.state, { kind: "DRAW_SPLASH" }); // HIT → opens DEFEND
+    r = applyResolutionRaw(r.state, { kind: "DEFEND", defense: "umbrella" });
+    const def = r.state.events.find((e) => e.kind === "defend");
+    assert.ok(def, "a block emits a defend event");
+    assert.strictEqual(def!.detailKind, "umbrella", "and names the umbrella so the flourish can explain it");
+  });
+
+  it("a plain miss (no defensive block) emits NO defend event", () => {
+    const g = game(2, 5);
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, []); // no defense card
+    forceSplash(g, "miss"); // the throw whiffs on the flip — not a block
+    let r = applyMoveRaw(g, { kind: "THROW", target: 1 });
+    r = applyResolutionRaw(r.state, { kind: "DRAW_SPLASH" }); // MISS
+    assert.ok(!r.state.events.some((e) => e.kind === "defend"), "no defend on a whiff (the splash-MISS reveal shows it)");
+  });
+
+  it("events carry the specific PUBLIC detailKind (support/attack/event)", () => {
+    const gs = game(2, 5);
+    setHand(gs, 0, ["sabotage"]);
+    setHand(gs, 1, ["mega"]);
+    const rs = applyMove(gs, { kind: "PLAY_SUPPORT", support: "sabotage", target: 1 });
+    assert.strictEqual(rs.state.events.find((e) => e.kind === "support")?.detailKind, "sabotage");
+
+    const ga = game(2, 5);
+    setHand(ga, 0, ["balloon"]);
+    forceSplash(ga, "hit");
+    const ra = applyMoveRaw(ga, { kind: "THROW", target: 1 });
+    assert.strictEqual(ra.state.events.find((e) => e.kind === "attack")?.detailKind, "balloon");
+
+    const ge = game(2, 5);
+    injectTopEvent(ge, "mudslide");
+    const re = applyMove(ge, { kind: "END_TURN" }); // next seat draws + resolves the event
+    assert.strictEqual(re.state.events.find((e) => e.kind === "event")?.detailKind, "mudslide");
+  });
+});
+
+describe("water fight engine: EVENT_DESCRIPTIONS (player-facing effects)", () => {
+  it("has a one-line effect for EVERY Event kind (so a drawn Event explains itself)", () => {
+    for (const kind of Object.keys(EVENT_NAMES) as WF.EventKind[]) {
+      const desc = EVENT_DESCRIPTIONS[kind];
+      assert.ok(desc && desc.trim().length > 0, `EVENT_DESCRIPTIONS is missing an effect for "${kind}"`);
+    }
   });
 });
 

@@ -280,6 +280,7 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
       row.target = e.target;
       row.amount = e.amount;
       row.text = e.text;
+      row.detailKind = e.detailKind;
       this.state.events.push(row);
     }
     while (this.state.events.length > EVENTS_CAP) this.state.events.shift();

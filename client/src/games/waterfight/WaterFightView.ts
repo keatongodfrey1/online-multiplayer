@@ -9,7 +9,9 @@ import {
   type BaseState,
   CARD_INFO,
   COIN_VALUES,
+  EVENT_DESCRIPTIONS,
   EVENT_LABELS,
+  EVENT_NAMES,
   LobbyMsg,
   Phase,
   WaterFightMsg,
@@ -34,12 +36,32 @@ const TOAST_MS = 1500;
 /** Max pending toasts — bots act faster than TOAST_MS, so an unbounded queue would lag
  *  arbitrarily far behind real state; keep only the most recent few (older ones are stale). */
 const TOAST_QUEUE_MAX = 3;
-/** Per-reduce headline priority — one toast per reduce shows the highest-priority event,
+/** Per-reduce headline priority — one flourish per reduce shows the highest-priority event,
  *  so a multi-target moment (Flash Flood: attack + N damage) collapses to one summary. */
 const EVENT_PRIORITY: Record<string, number> = {
-  suddendeath: 9, event: 8, attack: 7, turn: 6, save: 5, soak: 5,
-  support: 4, react: 4, draw: 3, heal: 2, damage: 1,
+  suddendeath: 9, event: 8, attack: 7, turn: 6, defend: 6, save: 5, soak: 5,
+  support: 4, react: 4, shop: 4, draw: 3, heal: 2, damage: 1,
 };
+/** Kinds that get a centered explanatory flourish. `turn` is excluded — the banner +
+ *  `wf-pulse` already announce whose turn it is, and a flourish every turn is spam. */
+const FLOURISH_KINDS = new Set(
+  Object.keys(EVENT_PRIORITY).filter((k) => k !== "turn"),
+);
+/** Flourish timing (owner-chosen, mockup-confirmed): held ~2.6s total so a player can read
+ *  the effect line — ~3× the old toast. */
+const FLOURISH_IN_MS = 260;
+const FLOURISH_HOLD_MS = 1900;
+const FLOURISH_OUT_MS = 420;
+/** Total time one flourish occupies the host (pop-in + hold + fade) — paces the queue and
+ *  matches the `wf-flourish-anim` keyframe duration. */
+const FLOURISH_TOTAL_MS = FLOURISH_IN_MS + FLOURISH_HOLD_MS + FLOURISH_OUT_MS;
+/** Each flourish is ~2.6s, so under bot pacing (≈700ms/action) the queue would back up;
+ *  cap it and drop the oldest so flourishes track the newest, current moments. */
+const FLOURISH_QUEUE_MAX = 3;
+/** Events that harm vs. heal — used only to TINT an event flourish (color reinforces the
+ *  word; meaning never rests on color alone). */
+const DAMAGING_EVENTS = new Set(["mudslide", "stormsurge", "heatwave", "downpour", "tidalwave", "lightning", "targetedstorm", "leakybucket", "springcleaning"]);
+const HEALING_EVENTS = new Set(["sunbreak", "rainbow", "waterparkpass", "treasurechest", "supplycache", "supplydrop", "lostandfound"]);
 const wfTurnLabel = (blob: any): number => (blob?.engine?.turnCount ?? 0) + 1;
 
 // MIRROR of the engine's TARGETED_SUPPORTS / implemented supports (engine.ts) —
@@ -83,6 +105,35 @@ const getMeansLabel = (means: string): string => {
   if (CARD_INFO[means as keyof typeof CARD_INFO]) return cardName(means);
   return EVENT_LABELS[means as keyof typeof EVENT_LABELS] ?? "an Event";
 };
+
+/** Color band for a flourish — color REINFORCES the word (meaning never rests on color
+ *  alone, since every flourish also carries an emoji + a word). */
+const flourishTone = (kind: string, detailKind: string): string => {
+  if (kind === "damage" || kind === "soak") return "danger";
+  if (kind === "save" || kind === "heal" || kind === "defend") return "ok";
+  if (kind === "suddendeath") return "warn";
+  if (kind === "event") return DAMAGING_EVENTS.has(detailKind) ? "danger" : HEALING_EVENTS.has(detailKind) ? "ok" : "accent";
+  return "accent";
+};
+
+/** Build the explanatory flourish content: a NAME + one-line effect when we know the
+ *  specific public card/event (detailKind), else the event's generic public text. The
+ *  caller escapes every dynamic field (text/name/desc) — nicknames are user-controlled. */
+const flourishContent = (
+  ev: { kind: string; text: string; detailKind: string },
+): { emoji: string; name: string; desc: string } | { line: string } => {
+  const dk = ev.detailKind;
+  if (dk) {
+    if (ev.kind === "event" && EVENT_NAMES[dk as keyof typeof EVENT_NAMES]) {
+      const emoji = (EVENT_LABELS[dk as keyof typeof EVENT_LABELS] ?? "🎲").split(" ")[0] || "🎲";
+      return { emoji, name: EVENT_NAMES[dk as keyof typeof EVENT_NAMES], desc: EVENT_DESCRIPTIONS[dk as keyof typeof EVENT_DESCRIPTIONS] ?? "" };
+    }
+    if (CARD_INFO[dk as keyof typeof CARD_INFO]) {
+      return { emoji: cardEmoji(dk), name: cardName(dk), desc: cardDesc(dk) };
+    }
+  }
+  return { line: ev.text };
+};
 const NUDGE_KEY = "waterfight-card-hint-seen";
 
 // In-game styles only (injected by mount(), present during PLAYING). The lobby
@@ -116,6 +167,21 @@ const STYLE = `
 .wf-splash.hit { background: #3a1d22; border: 1px solid var(--danger); }
 .wf-splash.miss { background: #1d2740; border: 1px solid var(--accent); }
 @keyframes wf-pop { from { transform: scale(0.82); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+/* Centered explanatory flourish — the public "show + explain" channel. Fixed overlay above
+   the board, offset from the personal toast (top 45%) so the two never overlap. ~2.6s hold. */
+.wf-event-host { position: fixed; top: 35%; left: 0; right: 0; z-index: 60; display: flex; justify-content: center; padding: 0 16px; pointer-events: none; }
+.wf-event-host:empty { display: none; }
+.wf-flourish { max-width: 340px; box-sizing: border-box; padding: 14px 20px; border-radius: 14px; text-align: center; color: var(--text); background: rgba(31, 34, 48, 0.96); border: 1px solid var(--line); box-shadow: 0 12px 40px #000a; animation: wf-flourish-anim 2580ms ease-out forwards; }
+.wf-flourish.danger { border-color: var(--danger); }
+.wf-flourish.ok { border-color: var(--ok); }
+.wf-flourish.warn { border-color: var(--warn); }
+.wf-flourish.accent { border-color: var(--accent); }
+.wf-fl-emoji { font-size: 34px; line-height: 1; }
+.wf-fl-name { font-size: 19px; font-weight: 800; margin-top: 3px; }
+.wf-fl-desc { font-size: 14px; color: var(--muted); margin-top: 2px; }
+.wf-fl-line { font-size: 18px; font-weight: 800; }
+.wf-flourish.warn .wf-fl-name, .wf-flourish.warn .wf-fl-line { color: var(--warn); }
+@keyframes wf-flourish-anim { 0% { opacity: 0; transform: scale(0.86); } 10% { opacity: 1; transform: scale(1); } 84% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(1); } }
 .wf-result-host:empty { display: none; }
 .wf-result-backdrop { position: fixed; inset: 0; z-index: 95; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(10, 12, 20, 0.74); animation: wf-fade 0.25s ease-out; }
 @keyframes wf-fade { from { opacity: 0; } to { opacity: 1; } }
@@ -256,9 +322,14 @@ export class WaterFightView implements GameView {
   /** Last private-reveal payload already toasted (kind + card ids) — so a reconnect
    *  re-send of the same "you lost X" doesn't re-fire the toast as if it were fresh. */
   private lastRevealToastKey = "";
-  /** Toast queue (flashToast overwrites, so we show queued toasts one at a time). */
+  /** Toast queue — now reserved for PERSONAL/private lines only (you bought/lost/drew);
+   *  the public per-reduce moment is the centered flourish (below). */
   private toastQueue: string[] = [];
   private toastTimer?: ReturnType<typeof setTimeout>;
+  /** Centered explanatory-flourish queue (the public "show + explain" channel, ~2.6s each;
+   *  painted into the guarded `.wf-event-host`, never by render()). */
+  private flourishQueue: { kind: string; text: string; detailKind: string }[] = [];
+  private flourishTimer?: ReturnType<typeof setTimeout>;
   /** Drives the reaction-timer countdown text (updates the .wf-countdown node in place). */
   private actionTimer?: ReturnType<typeof setInterval>;
   /** Open modal: a card-detail (by kind) or the ❓ Help legend. Static content, so the
@@ -274,7 +345,7 @@ export class WaterFightView implements GameView {
     this.ctx = ctx;
     this.lastSeenSplashSeq = this.room.state.lastSplashSeq ?? 0; // seed BEFORE first render
     this.lastEventSeq = this.maxEventSeq(); // prime so a refresh/late-join never replays the stream
-    root.innerHTML = `<style>${STYLE}</style><div class="wf-splash-host"></div><div class="wf-modal-host"></div><div class="wf-result-host"></div><div class="wf"></div>`;
+    root.innerHTML = `<style>${STYLE}</style><div class="wf-event-host"></div><div class="wf-splash-host"></div><div class="wf-modal-host"></div><div class="wf-result-host"></div><div class="wf"></div>`;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
     this.room.onMessage(WaterFightMsg.REVEAL, (payload: { kind: string; ofSeat: number; cards: { id: number; kind: string }[] }) => {
@@ -283,12 +354,13 @@ export class WaterFightView implements GameView {
       // Private specifics (your own lost/drawn cards) → a private toast only you see.
       // The server re-sends the last reveal on reconnect to restore the panel; dedupe by
       // payload so a refresh doesn't re-toast a stale "you lost X" as if it were fresh.
-      if (payload.kind === "lost" || payload.kind === "drew") {
+      if (payload.kind === "lost" || payload.kind === "drew" || payload.kind === "bought") {
         const key = `${payload.kind}:${payload.cards.map((c) => c.id).sort().join(",")}`;
         if (key !== this.lastRevealToastKey) {
           this.lastRevealToastKey = key;
           const names = payload.cards.map((c) => cardName(c.kind)).join(", ");
-          if (names) this.enqueueToast(payload.kind === "lost" ? `😖 You lost: ${names}` : `🎁 You drew: ${names}`);
+          const verb = payload.kind === "lost" ? "😖 You lost" : payload.kind === "bought" ? "🛍️ You bought" : "🎁 You drew";
+          if (names) this.enqueueToast(`${verb}: ${names}`);
         }
       }
       this.render();
@@ -304,30 +376,33 @@ export class WaterFightView implements GameView {
     return m;
   }
 
-  /** Diff the synced event stream for NEW moments and toast them (one summary per
-   *  reduce). Snap on a reconnect burst. Reconnection-safe (lastEventSeq primed on mount). */
+  /** Diff the synced event stream for NEW moments and play ONE explanatory flourish per
+   *  reduce. Snap on a reconnect burst. Reconnection-safe (lastEventSeq primed on mount). */
   private consumeEvents(state: WaterFightState): void {
     const fresh = [...state.events].filter((e) => e.seq > this.lastEventSeq);
     if (fresh.length === 0) return;
     this.lastEventSeq = fresh[fresh.length - 1]!.seq;
-    if (fresh.length > EVENT_BURST_SKIP) return; // reconnect catch-up: snap, no toast-storm
+    if (fresh.length > EVENT_BURST_SKIP) return; // reconnect catch-up: snap, no flourish-storm
     // Group consecutive events into per-reduce batches (a reduce is a contiguous seq
-    // run) and show ONE headline toast per batch.
+    // run) and play ONE flourish per batch (so a multi-target reduce → one summary).
     let batch: typeof fresh = [];
     let prev = -1;
     for (const e of fresh) {
-      if (prev >= 0 && e.seq !== prev + 1 && batch.length) { this.toastBatch(batch); batch = []; }
+      if (prev >= 0 && e.seq !== prev + 1 && batch.length) { this.flourishBatch(batch); batch = []; }
       batch.push(e);
       prev = e.seq;
     }
-    if (batch.length) this.toastBatch(batch);
+    if (batch.length) this.flourishBatch(batch);
   }
 
-  /** One toast per reduce = the highest-priority event's pre-built generic text. */
-  private toastBatch(batch: { kind: string; text: string }[]): void {
-    let best = batch[0]!;
-    for (const e of batch) if ((EVENT_PRIORITY[e.kind] ?? 0) > (EVENT_PRIORITY[best.kind] ?? 0)) best = e;
-    if (best.text) this.enqueueToast(best.text);
+  /** One flourish per reduce = the highest-priority FLOURISH-worthy event (turn excluded). */
+  private flourishBatch(batch: { kind: string; text: string; detailKind: string }[]): void {
+    let best: { kind: string; text: string; detailKind: string } | undefined;
+    for (const e of batch) {
+      if (!FLOURISH_KINDS.has(e.kind)) continue;
+      if (!best || (EVENT_PRIORITY[e.kind] ?? 0) > (EVENT_PRIORITY[best.kind] ?? 0)) best = e;
+    }
+    if (best && best.text) this.enqueueFlourish({ kind: best.kind, text: best.text, detailKind: best.detailKind });
   }
 
   private enqueueToast(text: string): void {
@@ -347,6 +422,30 @@ export class WaterFightView implements GameView {
     this.toastTimer = setTimeout(() => this.pumpToast(), TOAST_MS);
   }
 
+  private enqueueFlourish(ev: { kind: string; text: string; detailKind: string }): void {
+    this.flourishQueue.push(ev);
+    // Each flourish is ~2.6s; under bot pacing the queue would back up. Keep the newest few.
+    if (this.flourishQueue.length > FLOURISH_QUEUE_MAX) {
+      this.flourishQueue.splice(0, this.flourishQueue.length - FLOURISH_QUEUE_MAX);
+    }
+    if (!this.flourishTimer) this.pumpFlourish();
+  }
+
+  /** Paint the next flourish into the guarded `.wf-event-host` (a fresh node → its CSS
+   *  animation runs once), then drain the queue after the full hold. */
+  private pumpFlourish(): void {
+    const next = this.flourishQueue.shift();
+    const host = this.root?.querySelector<HTMLElement>(".wf-event-host");
+    if (!next || !host) { this.flourishTimer = undefined; if (host) host.innerHTML = ""; return; }
+    const tone = flourishTone(next.kind, next.detailKind);
+    const c = flourishContent(next);
+    host.innerHTML =
+      "line" in c
+        ? `<div class="wf-flourish ${tone}"><div class="wf-fl-line">${escapeHtml(c.line)}</div></div>`
+        : `<div class="wf-flourish ${tone}"><div class="wf-fl-emoji">${c.emoji}</div><div class="wf-fl-name">${escapeHtml(c.name)}</div>${c.desc ? `<div class="wf-fl-desc">${escapeHtml(c.desc)}</div>` : ""}</div>`;
+    this.flourishTimer = setTimeout(() => this.pumpFlourish(), FLOURISH_TOTAL_MS);
+  }
+
   /** Update the reaction-timer countdown text in place (no full re-render). */
   private tickCountdown(): void {
     const el = this.root?.querySelector<HTMLElement>(".wf-countdown");
@@ -364,6 +463,9 @@ export class WaterFightView implements GameView {
     if (this.toastTimer) clearTimeout(this.toastTimer);
     this.toastTimer = undefined;
     this.toastQueue = [];
+    if (this.flourishTimer) clearTimeout(this.flourishTimer);
+    this.flourishTimer = undefined;
+    this.flourishQueue = [];
     if (this.actionTimer) clearInterval(this.actionTimer);
     this.actionTimer = undefined;
     this.splashReveal = undefined;
@@ -710,6 +812,8 @@ export class WaterFightView implements GameView {
       return `<div class="wf-reveal">😖 <b>You lost:</b> ${cards || "(nothing)"} ${dismiss}</div>`;
     if (this.reveal.kind === "drew") // private: the specific cards you just drew
       return `<div class="wf-reveal">🎁 <b>You drew:</b> ${cards || "(nothing)"} ${dismiss}</div>`;
+    if (this.reveal.kind === "bought") // private: the specific cards you bought from the blind shop
+      return `<div class="wf-reveal">🛍️ <b>You bought:</b> ${cards || "(nothing)"} ${dismiss}</div>`;
     const who =
       this.reveal.kind === "hand"
         ? `${escapeHtml(seats.find((s) => s.seat === this.reveal!.ofSeat)?.nickname ?? "Opponent")}'s hand`
