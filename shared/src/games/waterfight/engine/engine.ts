@@ -6,7 +6,7 @@
 // win, and the legal-move surface that policies (bots/fuzz) read.
 
 import { advanceLadder, bigStats, currentTarget, openAttack, openTarget } from "./attack.js";
-import { COIN_VALUES, WF_STACK_IDS } from "../constants.js";
+import { CARD_INFO, COIN_VALUES, EVENT_NAMES, WF_STACK_IDS } from "../constants.js";
 import { DRAW_PER_TURN, FLASH_FLOOD_BLOCK, FLASH_FLOOD_DAMAGE } from "./data.js";
 import { discardCard, drawMainCard, flipSplash } from "./deck.js";
 import { rand } from "./rng.js";
@@ -15,6 +15,7 @@ import {
   AttackKind,
   Awaiting,
   BigKind,
+  Card,
   CardKind,
   EventKind,
   GameEvent,
@@ -121,6 +122,21 @@ function drawCards(s: GameState, seat: number, n: number): void {
   }
 }
 
+/** Push a PUBLIC moment onto the per-reduce event stream. The room appends it to the
+ *  synced stream with a seq → a transient toast on every client. `text` MUST be generic
+ *  (names ok, never a card identity) — the stream is public to all. */
+function emit(s: GameState, kind: string, seat: number, target: number, amount: number, text: string): void {
+  s.events.push({ kind, seat, target, amount, text });
+}
+
+/** Forward the SPECIFIC cards a one-directional effect removed from / added to `seat`'s
+ *  hand to that owner ONLY (via the private reveal channel; never public/synced). Never
+ *  used for 2-way swaps (cardSwap/switcheroo) — the diff there is ambiguous. */
+function recordPrivate(s: GameState, seat: number, kind: "lost" | "drew", cards: Card[]): void {
+  if (cards.length === 0) return;
+  s.reveals.push({ seat, kind, cards: cards.map((c) => ({ ...c })) });
+}
+
 /** Apply `dmg` to one seat, with the automatic Lifeguard save (E10) and soak. */
 function damageSeat(s: GameState, seat: number, dmg: number): void {
   const t = s.players[seat]!;
@@ -132,15 +148,20 @@ function damageSeat(s: GameState, seat: number, dmg: number): void {
       spendKind(s, seat, "lifeguard");
       t.lives = 1;
       s.log.push(`${who(s, seat)} saved by Lifeguard (-> 1 life)`);
+      emit(s, "save", seat, -1, 0, `🛟 ${who(s, seat)} saved by Lifeguard!`);
     } else {
       t.out = true;
       if (s.phase !== "sudden-death") {
         t.stormCloud = true; // soft elimination (D5): keeps playing from the sideline
         s.log.push(`${who(s, seat)} SOAKED -> Storm Cloud`);
+        emit(s, "soak", seat, -1, 0, `⛈️ ${who(s, seat)} soaked → Storm Cloud`);
       } else {
         s.log.push(`${who(s, seat)} SOAKED (out)`); // Sudden-Death: fully removed
+        emit(s, "soak", seat, -1, 0, `💀 ${who(s, seat)} soaked!`);
       }
     }
+  } else {
+    emit(s, "damage", seat, -1, dmg, `${who(s, seat)} −${dmg} ❤️`); // non-lethal only
   }
 }
 
@@ -163,21 +184,32 @@ function damageAndRecord(
 /** Heal one seat by 1, capped at starting lives (E8). */
 function healSeat(s: GameState, seat: number): void {
   const t = s.players[seat]!;
-  if (!t.out) t.lives = Math.min(s.options.startingLives, t.lives + 1);
+  if (t.out) return;
+  const before = t.lives;
+  t.lives = Math.min(s.options.startingLives, t.lives + 1);
+  if (t.lives > before) emit(s, "heal", seat, -1, 1, `${who(s, seat)} +1 ❤️`);
 }
 
 /** Move `n` Treasure cards from the main deck/discard into a seat's hand. */
 function gainTreasure(s: GameState, seat: number, n: number): void {
   const p = s.players[seat]!;
+  const gained: Card[] = [];
   for (let i = 0; i < n; i++) {
     let idx = s.mainDeck.findIndex((c) => c.kind === "treasure");
     if (idx >= 0) {
-      p.hand.push(s.mainDeck.splice(idx, 1)[0]!);
+      const c = s.mainDeck.splice(idx, 1)[0]!;
+      p.hand.push(c);
+      gained.push(c);
       continue;
     }
     idx = s.mainDiscard.findIndex((c) => c.kind === "treasure");
-    if (idx >= 0) p.hand.push(s.mainDiscard.splice(idx, 1)[0]!);
+    if (idx >= 0) {
+      const c = s.mainDiscard.splice(idx, 1)[0]!;
+      p.hand.push(c);
+      gained.push(c);
+    }
   }
+  recordPrivate(s, seat, "drew", gained); // specifics to the gainer only (count is public)
 }
 
 /** Table-wide damage. Suppressed entirely in Sudden-Death (E9). Otherwise, if a
@@ -201,6 +233,7 @@ function enterSuddenDeath(s: GameState, finalists: number[]): void {
   s.phase = "sudden-death";
   for (const seat of finalists) s.players[seat]!.lives = 1;
   s.log.push(`SUDDEN-DEATH: ${finalists.length} finalists clamped to 1 life`);
+  emit(s, "suddendeath", -1, -1, finalists.length, `⚡ SUDDEN-DEATH — single-target hits only!`);
 }
 
 /** End the game if <= 1 living remains. Returns true if it concluded. */
@@ -217,17 +250,27 @@ function concludeIfOver(s: GameState): boolean {
 /** Lost and Found (E7): the drawer takes a random card from each living opponent. */
 function lostAndFound(s: GameState, seat: number): void {
   const p = s.players[seat]!;
+  const taken: Card[] = [];
   for (const t of livingSeats(s)) {
     if (t === seat) continue;
     const h = s.players[t]!.hand;
-    if (h.length > 0) p.hand.push(h.splice(Math.floor(rand(s) * h.length), 1)[0]!);
+    if (h.length > 0) {
+      const card = h.splice(Math.floor(rand(s) * h.length), 1)[0]!;
+      p.hand.push(card);
+      taken.push(card);
+      recordPrivate(s, t, "lost", [card]); // each victim privately learns the card taken
+    }
   }
+  recordPrivate(s, seat, "drew", taken); // the drawer privately learns what they took
 }
 
 /** Resolve one Event immediately on draw (D3). All effects are self-contained
  *  (no awaiting), so this is safe to run inside a draw. */
 function resolveEvent(s: GameState, drawer: number, event: EventKind): void {
   s.log.push(`${who(s, drawer)} draws Event: ${event}`);
+  // Headline toast; damage/heal branches emit their own granular events (for the
+  // record + PR2 anims) — the client collapses a reduce's batch to this headline.
+  emit(s, "event", drawer, -1, 0, `🎲 ${who(s, drawer)} drew ${EVENT_NAMES[event]}`);
   switch (event) {
     case "mudslide":
     case "stormsurge":
@@ -252,18 +295,23 @@ function resolveEvent(s: GameState, drawer: number, event: EventKind): void {
     case "treasurechest":
     case "supplycache":
       gainTreasure(s, drawer, 2);
+      emit(s, "draw", drawer, -1, 2, `💎 ${who(s, drawer)} gains 2 Treasure`);
       break;
     case "supplydrop":
       for (const t of livingSeats(s)) gainTreasure(s, t, 1);
+      emit(s, "draw", -1, -1, 0, `💎 Everyone gains 1 Treasure`);
       break;
     case "leakybucket":
       discardRandom(s, drawer, 1);
+      emit(s, "support", -1, drawer, 1, `🪣 ${who(s, drawer)} loses a card (Leaky Bucket)`);
       break;
     case "springcleaning":
       for (const t of livingSeats(s)) discardRandom(s, t, 1);
+      emit(s, "support", -1, -1, 0, `🧹 Everyone discards a card (Spring Cleaning)`);
       break;
     case "lostandfound":
       lostAndFound(s, drawer);
+      emit(s, "support", drawer, -1, 0, `🔎 ${who(s, drawer)} takes a card from everyone (Lost & Found)`);
       break;
     case "calmwaters":
     case "falsealarm":
@@ -292,6 +340,7 @@ export function startTurn(s: GameState, seat: number): void {
   s.turnSeat = seat;
   s.supportUsed = false;
   s.stormThrowsUsed = 0;
+  emit(s, "turn", seat, -1, 0, s.turnCount === 0 ? `▶️ ${who(s, seat)} goes first!` : `▶️ ${who(s, seat)}'s turn`);
   const p = s.players[seat]!;
   if (p.stormCloud) {
     drawStormCloud(s, seat); // D5: draw 1, Events void
@@ -312,9 +361,13 @@ export function startTurn(s: GameState, seat: number): void {
 /** Discard `n` random cards from a seat's hand (uses the game RNG). */
 function discardRandom(s: GameState, seat: number, n: number): void {
   const hand = s.players[seat]!.hand;
+  const lost: Card[] = [];
   for (let i = 0; i < n && hand.length > 0; i++) {
-    discardCard(s, hand.splice(Math.floor(rand(s) * hand.length), 1)[0]!);
+    const card = hand.splice(Math.floor(rand(s) * hand.length), 1)[0]!;
+    lost.push(card);
+    discardCard(s, card);
   }
+  recordPrivate(s, seat, "lost", lost); // specifics (which cards) to the victim only
 }
 
 /** Swap up to 2 random cards each way between two hands (Card Swap). */
@@ -334,21 +387,39 @@ function cardSwap(s: GameState, a: number, b: number): void {
  *  "Their choice" discards are randomized here; peeks push to s.reveals. */
 function applySupport(s: GameState, seat: number, support: SupportKind, target?: number): void {
   const p = s.players[seat]!;
+  // PUBLIC generic toast: the support KIND + actor (+ target) is public; the SPECIFIC
+  // card lost/drawn is secret and goes via recordPrivate below. NEVER name a card here.
+  const label = CARD_INFO[support].label;
+  emit(
+    s,
+    "support",
+    seat,
+    target ?? -1,
+    0,
+    target !== undefined
+      ? `${who(s, seat)} used ${label} on ${who(s, target)}`
+      : `${who(s, seat)} played ${label}`,
+  );
   switch (support) {
     case "firstaid":
       p.lives = Math.min(s.options.startingLives, p.lives + 1); // E8: cap at starting lives
       return;
-    case "backpack":
+    case "backpack": {
+      const before = p.hand.length;
       drawCards(s, seat, 2);
+      recordPrivate(s, seat, "drew", p.hand.slice(before)); // your own 2 new cards
       return;
+    }
     case "hiddenstash": {
-      let taken = 0; // search the discard, take up to 2 Treasure
-      for (let i = s.mainDiscard.length - 1; i >= 0 && taken < 2; i--) {
+      const gained: Card[] = []; // search the discard, take up to 2 Treasure
+      for (let i = s.mainDiscard.length - 1; i >= 0 && gained.length < 2; i--) {
         if (s.mainDiscard[i]!.kind === "treasure") {
-          p.hand.push(s.mainDiscard.splice(i, 1)[0]!);
-          taken += 1;
+          const c = s.mainDiscard.splice(i, 1)[0]!;
+          p.hand.push(c);
+          gained.push(c);
         }
       }
+      recordPrivate(s, seat, "drew", gained);
       return;
     }
     case "needle": {
@@ -356,29 +427,35 @@ function applySupport(s: GameState, seat: number, support: SupportKind, target?:
       const balloons = t.hand.filter((c) => c.kind === "balloon");
       t.hand = t.hand.filter((c) => c.kind !== "balloon");
       for (const c of balloons) discardCard(s, c);
+      recordPrivate(s, target!, "lost", balloons); // the victim privately sees what was stripped
       return;
     }
     case "pickpocket": {
       const t = s.players[target!]!;
       const idx = t.hand.findIndex((c) => c.kind === "treasure");
-      if (idx >= 0) p.hand.push(t.hand.splice(idx, 1)[0]!);
+      if (idx >= 0) {
+        const stolen = t.hand.splice(idx, 1)[0]!;
+        p.hand.push(stolen);
+        recordPrivate(s, target!, "lost", [stolen]);
+        recordPrivate(s, seat, "drew", [stolen]);
+      }
       return;
     }
     case "sabotage":
-      discardRandom(s, target!, 2);
+      discardRandom(s, target!, 2); // emits the victim's private "lost" internally
       return;
     case "lemonadespill":
-      discardRandom(s, target!, 1);
+      discardRandom(s, target!, 1); // private "lost" internally
       s.players[target!]!.statuses.noShop = true;
       return;
     case "freezeout":
       s.players[target!]!.statuses.freezeOut = true;
       return;
     case "cardswap":
-      cardSwap(s, seat, target!);
+      cardSwap(s, seat, target!); // EXCLUDED from lost/drew (2-way) — owners see their @view hands
       return;
     case "switcheroo": {
-      const t = s.players[target!]!;
+      const t = s.players[target!]!; // EXCLUDED from lost/drew (whole-hand swap)
       const tmp = p.hand;
       p.hand = t.hand;
       t.hand = tmp;
@@ -479,8 +556,11 @@ function buildSpreadTargets(s: GameState, attacker: number, primary: number, spr
 function afterAttack(s: GameState, kind: AttackKind): void {
   const owner = s.turnSeat;
   if (kind === "golden" && !s.players[owner]!.out) {
+    const before = s.players[owner]!.hand.length;
     drawCards(s, owner, 2); // Golden draws 2 whether it hit or missed (E2)
     s.log.push(`${who(s, owner)} draws 2 (Golden)`);
+    emit(s, "draw", owner, -1, 2, `🏆 ${who(s, owner)} draws 2 (Golden)`); // count public
+    recordPrivate(s, owner, "drew", s.players[owner]!.hand.slice(before)); // identities private
     if (s.over) return; // a Golden-drawn Event ended the game
   }
   s.awaiting = { seats: [], kind: "GAME_OVER" }; // clears the attack
@@ -632,6 +712,7 @@ function resolvePending(s: GameState): void {
 function startThrow(s: GameState, attacker: number, target: number, soaker: boolean, spread?: Spread): void {
   spendKind(s, attacker, "balloon");
   if (soaker) spendKind(s, attacker, "soaker"); // R2: declared pre-flip (wasted on a Miss)
+  emit(s, "attack", attacker, target, 0, `💧 ${who(s, attacker)} throws a balloon at ${who(s, target)}`);
   if (spread) armSplashDraw(s, attacker, target, soaker, spread);
   else offerReaction(s, { kind: "THROW", attacker, target, soaker, redirectedSeats: [] });
 }
@@ -641,6 +722,7 @@ function startThrow(s: GameState, attacker: number, target: number, soaker: bool
 function startBig(s: GameState, attacker: number, target: number, big: BigKind, soaker: boolean, spread?: Spread): void {
   spendKind(s, attacker, big);
   if (soaker) spendKind(s, attacker, "soaker");
+  emit(s, "attack", attacker, target, 0, `${CARD_INFO[big].label} — ${who(s, attacker)} attacks ${who(s, target)}`);
   const { blockNumber, damage } = bigStats(big);
   if (spread) {
     spendKind(s, attacker, spread.modifier);
@@ -911,8 +993,9 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
   const s = clone(state);
   trimLog(s);
   s.reveals = []; // a fresh reduce produces its own peeks
+  s.events = []; // ...and its own public moments (granular; no coarse "moved" event)
   const seat = s.turnSeat;
-  const events: GameEvent[] = [{ type: move.kind, seat, detail: move }];
+  const events = s.events; // emit(...) helpers push onto s.events; returned as ApplyResult.events
 
   if (move.kind === "END_TURN") {
     endActiveTurn(s);
@@ -937,6 +1020,7 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
     spendKind(s, seat, "flashflood");
     const targets = livingSeats(s).filter((t) => t !== seat);
     s.log.push(`${who(s, seat)} unleashes a Flash Flood on ${targets.length} opponents`);
+    emit(s, "attack", seat, -1, 0, `🌧 ${who(s, seat)} unleashes a Flash Flood on everyone!`);
     launchAttack(s, seat, targets, "flashflood", FLASH_FLOOD_BLOCK, FLASH_FLOOD_DAMAGE, false, true);
     return { state: s, awaiting: s.awaiting, events };
   }
@@ -998,8 +1082,9 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
   const s = clone(state);
   trimLog(s);
   s.reveals = [];
+  s.events = [];
   const seat = actingSeat(s);
-  const events: GameEvent[] = [{ type: res.kind, seat, detail: res }];
+  const events = s.events; // emit(...) helpers push onto s.events; returned as ApplyResult.events
   if (res.kind === "DRAW_SPLASH") {
     resolveThrowFlip(s); // flip the committed throw in s.pendingFlip; resolves Miss/Hit
     return { state: s, awaiting: s.awaiting, events };
@@ -1026,6 +1111,7 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
       if (res.action === "towel") {
         spendKind(s, seat, "towel");
         s.log.push(`${who(s, seat)} Towels their splash`);
+        emit(s, "react", seat, -1, 0, `🧻 ${who(s, seat)} towels it away!`);
         nextTargetOrFinish(s); // THIS instance cancelled; the rest still land
         return { state: s, awaiting: s.awaiting, events };
       }
@@ -1034,10 +1120,12 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
         spendKind(s, seat, "redirect");
         atk.targets[atk.targetIdx] = res.target!;
         s.log.push(`${who(s, seat)} Redirects their splash to ${who(s, res.target!)}`);
+        emit(s, "react", seat, res.target!, 0, `↪️ ${who(s, seat)} redirects it to ${who(s, res.target!)}!`);
       } else {
         spendKind(s, seat, "watertrap");
         atk.targets[atk.targetIdx] = atk.attackerSeat; // bounce this instance to the attacker
         s.log.push(`${who(s, seat)} Water Traps their splash back at ${who(s, atk.attackerSeat)}`);
+        emit(s, "react", seat, atk.attackerSeat, 0, `🪤 ${who(s, seat)} traps it back at ${who(s, atk.attackerSeat)}!`);
       }
       // The rerouted/bounced victim gets its OWN reaction window (bounded by the
       // once-per-seat redirectedSeats cap), mirroring the pre-flip pending path.
@@ -1053,6 +1141,7 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
     if (res.action === "towel") {
       spendKind(s, seat, "towel"); // E11: cancel the targeting card outright
       s.log.push(`${who(s, seat)} Towels the ${pa.kind}`);
+      emit(s, "react", seat, -1, 0, `🧻 ${who(s, seat)} towels it away!`);
       s.pending = null;
       if (pa.kind === "SUPPORT") s.awaiting = { seats: [pa.attacker], kind: "MOVE" };
       else afterAttack(s, pa.kind === "PLAY_BIG" ? pa.big! : "basic");
@@ -1065,10 +1154,12 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
     if (res.action === "redirect") {
       spendKind(s, seat, "redirect");
       s.log.push(`${who(s, seat)} Redirects to ${who(s, res.target!)}`);
+      emit(s, "react", seat, res.target!, 0, `↪️ ${who(s, seat)} redirects it to ${who(s, res.target!)}!`);
       pa.target = res.target!;
     } else {
       spendKind(s, seat, "watertrap");
       s.log.push(`${who(s, seat)} Water Traps -> bounces to ${who(s, pa.attacker)}`);
+      emit(s, "react", seat, pa.attacker, 0, `🪤 ${who(s, seat)} traps it back at ${who(s, pa.attacker)}!`);
       pa.target = pa.attacker; // the original attacker must now defend
       pa.attacker = seat; // the trapper's Hits resolve in the ladder
     }

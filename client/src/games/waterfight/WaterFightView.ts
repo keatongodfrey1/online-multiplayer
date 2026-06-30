@@ -27,6 +27,16 @@ import { infoButton, wireInfoButtons } from "../../framework/infoPopover.js";
 const WF_SAVES_KEY = "waterfight-saves";
 /** How long the HIT/MISS splash reveal stays on screen. */
 const SPLASH_REVEAL_MS = 2600;
+/** More new events than this in one sync = a reconnect catch-up → snap (no toast-storm). */
+const EVENT_BURST_SKIP = 10;
+/** How long each queued toast shows before the next (flashToast is a singleton). */
+const TOAST_MS = 1500;
+/** Per-reduce headline priority — one toast per reduce shows the highest-priority event,
+ *  so a multi-target moment (Flash Flood: attack + N damage) collapses to one summary. */
+const EVENT_PRIORITY: Record<string, number> = {
+  suddendeath: 9, event: 8, attack: 7, autopass: 6, turn: 6, save: 5, soak: 5,
+  support: 4, react: 4, draw: 3, heal: 2, damage: 1,
+};
 const wfTurnLabel = (blob: any): number => (blob?.engine?.turnCount ?? 0) + 1;
 
 // MIRROR of the engine's TARGETED_SUPPORTS / implemented supports (engine.ts) —
@@ -91,6 +101,7 @@ const STYLE = `
 .wf-banner.defend { background: #3a1d22; border-left-color: var(--danger); }
 .wf-banner.act.rise { animation: wf-pulse 0.9s ease-out; }
 .wf-banner .atk-chip { display: inline-block; margin-top: 6px; font-size: 13px; font-weight: 700; color: #ffd9dd; background: #4a232b; border: 1px solid var(--danger); border-radius: 99px; padding: 2px 10px; }
+.wf-banner .wf-countdown { font-weight: 800; color: var(--warn); white-space: nowrap; }
 .wf-banner.sudden { background: #3a1d22; border-left-color: var(--danger); font-weight: 700; }
 @keyframes wf-pulse { 0% { box-shadow: 0 0 0 0 #41c98a66; } 100% { box-shadow: 0 0 0 10px #41c98a00; } }
 .wf-controls { display: flex; gap: 8px; }
@@ -237,6 +248,13 @@ export class WaterFightView implements GameView {
   /** Highest splash seq we've already shown — seeded from current state on mount so a
    *  refresh/resume/late-join into a game that already threw never replays a stale flip. */
   private lastSeenSplashSeq = 0;
+  /** Highest event-stream seq toasted — primed on mount (no replay on reconnect). */
+  private lastEventSeq = 0;
+  /** Toast queue (flashToast overwrites, so we show queued toasts one at a time). */
+  private toastQueue: string[] = [];
+  private toastTimer?: ReturnType<typeof setTimeout>;
+  /** Drives the reaction-timer countdown text (updates the .wf-countdown node in place). */
+  private actionTimer?: ReturnType<typeof setInterval>;
   /** Open modal: a card-detail (by kind) or the ❓ Help legend. Static content, so the
    *  guarded modal-host paints it only when this identity changes (survives opponent deltas). */
   private cardDetail?: { kind: string };
@@ -249,16 +267,76 @@ export class WaterFightView implements GameView {
     this.room = room as unknown as Room<any, WaterFightState>;
     this.ctx = ctx;
     this.lastSeenSplashSeq = this.room.state.lastSplashSeq ?? 0; // seed BEFORE first render
+    this.lastEventSeq = this.maxEventSeq(); // prime so a refresh/late-join never replays the stream
     root.innerHTML = `<style>${STYLE}</style><div class="wf-splash-host"></div><div class="wf-modal-host"></div><div class="wf-result-host"></div><div class="wf"></div>`;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
     this.room.onMessage(WaterFightMsg.REVEAL, (payload: { kind: string; ofSeat: number; cards: { id: number; kind: string }[] }) => {
       if (!this.root) return; // ignore if this view has since unmounted
       this.reveal = payload;
+      // Private specifics (your own lost/drawn cards) → a private toast only you see.
+      if (payload.kind === "lost" || payload.kind === "drew") {
+        const names = payload.cards.map((c) => cardName(c.kind)).join(", ");
+        if (names) this.enqueueToast(payload.kind === "lost" ? `😖 You lost: ${names}` : `🎁 You drew: ${names}`);
+      }
       this.render();
     });
     hookSaveData(this.room, WF_SAVES_KEY, wfTurnLabel, () => flashToast(root, "Saved ✓"));
+    this.actionTimer = setInterval(() => this.tickCountdown(), 250); // ticks the reaction timer
     this.render();
+  }
+
+  private maxEventSeq(): number {
+    let m = 0;
+    for (const e of [...(this.room?.state.events ?? [])]) m = Math.max(m, e.seq);
+    return m;
+  }
+
+  /** Diff the synced event stream for NEW moments and toast them (one summary per
+   *  reduce). Snap on a reconnect burst. Reconnection-safe (lastEventSeq primed on mount). */
+  private consumeEvents(state: WaterFightState): void {
+    const fresh = [...state.events].filter((e) => e.seq > this.lastEventSeq);
+    if (fresh.length === 0) return;
+    this.lastEventSeq = fresh[fresh.length - 1]!.seq;
+    if (fresh.length > EVENT_BURST_SKIP) return; // reconnect catch-up: snap, no toast-storm
+    // Group consecutive events into per-reduce batches (a reduce is a contiguous seq
+    // run) and show ONE headline toast per batch.
+    let batch: typeof fresh = [];
+    let prev = -1;
+    for (const e of fresh) {
+      if (prev >= 0 && e.seq !== prev + 1 && batch.length) { this.toastBatch(batch); batch = []; }
+      batch.push(e);
+      prev = e.seq;
+    }
+    if (batch.length) this.toastBatch(batch);
+  }
+
+  /** One toast per reduce = the highest-priority event's pre-built generic text. */
+  private toastBatch(batch: { kind: string; text: string }[]): void {
+    let best = batch[0]!;
+    for (const e of batch) if ((EVENT_PRIORITY[e.kind] ?? 0) > (EVENT_PRIORITY[best.kind] ?? 0)) best = e;
+    if (best.text) this.enqueueToast(best.text);
+  }
+
+  private enqueueToast(text: string): void {
+    this.toastQueue.push(text);
+    if (!this.toastTimer) this.pumpToast();
+  }
+
+  private pumpToast(): void {
+    const next = this.toastQueue.shift();
+    if (!next || !this.root) { this.toastTimer = undefined; return; }
+    flashToast(this.root, next);
+    this.toastTimer = setTimeout(() => this.pumpToast(), TOAST_MS);
+  }
+
+  /** Update the reaction-timer countdown text in place (no full re-render). */
+  private tickCountdown(): void {
+    const el = this.root?.querySelector<HTMLElement>(".wf-countdown");
+    if (!el) return;
+    const deadline = Number(el.dataset.deadline || "0");
+    const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    el.textContent = left > 0 ? `⏱ ${left}s` : "⏱ …";
   }
 
   unmount(): void {
@@ -266,6 +344,11 @@ export class WaterFightView implements GameView {
     this.root?.removeEventListener("click", this.onClick);
     if (this.splashTimer) clearTimeout(this.splashTimer);
     this.splashTimer = undefined;
+    if (this.toastTimer) clearTimeout(this.toastTimer);
+    this.toastTimer = undefined;
+    this.toastQueue = [];
+    if (this.actionTimer) clearInterval(this.actionTimer);
+    this.actionTimer = undefined;
     this.splashReveal = undefined;
     this.cardDetail = undefined;
     this.showRules = false;
@@ -385,6 +468,7 @@ export class WaterFightView implements GameView {
   private render(): void {
     if (!this.root || !this.room || !this.ctx) return;
     const state = this.room.state;
+    this.consumeEvents(state); // toast any NEW public moments (runs every state change)
     const wrap = this.root.querySelector<HTMLElement>(".wf");
     if (!wrap || state.phase !== Phase.PLAYING) {
       if (wrap && state.phase !== Phase.PLAYING) wrap.innerHTML = "";
@@ -604,11 +688,16 @@ export class WaterFightView implements GameView {
   private renderReveal(seats: WaterFightSeat[]): string {
     if (!this.reveal) return "";
     const cards = this.reveal.cards.map((c) => CARD_LABELS[c.kind] ?? escapeHtml(c.kind)).join(" · ");
+    const dismiss = `<button data-act="dismiss-reveal" class="ghost">dismiss</button>`;
+    if (this.reveal.kind === "lost") // private: the specific cards an effect took from you
+      return `<div class="wf-reveal">😖 <b>You lost:</b> ${cards || "(nothing)"} ${dismiss}</div>`;
+    if (this.reveal.kind === "drew") // private: the specific cards you just drew
+      return `<div class="wf-reveal">🎁 <b>You drew:</b> ${cards || "(nothing)"} ${dismiss}</div>`;
     const who =
       this.reveal.kind === "hand"
         ? `${escapeHtml(seats.find((s) => s.seat === this.reveal!.ofSeat)?.nickname ?? "Opponent")}'s hand`
         : "Top of the draw pile";
-    return `<div class="wf-reveal">👀 <b>${who}:</b> ${cards || "(empty)"} <button data-act="dismiss-reveal" class="ghost">dismiss</button></div>`;
+    return `<div class="wf-reveal">👀 <b>${who}:</b> ${cards || "(empty)"} ${dismiss}</div>`;
   }
 
   private renderBanner(state: WaterFightState, myMoment: boolean): string {
@@ -625,10 +714,19 @@ export class WaterFightView implements GameView {
     const danger = myMoment && (state.awaitingKind === "DEFEND" || state.awaitingKind === "REACT");
     const cls = myMoment ? (danger ? "defend rise" : "act rise") : "";
     const atkName = state.attackKind === "basic" ? "balloon" : cardName(state.attackKind);
+    // Name the incoming card: an attack shows its kind+block; a targeted SUPPORT now
+    // names the specific card + its one-line effect (the kind is public; the lost card isn't).
     const chip = state.attackActive
       ? `<br><span class="atk-chip">💥 incoming ${escapeHtml(atkName)} · block ${state.attackBlockNumber}${state.attackSoaker ? " · Soaker" : ""}</span>`
-      : "";
-    return `<div class="wf-banner ${cls}">${escapeHtml(msg)}${chip}</div>`;
+      : state.pendingKind === "SUPPORT" && state.pendingCardKind
+        ? `<br><span class="atk-chip">🔔 incoming ${escapeHtml(cardName(state.pendingCardKind))} — ${escapeHtml(cardDesc(state.pendingCardKind))}</span>`
+        : "";
+    // Visible reaction/turn-timer countdown (the ticker updates .wf-countdown in place).
+    const countdown =
+      myMoment && state.actionDeadline > 0
+        ? ` <span class="wf-countdown" data-deadline="${state.actionDeadline}">⏱ ${Math.max(0, Math.ceil((state.actionDeadline - Date.now()) / 1000))}s</span>`
+        : "";
+    return `<div class="wf-banner ${cls}">${escapeHtml(msg)}${countdown}${chip}</div>`;
   }
 
   private renderSeats(state: WaterFightState, seats: WaterFightSeat[], mySeat: number): string {

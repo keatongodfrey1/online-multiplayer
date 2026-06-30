@@ -738,6 +738,63 @@ describe("water fight room", () => {
     assert.strictEqual(bReveal, null, "the opponent never receives the peek");
   });
 
+  it("syncs the public event stream with a strictly increasing seq", async () => {
+    const { room, clients } = await startedGame(71, 2, (r) => { r.state.eventDensity = 0; });
+    const a = clients[0]!;
+    room.engine.players[0]!.hand = [{ id: 10000, kind: "balloon" }] as never;
+    a.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => [...room.state.events].some((e) => e.kind === "attack"));
+    const seqs = [...room.state.events].map((e) => e.seq);
+    assert.ok(seqs.length > 0, "events synced");
+    for (let i = 1; i < seqs.length; i++) assert.ok(seqs[i]! > seqs[i - 1]!, "seq strictly increases");
+  });
+
+  it("names the incoming SUPPORT card on the React window (pendingCardKind)", async () => {
+    const { room, clients } = await startedGame(73, 2, (r) => { r.state.eventDensity = 0; });
+    const a = clients[0]!;
+    room.engine.players[0]!.hand = [{ id: 10000, kind: "sabotage" }] as never;
+    room.engine.players[1]!.hand = [{ id: 10001, kind: "towel" }] as never; // a towel → the REACT window stays open
+    a.send(WaterFightMsg.MOVE, { kind: "PLAY_SUPPORT", support: "sabotage", target: 1 });
+    await until(() => room.engine.awaiting.kind === "REACT" && room.engine.awaiting.seats[0] === 1);
+    assert.strictEqual(room.state.pendingKind, "SUPPORT");
+    assert.strictEqual(room.state.pendingCardKind, "sabotage", "the React banner can name the incoming card");
+  });
+
+  it("two-tier secrecy: a Sabotage victim privately learns the lost cards; the attacker does not", async () => {
+    const { room, clients } = await startedGame(75, 3, (r) => { r.state.eventDensity = 0; });
+    const [a, b, c] = clients as [typeof clients[0], typeof clients[0], typeof clients[0]];
+    let aReveal: any = null;
+    let bReveal: any = null;
+    let cReveal: any = null;
+    a!.onMessage(WaterFightMsg.REVEAL, (p: unknown) => (aReveal = p));
+    b!.onMessage(WaterFightMsg.REVEAL, (p: unknown) => (bReveal = p));
+    c!.onMessage(WaterFightMsg.REVEAL, (p: unknown) => (cReveal = p));
+    room.engine.players[0]!.hand = [{ id: 10000, kind: "sabotage" }] as never;
+    room.engine.players[1]!.hand = [{ id: 10001, kind: "mega" }, { id: 10002, kind: "giant" }] as never; // no towel → resolves
+    a!.send(WaterFightMsg.MOVE, { kind: "PLAY_SUPPORT", support: "sabotage", target: 1 });
+    await until(() => bReveal !== null);
+    assert.strictEqual(bReveal.kind, "lost", "the victim privately learns what was lost");
+    assert.strictEqual(bReveal.cards.length, 2);
+    await sleep(80);
+    assert.strictEqual(aReveal, null, "the attacker never sees the victim's specific cards");
+    assert.strictEqual(cReveal, null, "a spectator never sees them either");
+    // ...and the PUBLIC stream named only the action, not the cards.
+    const pub = [...room.state.events].find((e) => e.kind === "support");
+    assert.ok(pub && !/\b(mega|giant)\b/i.test(pub.text), "no secret card kind in the public event");
+  });
+
+  it("a rematch clears the event stream and restarts the seq", async () => {
+    const { room, clients } = await startedGame(77);
+    const [a, b] = clients;
+    await driveToWin(room, a!, b!);
+    await until(() => room.state.phase === Phase.ENDED);
+    a!.send(LobbyMsg.REMATCH, {});
+    b!.send(LobbyMsg.REMATCH, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    const seqs = [...room.state.events].map((e) => e.seq);
+    assert.ok(seqs.every((s) => s <= 5), "game-2's stream restarts low (seq reset), not continuing game-1");
+  });
+
   it("forwards a Sneaky Peek (opponent's hand) to the peeker only", async () => {
     const { room, clients } = await startedGame(63, 2, (r) => {
       r.state.eventDensity = 0;

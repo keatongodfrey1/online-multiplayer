@@ -101,6 +101,25 @@ export class WaterFightResult extends Schema {
   @type("float64") deadline = 0;
 }
 
+/** One PUBLIC consequential moment, surfaced as a transient toast on every client.
+ *  FLAT PRIMITIVES + a pre-built GENERIC `text` — a card identity must NEVER appear
+ *  (the stream is public; secret specifics go via the private REVEAL channel). */
+export class WaterFightEvent extends Schema {
+  /** Room-owned monotonic id; the client toasts each `seq` once (primed on mount). */
+  @type("uint32") seq = 0;
+  /** Routing key ("damage"|"soak"|"save"|"heal"|"event"|"support"|"attack"|"react"
+   *  |"draw"|"suddendeath"|"turn"|"autopass"). */
+  @type("string") kind = "";
+  /** Actor seat, or -1. */
+  @type("int8") seat = -1;
+  /** Target seat, or -1. */
+  @type("int8") target = -1;
+  /** Kind-specific magnitude (damage/heal/draw count); 0 when N/A. */
+  @type("uint16") amount = 0;
+  /** PUBLIC, GENERIC, pre-built human line. */
+  @type("string") text = "";
+}
+
 /** One seat's public status, plus the owner-only hand. */
 export class WaterFightSeat extends Schema {
   @type("string") sessionId = "";
@@ -159,6 +178,14 @@ export class WaterFightState extends BaseState {
   @type("boolean") attackSoaker = false;
   /** During a REACT window: the kind of card being reacted to ("THROW"|"PLAY_BIG"|"SUPPORT"). */
   @type("string") pendingKind = "";
+  /** The SPECIFIC incoming card kind (the support/big), so the React banner can name it
+   *  ("incoming 💣 Sabotage"). "" when none. The kind is public; the resulting lost card
+   *  stays secret. */
+  @type("string") pendingCardKind = "";
+
+  /** PUBLIC event stream — the room appends consequential moments with a monotonic seq;
+   *  the client toasts each new one. Capped; reconnection-safe (client primes on mount). */
+  @type([WaterFightEvent]) events = new ArraySchema<WaterFightEvent>();
 
   // ---- last Splash flip (the interactive hit/miss draw reveal) ----
   /** Advances on every flip so clients can detect a NEW draw (0 = none yet). */
