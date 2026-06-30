@@ -54,6 +54,10 @@ the things that shape the schema and room and are a rewrite to change later.
 > engine, then write the room as a thin adapter (copy `SplendorRoom`/`CatanRoom`,
 > not the thin TicTacToe room).
 >
+> **The ending is part of the game:** at game-over, show who won, why, and the
+> deciding move *before* the standings screen (a held reveal beat — see §3). Build
+> it from the start; don't ship a bare standings card and wait to be asked.
+>
 > Verify in two browser windows at **tablet (~1024) AND phone (~390)** widths,
 > including a mid-game refresh, and **send screenshots** (the owner is a
 > non-coder; the screenshot is how they confirm it works).
@@ -169,12 +173,44 @@ So:
 - The **specific** detail is delivered to the owner from their OWN private state
   (their `@view()` hand) or via the private `REVEAL` message — **never broadcast**.
 
+### The ending is a moment too — show it, by default
+
+**Every game's game-over must show who won, why it ended, and the deciding move —
+build this from the start, don't wait to be asked.** A bare framework standings
+card is not enough; the ending is the payoff and belongs to "Show, don't hide."
+
+The catch (and the reusable pattern): **the framework UNMOUNTS the whole game view
+the instant `state.phase` flips PLAYING→ENDED** and swaps in the standings/rematch
+card (`RoomScreen.renderEnded`). So the game has no chance to show anything *after*
+the fact. The only way to show a result moment is for the **server to hold
+`phase=PLAYING` for a brief "reveal beat" before declaring the game over.**
+
+This is a room-level hold — **no framework / engine-await / sanitize / new save-kind
+edits** (the engine already reaches a terminal `GAME_OVER` state, and every input/
+auto path already no-ops on `engine.over`). Copy-from **Water Fight's result-reveal
+beat**:
+- The room enters the beat once in `afterApply` (`beginResultReveal`): keep
+  `phase=PLAYING`, project the outcome to a synced result sub-object
+  (`result.pending=true`), arm a **public** `revealHoldMs` timer.
+- **Any seated player taps "Continue →"** (a plain `CONTINUE` `onMessage` →
+  `handleContinue` → `finishGame`), OR the server timer auto-advances (so a
+  walked-away tablet never stalls the table). `finishGame` is **idempotent** (the
+  Continue-vs-timer race) and clears the timer on every end path incl. `onGameEnded`.
+- The view renders a guarded `.wf-result-host` overlay off the `result.pending`
+  **level** (so a mid-beat refresh reconstructs it; no rising-edge latch). It plays
+  the finishing splash first, then the victory card (`getMeansLabel` names the
+  deciding card). Reset every result field in `syncFromEngine` when `!over` (the
+  unconditional-projection rework-saver — see §4).
+- To NAME the deciding move, the engine records a `finalBlow {attacker, victim,
+  means}` at the elimination site — captured at the damage **callers** (see §4
+  "attribute at the callers").
+
 ---
 
 <a id="4-architecture-rework-savers"></a>
 ## 4. Architecture rework-savers
 
-These four caused silent failures in Water Fight. Each has a copy-from.
+These caused silent failures in Water Fight. Each has a copy-from.
 
 - **A new engine `Move` / `Resolution` kind MUST be whitelisted in the room's
   `sanitize.ts`** (`parseMove` / `parseResolution`,
@@ -210,6 +246,16 @@ These four caused silent failures in Water Fight. Each has a copy-from.
   into already-escaped HTML** — that corrupts markup for short/substring
   nicknames ("b", "amp"). Use a word-boundary, single-pass tokenizer that escapes
   name and non-name segments separately (`emphasizeNames` in `WaterFightView.ts`).
+
+- **Attribute at the CALLERS, not inside a shared mutator.** When you need to name
+  *who/what* caused an event that a shared low-level function produces (e.g. one
+  `damageSeat` called from a thrown balloon, a storm Event, a bounce), capture the
+  attribution **at each caller — where the context lives** — gated on the real
+  state transition (a player went `out` false→true, so a non-fatal hit or a
+  Lifeguard save records nothing). Putting the capture *inside* the shared mutator
+  records the wrong thing (it can't see the attacker/means) or nothing. Copy-from
+  Water Fight's `finalBlow` capture (`recordSoak`/`damageAndRecord` at the
+  `damageSeat` callers in `engine.ts`). Keep the mutator pure (`seat, dmg`).
 
 ---
 
@@ -263,6 +309,18 @@ re-derive them.
   (`style.css:29`) is required so a `[hidden]` element beats a class's `display`
   (equal specificity). Without it, a `.overlay { display: flex }[hidden]` element
   (the "Reconnecting…" overlay) stays visible (PR #5).
+- **Schema-v4 caps a structure at ~63 `@type` fields.** When a `State` class nears
+  the cap (Water Fight was ~53/63), **nest related fields into a sub-schema**
+  referenced by one `@type` field, instead of adding flat fields — exceeding the
+  cap is a confusing crash, not a clear error, and a near-full state blocks future
+  features. Copy-from the `WaterFightResult` sub-schema (8 reveal fields → 1 field
+  on `WaterFightState`). Bonus: a sub-object is also one tidy thing to reset.
+- **Big synced state overflows the default encode buffer.** A data-heavy game (a
+  capped log + every seat's hand) can exceed `@colyseus/schema`'s default 8 KB
+  buffer on a full sync (e.g. at game-over) — it prints a `buffer overflow` warning
+  and auto-grows (works, but noisy + a little slower). Set it once at server boot:
+  `import { Encoder } from "@colyseus/schema"; Encoder.BUFFER_SIZE = 16 * 1024;`.
+  (A framework/boot change, not per-game.)
 
 ---
 
@@ -284,6 +342,9 @@ selector name is the durable anchor.
 | Guarded sibling-host overlay | `WaterFightView` `mount()` (`.wf-splash-host` / `.wf-modal-host` siblings) + `renderSplash` / `renderModal` (repaint only when `dataset.key` changes) | The view rebuilds its innerHTML each sync; overlays inside it flicker / restart / lose scroll. |
 | Dark modal | WF `.wf-modal` / `.wf-modal-backdrop` | Reuse `.pp-modal-backdrop` STRUCTURE, NOT Perfect Palace's light/Cinzel `.pp-modal` skin. Keep z-index below turn-toast + reconnect overlay. |
 | Show-don't-hide reveal | `SpaceChaseView` `revealCard` / `dismissReveal` + `sc-reveal` CSS (PR #17) | Actor taps OK; watchers auto-close ~2.6s + ~12s safety; rolls linger ~1.75s; prime `lastSeq = maxSeq()` on mount (don't replay/skip cold). |
+| End-of-game reveal beat | `WaterFightRoom` `beginResultReveal` / `handleContinue` (public `revealHoldMs` timer) + `WaterFightResult` sub-schema + `.wf-result-host` overlay + `getMeansLabel` (PR #40) | The view is unmounted on the PLAYING→ENDED flip, so the server holds `phase=PLAYING` for a beat to show winner/why/finishing-move first. Any-tap or timer advances; `finishGame` idempotent; reset result fields on `!over`. |
+| Schema field-cap → nest | `WaterFightResult` sub-schema (`shared/.../waterfight/index.ts`) — 8 fields behind one `@type(WaterFightResult) result` | schema-v4 caps a structure at ~63 `@type` fields; nest when nearing it. |
+| Attribute at the callers | `recordSoak` / `damageAndRecord` at the `damageSeat` callers (`engine.ts`) | Capture who/what at the caller (context lives there), on the `out` false→true transition; keep the shared mutator pure. |
 | Toast helper | `client/src/framework/turnAlert.ts` `flashToast` / `turnChime` | Who-did-what toasts + the turn chime. Audio gesture-gated (see §5). |
 | Secrecy boundary | `@view()` hands + `grantPrivateView` (`server/src/framework/privateState.ts:24`) + private `WaterFightMsg.REVEAL` channel (`shared/.../waterfight/index.ts:27`, sent per-client in `WaterFightRoom`) | Specific detail → owner only; generic event → public log/toast. Never put secrets in the synced log. |
 | Sanitize whitelist | `parseMove` / `parseResolution` (`server/.../waterfight/sanitize.ts`, `default: return null`) | A new Move/Resolution kind not added here is silently dropped over the wire. |
@@ -315,6 +376,8 @@ selector name is the durable anchor.
 - [ ] The game **log shows player names**, not "seat N".
 - [ ] Every random/consequential event is **shown** (interactive or animated) +
       toasted — not log-only; secrets stay owner-only and out of the synced log.
+- [ ] **Game-over shows who won, why, and the deciding move** *before* the standings
+      screen (a held reveal beat — §3), not a bare standings card.
 - [ ] The reveal/modal **survives opponents' turns** (guarded sibling host; no flicker).
 - [ ] The seats row **wraps at max players**.
 - [ ] A new engine action has a **wire-level room test** (not just an engine test).
