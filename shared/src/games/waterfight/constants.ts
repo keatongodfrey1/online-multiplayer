@@ -77,3 +77,15 @@ export const EVENT_LABELS: Partial<Record<EventKind, string>> = {
   lightning: "⚡ Lightning",
   targetedstorm: "⚡ Targeted Storm",
 };
+
+/** Friendly name for EVERY Event kind — drives the public "X drew <Event>" toast.
+ *  Complete `Record` so a new EventKind without a name fails `npm run typecheck`. */
+export const EVENT_NAMES: Record<EventKind, string> = {
+  mudslide: "Mudslide", stormsurge: "Storm Surge", heatwave: "Heatwave",
+  downpour: "Downpour", tidalwave: "Tidal Wave", lightning: "Lightning",
+  targetedstorm: "Targeted Storm", sunbreak: "Sunbreak", rainbow: "Rainbow",
+  waterparkpass: "Water Park Pass", treasurechest: "Treasure Chest",
+  supplycache: "Supply Cache", supplydrop: "Supply Drop", leakybucket: "Leaky Bucket",
+  springcleaning: "Spring Cleaning", lostandfound: "Lost & Found",
+  calmwaters: "Calm Waters", falsealarm: "False Alarm", gentlebreeze: "Gentle Breeze",
+};

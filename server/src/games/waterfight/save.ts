@@ -236,6 +236,7 @@ function rebuildEngine(e: unknown): GameState {
     lastSplash,
     finalBlow,
     reveals: [], // peeks are ephemeral; never resumed from a save
+    events: [], // the public event stream is ephemeral; never resumed from a save
   } as unknown as GameState;
   return state;
 }

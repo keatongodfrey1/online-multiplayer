@@ -154,6 +154,81 @@ describe("water fight engine: finalBlow (end-of-game reveal)", () => {
   });
 });
 
+describe("water fight engine: event stream + two-tier secrecy", () => {
+  const mentions = (text: string, kind: string): boolean => new RegExp(`\\b${kind}\\b`, "i").test(text);
+
+  it("a throw emits a public attack event, and the soak a public soak event", () => {
+    const g = game(2, 5);
+    g.players[1]!.lives = 1;
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, []);
+    forceSplash(g, "hit");
+    // Use RAW applies so each reduce's events are observed (the auto-flip wrapper
+    // would clear the throw's events with the next reduce).
+    let r = applyMoveRaw(g, { kind: "THROW", target: 1 });
+    assert.ok(r.state.events.some((e) => e.kind === "attack"), "throw emits an attack event");
+    r = applyResolutionRaw(r.state, { kind: "DRAW_SPLASH" }); // flip → HIT → opens DEFEND
+    r = applyResolutionRaw(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.ok(r.state.events.some((e) => e.kind === "soak"), "the soak emits a soak event");
+  });
+
+  it("Sabotage: the PUBLIC event never names the victim's hidden lost cards; the victim learns them privately", () => {
+    const g = game(2, 5);
+    setHand(g, 0, ["sabotage"]);
+    setHand(g, 1, ["mega", "giant", "golden"]); // no towel → resolves immediately
+    const r = applyMove(g, { kind: "PLAY_SUPPORT", support: "sabotage", target: 1 });
+    const pub = r.state.events.find((e) => e.kind === "support");
+    assert.ok(pub, "a public support event fired (naming Sabotage is fine — that's public)");
+    // The SECRET part — which of the victim's cards were lost — must NOT be public.
+    for (const secret of ["mega", "giant", "golden"]) {
+      assert.ok(!mentions(pub!.text, secret), `public support event leaked the secret card "${secret}"`);
+    }
+    const lost = r.state.reveals.find((rv) => rv.kind === "lost" && rv.seat === 1);
+    assert.ok(lost, "the victim gets a private 'lost' reveal");
+    assert.strictEqual(lost!.cards.length, 2, "the 2 discarded cards are named privately to the victim");
+  });
+
+  it("Golden draw: the PUBLIC event never names the 2 drawn cards; the drawer learns them privately", () => {
+    const g = game(3, 5); // 3p so a soak does not end the game
+    g.players[0]!.hand.push({ id: 10000, kind: "golden" });
+    setHand(g, 1, ["umbrella"]);
+    // Stack the deck so the 2 Golden draws are KNOWN kinds (drawMainCard pops the tail).
+    g.mainDeck.push({ id: 20001, kind: "mega" }, { id: 20002, kind: "giant" });
+    let r = applyMove(g, { kind: "PLAY_BIG", big: "golden", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "umbrella" }); // afterAttack draws 2
+    const pub = r.state.events.find((e) => e.kind === "draw" && e.seat === 0);
+    assert.ok(pub, "a public draw event fired (the COUNT is public)");
+    for (const drawn of ["mega", "giant"]) {
+      assert.ok(!r.state.events.some((e) => mentions(e.text, drawn)), `public events leaked the drawn card "${drawn}"`);
+    }
+    const drew = r.state.reveals.find((rv) => rv.kind === "drew" && rv.seat === 0);
+    assert.ok(drew, "the drawer gets a private 'drew' reveal");
+    assert.ok(
+      drew!.cards.some((c) => c.kind === "mega") && drew!.cards.some((c) => c.kind === "giant"),
+      "the 2 drawn cards are named privately to the drawer only",
+    );
+  });
+
+  it("cardSwap and switcheroo emit NO lost/drew reveal (2-way swaps are excluded)", () => {
+    for (const support of ["cardswap", "switcheroo"] as const) {
+      const g = game(2, 5);
+      setHand(g, 0, [support, "balloon"]);
+      setHand(g, 1, ["mega", "giant"]);
+      const r = applyMove(g, { kind: "PLAY_SUPPORT", support, target: 1 });
+      assert.ok(!r.state.reveals.some((rv) => rv.kind === "lost" || rv.kind === "drew"), `${support} must not emit lost/drew`);
+      assert.ok(r.state.events.some((e) => e.kind === "support"), `${support} still emits a public toast`);
+    }
+  });
+
+  it("events are a fresh array each reduce (no growth)", () => {
+    const g = game(2, 5);
+    const r1 = applyMove(g, { kind: "END_TURN" });
+    assert.ok(Array.isArray(r1.state.events), "events is an array");
+    const r2 = applyMove(r1.state, { kind: "END_TURN" });
+    assert.ok(Array.isArray(r2.state.events) && r2.state.events.every((e) => typeof e.kind === "string"), "fresh events only");
+  });
+});
+
 describe("water fight engine: combat", () => {
   it("splash MISS ends the attack with no damage; turn advances", () => {
     const g = game(2, 5);

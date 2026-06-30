@@ -15,6 +15,7 @@ import {
   Phase,
   WaterFightCard,
   WaterFightEngine as WF,
+  WaterFightEvent,
   WaterFightMsg,
   WaterFightPlayer,
   WaterFightSeat,
@@ -33,6 +34,9 @@ type EngineCard = WF.Card;
 type Resolution = WF.Resolution;
 
 const LOG_CAP = 80;
+/** Cap on the synced public event stream (kept small — Water Fight emits several per
+ *  reduce; enough for a reconnect catch-up without bloating the full-state encode). */
+const EVENTS_CAP = 30;
 /** Fallback auto-draw deadline for an idle attacker when the turn timer is off, so the
  *  interactive Splash draw can never stall the table indefinitely. */
 const SPLASH_DRAW_FLOOR_MS = 10_000;
@@ -62,6 +66,8 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
   private autoTimer?: Delayed;
   /** Auto-advance timer for the result-reveal beat (a player tap can advance early). */
   private resultTimer?: Delayed;
+  /** Room-owned monotonic id for the synced public event stream. */
+  private eventSeq = 0;
   private seedOption?: number;
   /** The @view() hand array each session currently has granted. */
   private grantedHands = new Map<string, ReturnType<() => WaterFightSeat["hand"]>>();
@@ -84,6 +90,11 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
   // ---- start / rematch ----------------------------------------------------
 
   protected onGameStart(): void {
+    // Reset the public event stream — the State (and its events array) is reused across
+    // rematches, so a stale stream would survive into the next game. afterApply() below
+    // then appends the fresh game's "goes first" event.
+    this.state.events.clear();
+    this.eventSeq = 0;
     const players = [...this.state.players.values()].sort((a, b) => a.seat - b.seat);
     const seed = this.seedOption ?? (Math.floor(Math.random() * 0xffffffff) >>> 0);
     const load = this.pendingLoad?.payload as ParsedSave | undefined;
@@ -257,7 +268,29 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
 
   // ---- the funnel ---------------------------------------------------------
 
+  /** Append this reduce's PUBLIC events to the synced stream with a monotonic seq, then
+   *  trim. Mirrors SpaceChaseRoom.appendEvents. `text` is engine-built + generic; we copy
+   *  only flat primitives — never a Move/Resolution or a card identity. */
+  private appendEvents(events: WF.GameEvent[]): void {
+    for (const e of events) {
+      const row = new WaterFightEvent();
+      row.seq = ++this.eventSeq;
+      row.kind = e.kind;
+      row.seat = e.seat;
+      row.target = e.target;
+      row.amount = e.amount;
+      row.text = e.text;
+      this.state.events.push(row);
+    }
+    while (this.state.events.length > EVENTS_CAP) this.state.events.shift();
+  }
+
   private afterApply(): void {
+    // Capture this reduce's public events ONCE, then clear so a later non-reduce
+    // afterApply (reclaim/leave) can't re-append. Covers human, bot, gentle, AND the
+    // createGame "goes first" event — the engine clears s.events at each reduce start.
+    this.appendEvents(this.engine.events);
+    this.engine.events = [];
     this.forwardReveals();
     this.syncFromEngine();
     if (this.engine.over) {
@@ -527,6 +560,9 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
       this.state.attackSoaker = false;
     }
     this.state.pendingKind = e.pending ? e.pending.kind : "";
+    // The SPECIFIC incoming card kind, so the React banner can name it (the kind is
+    // public; the resulting lost card stays secret). Unconditional → resets to "".
+    this.state.pendingCardKind = e.pending ? (e.pending.support ?? e.pending.big ?? "") : "";
 
     // Mirror the last Splash flip so every client can show the HIT/MISS reveal.
     // ALWAYS project (reset to 0/"" when null) — the WaterFightState instance is

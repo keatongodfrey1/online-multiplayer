@@ -255,8 +255,11 @@ export interface GameState {
   /** The most recent eliminating soak (for the synced end-of-game victory reveal);
    *  null until a player is soaked out. At game-over it names the finishing blow. */
   finalBlow: FinalBlow | null;
-  /** Private peek output of the LAST reduce (forwarded to one seat, not synced). */
+  /** Private peek/lost/drew output of the LAST reduce (forwarded to one seat only). */
   reveals: Reveal[];
+  /** PUBLIC consequential moments of the LAST reduce (the room appends them to the
+   *  synced event stream with a seq). Cleared each reduce, like `reveals`; never saved. */
+  events: GameEvent[];
 }
 
 /** Multi-target spread, pre-declared on a throw; only consumed if the throw lands
@@ -289,18 +292,33 @@ export type Resolution =
   | { kind: "EXTRA"; action: "throw" | "pass"; target?: number; soaker?: boolean }
   | { kind: "DRAW_SPLASH" }; // the attacker flips the Splash Pile for a committed throw
 
+/** A consequential moment, surfaced as a PUBLIC toast on every client. FLAT PRIMITIVES
+ *  ONLY + an engine-built GENERIC `text` — NEVER a Move/Resolution or a card identity
+ *  (those carry secrets; the synced event stream is public to all). Specific secret
+ *  detail (which exact card you lost/drew) goes through the private `Reveal` channel. */
 export interface GameEvent {
-  type: string;
+  /** Routing key for the client (e.g. "damage" | "soak" | "save" | "heal" | "event"
+   *  | "support" | "attack" | "react" | "suddendeath" | "turn" | "draw"). */
+  kind: string;
+  /** Actor seat, or -1 (e.g. a table Event has no actor). */
   seat: number;
-  detail?: unknown;
+  /** Victim/target seat, or -1. */
+  target: number;
+  /** Kind-specific magnitude (damage/heal/draw count); 0 when N/A. */
+  amount: number;
+  /** PUBLIC, GENERIC, pre-built human line (names already substituted). */
+  text: string;
 }
 
 /** A one-shot private reveal (Goggles peek the deck top, Sneaky Peek an opponent's
  *  hand). Produced by a reduce, forwarded by the room to `seat` ONLY — never synced
  *  to everyone. Ephemeral: cleared at the start of the next reduce. */
 export interface Reveal {
-  seat: number; // who may see it (the peeker)
-  kind: "deck-top" | "hand";
+  seat: number; // who may see it (the peeker / the owner of the lost-or-drawn cards)
+  /** "deck-top"/"hand" = peeks (Goggles/Sneaky Peek); "lost"/"drew" = the specific
+   *  cards a ONE-DIRECTIONAL effect removed from / added to YOUR hand (Sabotage,
+   *  Pickpocket, forced discard, Golden/Backpack draw). NEVER used for 2-way swaps. */
+  kind: "deck-top" | "hand" | "lost" | "drew";
   cards: Card[];
   ofSeat?: number; // for kind "hand": whose hand was peeked
 }

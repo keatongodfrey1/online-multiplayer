@@ -74,6 +74,7 @@ export function createGame(
     lastSplash: null,
     finalBlow: null,
     reveals: [],
+    events: [],
   };
 
   // Shuffle the main deck, then deal each NON-first player a 1-card opening
