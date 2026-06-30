@@ -144,6 +144,22 @@ function damageSeat(s: GameState, seat: number, dmg: number): void {
   }
 }
 
+/** Damage a seat and, IF this hit eliminates them (false->true `out` transition,
+ *  so a Lifeguard save or non-fatal hit records nothing), capture the soak as the
+ *  game's `finalBlow` for the victory reveal. `means` is the specific finishing kind
+ *  (attack kind or damaging EventKind); `attacker` is null for an Event kill. */
+function damageAndRecord(
+  s: GameState,
+  victim: number,
+  dmg: number,
+  attacker: number | null,
+  means: string,
+): void {
+  const wasOut = s.players[victim]!.out;
+  damageSeat(s, victim, dmg);
+  if (!wasOut && s.players[victim]!.out) s.finalBlow = { attacker, victim, means };
+}
+
 /** Heal one seat by 1, capped at starting lives (E8). */
 function healSeat(s: GameState, seat: number): void {
   const t = s.players[seat]!;
@@ -167,7 +183,7 @@ function gainTreasure(s: GameState, seat: number, n: number): void {
 /** Table-wide damage. Suppressed entirely in Sudden-Death (E9). Otherwise, if a
  *  single source would soak EVERY living player at once, it triggers Sudden-Death
  *  and clamps each finalist to 1 life instead of wiping the table. */
-function applyTableDamage(s: GameState, dmg: number): void {
+function applyTableDamage(s: GameState, dmg: number, event: EventKind): void {
   if (s.phase === "sudden-death") return; // E9: multi-target/table damage deals nothing
   const living = livingSeats(s);
   const wouldSoak = living.filter((seat) => !handHas(s.players[seat]!, "lifeguard") && s.players[seat]!.lives <= dmg);
@@ -175,7 +191,8 @@ function applyTableDamage(s: GameState, dmg: number): void {
     enterSuddenDeath(s, living);
     return;
   }
-  for (const seat of living) damageSeat(s, seat, dmg);
+  // attacker=null: a table Event has no thrower (the reveal renders it impersonally).
+  for (const seat of living) damageAndRecord(s, seat, dmg, null, event);
 }
 
 /** Enter Sudden-Death (E9): clamp the tied finalists to 1 life. From here only
@@ -217,12 +234,12 @@ function resolveEvent(s: GameState, drawer: number, event: EventKind): void {
     case "heatwave":
     case "downpour":
     case "tidalwave":
-      applyTableDamage(s, 1);
+      applyTableDamage(s, 1, event);
       break;
     case "lightning":
     case "targetedstorm": {
       const leader = leaderByLives(s); // anti-snowball: the life leader takes 1
-      if (leader !== null) damageSeat(s, leader, 1);
+      if (leader !== null) damageAndRecord(s, leader, 1, null, event); // Event kill: no thrower
       break;
     }
     case "sunbreak":
@@ -533,7 +550,9 @@ function resolveTarget(s: GameState, hit: boolean): void {
   const tSeat = currentTarget(atk);
   // E9: in Sudden-Death, multi-target attacks deal no damage (single-target only).
   const suppressed = s.phase === "sudden-death" && atk.targets.length > 1;
-  if (hit && !suppressed) damageSeat(s, tSeat, atk.damage);
+  // attacker is atk.attackerSeat post-swap (a pre-flip Water Trap may make the
+  // reactor the attacker, so attacker === victim self-soaks are legal).
+  if (hit && !suppressed) damageAndRecord(s, tSeat, atk.damage, atk.attackerSeat, atk.kind);
   else s.log.push(`attack on ${who(s, tSeat)} ${hit ? "suppressed (Sudden-Death AoE)" : "missed"}`);
   nextTargetOrFinish(s);
 }

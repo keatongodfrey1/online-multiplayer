@@ -49,6 +49,13 @@ const isBool = (x: unknown): x is boolean => typeof x === "boolean";
 const intIn = (x: unknown, lo: number, hi: number): x is number => isInt(x) && x >= lo && x <= hi;
 
 const ATTACK_KINDS = new Set(["basic", "flashflood", "mega", "giant", "golden"]);
+/** Valid `finalBlow.means`: the attack kinds plus ONLY the 7 damaging Event kinds
+ *  (the other 12 events never soak anyone). Guards the synced victory reveal against
+ *  a tampered/legacy save rendering a bogus finishing card. */
+const FINAL_BLOW_MEANS = new Set([
+  ...ATTACK_KINDS,
+  "mudslide", "stormsurge", "heatwave", "downpour", "tidalwave", "lightning", "targetedstorm",
+]);
 const AWAIT_KINDS = new Set(["MOVE", "REACT", "DEFEND", "ATTACKER_RESPOND", "DISCARD", "EXTRA_THROW", "SPLASH_DRAW", "GAME_OVER"]);
 const PENDING_KINDS = new Set(["THROW", "PLAY_BIG", "SUPPORT"]);
 const BIG_KINDS = new Set(["mega", "giant", "golden"]);
@@ -156,6 +163,7 @@ function rebuildEngine(e: unknown): GameState {
   const pending = rebuildPending(e.pending, players.length);
   const pendingFlip = rebuildPendingFlip(e.pendingFlip, players.length);
   const lastSplash = rebuildLastSplash(e.lastSplash, players.length);
+  const finalBlow = rebuildFinalBlow(e.finalBlow, players.length);
 
   need(isInt(e.turnCount) && e.turnCount >= 0, "turnCount");
   need(isBool(e.over), "over");
@@ -226,6 +234,7 @@ function rebuildEngine(e: unknown): GameState {
     endReason: (e.endReason ?? null) as GameState["endReason"],
     log: (e.log as unknown[]).filter(isStr).slice(-200) as string[],
     lastSplash,
+    finalBlow,
     reveals: [], // peeks are ephemeral; never resumed from a save
   } as unknown as GameState;
   return state;
@@ -328,6 +337,17 @@ function rebuildLastSplash(ls: unknown, n: number): GameState["lastSplash"] {
     target: ls.target as number,
     verdict: ls.verdict as "hit" | "miss",
   };
+}
+
+/** Rebuild the end-of-game `finalBlow` (cosmetic reveal metadata). Coerce to null on
+ *  ANY mismatch — never reject the load, but never render a bogus killer either. */
+function rebuildFinalBlow(fb: unknown, n: number): GameState["finalBlow"] {
+  if (fb == null || !isObj(fb)) return null;
+  const attacker = fb.attacker;
+  if (!(attacker === null || intIn(attacker, 0, n - 1))) return null;
+  if (!intIn(fb.victim, 0, n - 1)) return null;
+  if (!(isStr(fb.means) && FINAL_BLOW_MEANS.has(fb.means))) return null;
+  return { attacker: attacker as number | null, victim: fb.victim as number, means: fb.means as string };
 }
 
 function clampInt(x: unknown, lo: number, hi: number): number {

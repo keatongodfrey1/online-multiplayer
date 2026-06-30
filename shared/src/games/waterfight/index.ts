@@ -25,6 +25,9 @@ export const WaterFightMsg = {
   /** Server -> ONE client: a private peek (Goggles / Sneaky Peek). Payload:
    *  { kind: "deck-top" | "hand", ofSeat: number, cards: {id,kind}[] }. */
   REVEAL: "waterfight/reveal",
+  /** Any seated player, during the end-of-game reveal beat: advance to the standings
+   *  screen now (otherwise a server timer auto-advances). No payload. */
+  CONTINUE: "waterfight/continue",
 } as const;
 
 /**
@@ -73,6 +76,30 @@ export class WaterFightCard extends Schema {
 
 @entity
 export class WaterFightPlayer extends BasePlayer {}
+
+/** The end-of-game "result reveal" beat: while `pending` is true the game is over
+ *  in the engine but the room holds `phase=PLAYING` for a moment so the view can show
+ *  who won / why / the finishing blow before the framework standings screen takes
+ *  over. All PUBLIC (the outcome is public). Nested in its own schema to keep
+ *  WaterFightState under the per-structure field cap. */
+export class WaterFightResult extends Schema {
+  /** The beat is in progress (game over, phase still PLAYING). */
+  @type("boolean") pending = false;
+  /** Engine seat of the winner (meaningful only when !draw). */
+  @type("uint8") winnerSeat = 0;
+  /** No single winner (turn cap with no survivor edge). */
+  @type("boolean") draw = false;
+  /** "last-standing" | "cap" | "draw". */
+  @type("string") endKind = "";
+  /** The finishing blow (for the named reveal line). -1 attacker = none/Event. */
+  @type("int8") blowAttacker = -1;
+  @type("uint8") blowVictim = 0;
+  /** The specific finishing kind: an attack kind or a damaging EventKind ("" = none). */
+  @type("string") blowMeans = "";
+  /** Epoch ms the beat auto-advances (cosmetic countdown; the server timer is
+   *  authoritative). */
+  @type("float64") deadline = 0;
+}
 
 /** One seat's public status, plus the owner-only hand. */
 export class WaterFightSeat extends Schema {
@@ -144,6 +171,9 @@ export class WaterFightState extends BaseState {
   // ---- phase / progress ----
   @type("boolean") suddenDeath = false;
   @type("uint16") turnCount = 0;
+
+  /** End-of-game reveal beat (see WaterFightResult). */
+  @type(WaterFightResult) result = new WaterFightResult();
 
   // ---- timers ----
   @type("uint16") turnSeconds = 0;

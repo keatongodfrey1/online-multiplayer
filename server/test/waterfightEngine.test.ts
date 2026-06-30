@@ -115,6 +115,45 @@ describe("water fight engine: setup", () => {
   });
 });
 
+describe("water fight engine: finalBlow (end-of-game reveal)", () => {
+  it("a basic-throw kill records { attacker, victim, means:'basic' }", () => {
+    const g = game(2, 5);
+    g.players[1]!.lives = 1;
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, []);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.ok(r.state.over, "the soak ended the game");
+    assert.deepEqual(r.state.finalBlow, { attacker: 0, victim: 1, means: "basic" });
+  });
+
+  it("a Lifeguard save records NO finalBlow (the `out` flag never flipped)", () => {
+    const g = game(2, 5);
+    g.players[1]!.lives = 1;
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, ["lifeguard"]);
+    forceSplash(g, "hit");
+    let r = applyMove(g, { kind: "THROW", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "pass" });
+    assert.equal(r.state.finalBlow, null, "a save is not a soak");
+    assert.equal(r.state.players[1]!.lives, 1, "bounced to 1 life");
+    assert.ok(!r.state.over, "the game continues");
+  });
+
+  it("an Event kill records the event kind with attacker null (no thrower)", () => {
+    const g = game(2, 5);
+    g.players[0]!.lives = 1;
+    g.players[1]!.lives = 1;
+    setHand(g, 1, []);
+    injectTopEvent(g, "lightning"); // seat 1's opening draw soaks the life-leader
+    const r = applyMove(g, { kind: "END_TURN" }); // seat 0 ends -> seat 1 draws it
+    assert.ok(r.state.over, "lightning soaked the last finalist");
+    assert.equal(r.state.finalBlow?.attacker, null, "an Event has no attacker");
+    assert.equal(r.state.finalBlow?.means, "lightning");
+  });
+});
+
 describe("water fight engine: combat", () => {
   it("splash MISS ends the attack with no damage; turn advances", () => {
     const g = game(2, 5);
