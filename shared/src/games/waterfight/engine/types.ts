@@ -165,6 +165,17 @@ export interface SplashReveal {
   verdict: SplashCard;
 }
 
+/** The soak that ended the game (for the synced victory reveal). `means` is the
+ *  SPECIFIC finishing kind so the client can name it: an attack kind ("basic" |
+ *  "mega" | "giant" | "golden" | "flashflood") or a damaging EventKind. `attacker`
+ *  is null for an Event kill (no player threw it). Overwritten on every soak, so at
+ *  game-over it holds the eliminating blow. */
+export interface FinalBlow {
+  attacker: number | null;
+  victim: number;
+  means: string;
+}
+
 /** The dedicated attack state machine's persistent state (Issue 1bA). */
 export interface AttackState {
   attackerSeat: number;
@@ -241,6 +252,9 @@ export interface GameState {
   /** The most recent Splash flip (for the synced HIT/MISS reveal); null until the
    *  first throw flips. */
   lastSplash: SplashReveal | null;
+  /** The most recent eliminating soak (for the synced end-of-game victory reveal);
+   *  null until a player is soaked out. At game-over it names the finishing blow. */
+  finalBlow: FinalBlow | null;
   /** Private peek output of the LAST reduce (forwarded to one seat, not synced). */
   reveals: Reveal[];
 }

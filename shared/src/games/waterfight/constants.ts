@@ -4,7 +4,7 @@
 // engine imports these from `../constants.js`; the schema index re-exports them.
 
 // Type-only imports erase at runtime, so constants.ts stays engine-free.
-import type { CardKind, StackId } from "./engine/types.js";
+import type { CardKind, EventKind, StackId } from "./engine/types.js";
 
 /** Coins earned by selling each kind at the shop (D4 economy). */
 export const COIN_VALUES = { balloon: 1, treasure: 2, wild: 5 } as const;
@@ -62,4 +62,18 @@ export const CARD_INFO: Record<CardKind, CardInfo> = {
   giant: { label: "🗿 Giant", desc: "Big attack — deals 2 damage, needs 1 block to stop.", stack: "attack" },
   soaker: { label: "🚿 Soaker", desc: "Add to a throw so the target's Miss blocks don't count.", stack: "attack" },
   flashflood: { label: "🌧 Flash Flood", desc: "Soak every opponent for 2 (each can block once).", stack: "attack" },
+};
+
+/** Friendly labels for the EventKinds that can be a finishing blow (they deal
+ *  damage via `damageSeat`). The other 12 events never soak anyone, so they can
+ *  never be a `finalBlow.means` — omitting them keeps the save whitelist tight.
+ *  The end-of-game reveal maps a `finalBlow.means` of one of these to its label. */
+export const EVENT_LABELS: Partial<Record<EventKind, string>> = {
+  mudslide: "🌊 Mudslide",
+  stormsurge: "🌊 Storm Surge",
+  heatwave: "☀️ Heatwave",
+  downpour: "🌧️ Downpour",
+  tidalwave: "🌊 Tidal Wave",
+  lightning: "⚡ Lightning",
+  targetedstorm: "⚡ Targeted Storm",
 };

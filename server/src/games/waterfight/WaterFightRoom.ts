@@ -56,7 +56,12 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
   private ghost: Policy = new WF.RandomPolicy(1);
   public botBrains = new Map<string, Policy>();
   public botDelayMs = 700;
+  /** How long the end-of-game "result reveal" beat holds before auto-advancing to
+   *  the standings screen (public so tests can shorten it, like botDelayMs). */
+  public revealHoldMs = 10_000;
   private autoTimer?: Delayed;
+  /** Auto-advance timer for the result-reveal beat (a player tap can advance early). */
+  private resultTimer?: Delayed;
   private seedOption?: number;
   /** The @view() hand array each session currently has granted. */
   private grantedHands = new Map<string, ReturnType<() => WaterFightSeat["hand"]>>();
@@ -73,6 +78,7 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
     this.onMessage(WaterFightMsg.MOVE, (client, payload) => this.handleMove(client, payload));
     this.onMessage(WaterFightMsg.RESOLVE, (client, payload) => this.handleResolve(client, payload));
     this.onMessage(WaterFightMsg.CONFIG, (client, payload) => this.handleConfig(client, payload));
+    this.onMessage(WaterFightMsg.CONTINUE, (client) => this.handleContinue(client));
   }
 
   // ---- start / rematch ----------------------------------------------------
@@ -255,10 +261,44 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
     this.forwardReveals();
     this.syncFromEngine();
     if (this.engine.over) {
-      this.finishGame();
+      // Hold phase=PLAYING for a beat so the view can show who won / why / the
+      // finishing blow BEFORE the framework swaps to the standings screen. Arm once.
+      if (!this.state.result.pending) this.beginResultReveal();
       return;
     }
     this.scheduleAuto();
+  }
+
+  /** Enter the end-of-game reveal beat: project the outcome to the synced `result`
+   *  sub-object, keep phase=PLAYING, and arm the auto-advance timer (a Continue tap
+   *  can flip early). The engine is already `over`, so every input/auto path no-ops. */
+  private beginResultReveal(): void {
+    this.autoTimer?.clear();
+    this.autoTimer = undefined;
+    this.state.actionDeadline = 0;
+    const e = this.engine;
+    const r = this.state.result;
+    r.pending = true;
+    r.draw = e.winner === null;
+    r.winnerSeat = e.winner ?? 0;
+    r.endKind = e.winner === null ? "draw" : (e.endReason ?? "");
+    // A turn-cap end has no finishing soak; otherwise name the eliminating blow.
+    const fb = e.endReason === "cap" ? null : e.finalBlow;
+    r.blowAttacker = fb?.attacker ?? -1;
+    r.blowVictim = fb?.victim ?? 0;
+    r.blowMeans = fb?.means ?? "";
+    r.deadline = Date.now() + this.revealHoldMs; // cosmetic; resultTimer is authoritative
+    this.resultTimer = this.clock.setTimeout(() => this.finishGame(), this.revealHoldMs);
+  }
+
+  /** Any seated player advances the reveal beat to the standings screen now. */
+  private handleContinue(client: Client): void {
+    if (this.state.phase !== Phase.PLAYING || !this.engine || !this.engine.over) return;
+    if (!this.state.result.pending) return;
+    if (this.engineSeatOf(client.sessionId) < 0) return; // seated players only (no spectators/bots)
+    this.resultTimer?.clear();
+    this.resultTimer = undefined;
+    this.finishGame();
   }
 
   /** Deliver this reduce's private peeks to their owners only (Goggles / Sneaky
@@ -279,8 +319,11 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
   }
 
   private finishGame(): void {
+    this.resultTimer?.clear();
+    this.resultTimer = undefined;
     this.autoTimer?.clear();
     this.autoTimer = undefined;
+    if (this.state.phase !== Phase.PLAYING) return; // idempotent: a Continue/timer race no-ops the 2nd
     const w = this.engine.winner;
     if (w !== null && w >= 0) this.endGame(this.winBySeat(this.frameworkSeatByEngineSeat[w] ?? w));
     else this.endGame(EndReason.DRAW);
@@ -497,6 +540,12 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
     this.state.suddenDeath = e.phase === "sudden-death";
     this.state.turnCount = e.turnCount;
 
+    // Reset the end-of-game reveal fields while the game is live (the State + its
+    // `result` sub-object are reused across games — a stale result would otherwise
+    // leak into a rematch and stop beginResultReveal from re-arming). When `over`,
+    // leave them intact so the active beat (set by beginResultReveal) survives a sync.
+    if (!e.over) this.resetResultFields();
+
     if (this.state.log.length !== Math.min(e.log.length, LOG_CAP) || e.log.length === 0) {
       this.state.log.clear();
       for (const line of e.log.slice(-LOG_CAP)) this.state.log.push(line);
@@ -507,6 +556,20 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
         for (const line of tail) this.state.log.push(line);
       }
     }
+  }
+
+  /** Zero every end-of-game reveal field (the single edit point if one is added).
+   *  Called every live sync so a prior game can't leak into a rematch. */
+  private resetResultFields(): void {
+    const r = this.state.result;
+    r.pending = false;
+    r.deadline = 0;
+    r.endKind = "";
+    r.draw = false;
+    r.winnerSeat = 0;
+    r.blowAttacker = -1;
+    r.blowVictim = 0;
+    r.blowMeans = "";
   }
 
   // ---- lifecycle hooks ----------------------------------------------------
@@ -567,11 +630,17 @@ export class WaterFightRoom extends BaseGameRoom<WaterFightState> {
   protected override onGameEnded(): void {
     this.autoTimer?.clear();
     this.autoTimer = undefined;
+    // Clear the reveal beat on EVERY end path — incl. framework abandon, which flips
+    // phase directly without going through finishGame and could leave a timer armed.
+    this.resultTimer?.clear();
+    this.resultTimer = undefined;
     this.lastReveal.clear();
     this.state.actionDeadline = 0;
     this.state.currentTurn = "";
     this.state.awaitingKind = "";
     this.state.awaitingSeats.clear();
     this.state.attackActive = false;
+    this.state.result.pending = false;
+    this.state.result.deadline = 0;
   }
 }

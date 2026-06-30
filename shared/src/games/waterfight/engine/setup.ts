@@ -72,6 +72,7 @@ export function createGame(
     endReason: null,
     log: [],
     lastSplash: null,
+    finalBlow: null,
     reveals: [],
   };
 

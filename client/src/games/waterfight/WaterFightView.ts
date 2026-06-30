@@ -9,6 +9,7 @@ import {
   type BaseState,
   CARD_INFO,
   COIN_VALUES,
+  EVENT_LABELS,
   LobbyMsg,
   Phase,
   WaterFightMsg,
@@ -61,6 +62,14 @@ const cardEmoji = (kind: string): string => cardLabel(kind).split(" ")[0] ?? "�
 const cardName = (kind: string): string => cardLabel(kind).split(" ").slice(1).join(" ") || kind;
 /** Which shop stack a card belongs to → drives the card-tile category color band. */
 const cardCategory = (kind: string): string => CARD_INFO[kind as keyof typeof CARD_INFO]?.stack ?? "basic";
+/** Friendly name for a finishing-blow `means` (an attack kind or a damaging Event).
+ *  CARD_INFO keys a plain throw as `balloon`, not `basic`, so remap it; events use
+ *  EVENT_LABELS; anything unmapped falls back to a generic "an Event". */
+const getMeansLabel = (means: string): string => {
+  if (means === "basic") return "a water balloon";
+  if (CARD_INFO[means as keyof typeof CARD_INFO]) return cardName(means);
+  return EVENT_LABELS[means as keyof typeof EVENT_LABELS] ?? "an Event";
+};
 const NUDGE_KEY = "waterfight-card-hint-seen";
 
 // In-game styles only (injected by mount(), present during PLAYING). The lobby
@@ -93,6 +102,17 @@ const STYLE = `
 .wf-splash.hit { background: #3a1d22; border: 1px solid var(--danger); }
 .wf-splash.miss { background: #1d2740; border: 1px solid var(--accent); }
 @keyframes wf-pop { from { transform: scale(0.82); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.wf-result-host:empty { display: none; }
+.wf-result-backdrop { position: fixed; inset: 0; z-index: 95; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(10, 12, 20, 0.74); animation: wf-fade 0.25s ease-out; }
+@keyframes wf-fade { from { opacity: 0; } to { opacity: 1; } }
+.wf-result-card { max-width: 460px; width: 100%; background: var(--card); border: 1px solid #353a4f; border-top: 5px solid var(--accent); border-radius: 16px; padding: 26px 22px; text-align: center; color: var(--text); box-shadow: 0 18px 50px #000a; animation: wf-pop 0.3s ease-out; }
+.wf-rs-title { font-size: 26px; font-weight: 800; margin-bottom: 6px; }
+.wf-rs-reason { font-size: 15px; color: var(--muted); margin-bottom: 12px; }
+.wf-rs-sudden { font-size: 13px; font-weight: 700; color: var(--warn); margin-bottom: 10px; }
+.wf-rs-blow { font-size: 15px; color: var(--text); background: #191c28; border: 1px solid #353a4f; border-radius: 10px; padding: 10px 12px; margin: 0 0 16px; }
+.wf-rs-sub { font-size: 13px; color: var(--muted); margin: 0 0 16px; }
+.wf-rs-go { min-height: 48px; min-width: 160px; padding: 12px 22px; font-size: 16px; font-weight: 700; border: none; border-radius: 12px; background: var(--accent); color: #fff; cursor: pointer; }
+.wf-rs-go:hover { background: var(--accent-press); }
 .wf-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); margin: 2px 0 -2px; }
 .wf-seats { display: flex; flex-wrap: wrap; gap: 10px; }
 .wf-seat { flex: 1 1 140px; border: 1px solid #353a4f; border-radius: 12px; padding: 10px 12px; min-width: 130px; background: var(--card); }
@@ -229,7 +249,7 @@ export class WaterFightView implements GameView {
     this.room = room as unknown as Room<any, WaterFightState>;
     this.ctx = ctx;
     this.lastSeenSplashSeq = this.room.state.lastSplashSeq ?? 0; // seed BEFORE first render
-    root.innerHTML = `<style>${STYLE}</style><div class="wf-splash-host"></div><div class="wf-modal-host"></div><div class="wf"></div>`;
+    root.innerHTML = `<style>${STYLE}</style><div class="wf-splash-host"></div><div class="wf-modal-host"></div><div class="wf-result-host"></div><div class="wf"></div>`;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
     this.room.onMessage(WaterFightMsg.REVEAL, (payload: { kind: string; ofSeat: number; cards: { id: number; kind: string }[] }) => {
@@ -305,6 +325,9 @@ export class WaterFightView implements GameView {
       case "draw":
         room.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
         return;
+      case "continue":
+        room.send(WaterFightMsg.CONTINUE, {});
+        return;
       case "end":
         room.send(WaterFightMsg.MOVE, { kind: "END_TURN" });
         return;
@@ -369,6 +392,7 @@ export class WaterFightView implements GameView {
       this.showRules = false;
       this.renderSplash();
       this.renderModal();
+      this.renderResult(state);
       return;
     }
     this.detectSplash(state);
@@ -389,7 +413,7 @@ export class WaterFightView implements GameView {
 
     const isHost = state.hostSessionId === this.ctx.mySessionId;
     const header = `<div class="wf-head">${this.renderBanner(state, myMoment)}<div class="wf-controls">${
-      isHost ? `<button class="wf-ic" data-act="save" title="Save game">💾</button>` : ""
+      isHost && !state.result.pending ? `<button class="wf-ic" data-act="save" title="Save game">💾</button>` : ""
     }<button class="wf-ic" data-act="mute" title="Sound">${isMuted() ? "🔕" : "🔔"}</button>` +
       `<button class="wf-ic help" data-act="rules" title="How to play">❓</button></div></div>`;
 
@@ -414,6 +438,63 @@ export class WaterFightView implements GameView {
     wrap.innerHTML = `<div class="wf-main">${main}</div><div class="wf-side">${side}</div>`;
     this.renderSplash();
     this.renderModal();
+    this.renderResult(state);
+  }
+
+  /** Paint the end-of-game victory overlay into its guarded host. Splash-first: hold
+   *  the overlay back while a final HIT/MISS splash is still on screen (only a basic
+   *  throw ever arms one; every other kill paints immediately). The splash timer's
+   *  re-render calls us again when it clears. Level-driven (result.pending), so a
+   *  mid-beat refresh reconstructs it. */
+  private renderResult(state: WaterFightState): void {
+    const host = this.root?.querySelector<HTMLElement>(".wf-result-host");
+    if (!host) return;
+    const r = state.result;
+    const show = state.phase === Phase.PLAYING && r.pending && !this.splashReveal;
+    const key = show ? `${r.winnerSeat}|${r.endKind}|${r.draw ? "d" : ""}` : "";
+    if (host.dataset.key === key) return; // unchanged — don't restart the animation
+    host.dataset.key = key;
+    if (!show) { host.innerHTML = ""; return; }
+    host.innerHTML = this.renderResultOverlay(state);
+    host.querySelector<HTMLElement>(".wf-rs-go")?.focus(); // a11y: focus Continue once on paint
+  }
+
+  private renderResultOverlay(state: WaterFightState): string {
+    const r = state.result;
+    const seats = [...state.seats];
+    const nick = (seat: number): string => escapeHtml(seats.find((s) => s.seat === seat)?.nickname ?? `Seat ${seat + 1}`);
+    const title = r.draw ? "It's a draw!" : `👑 ${nick(r.winnerSeat)} wins!`;
+    const reasons: Record<string, string> = {
+      "last-standing": "Last one standing",
+      cap: "Turn limit reached — most hearts wins",
+      draw: "No winner",
+    };
+    const reason = reasons[r.endKind] ?? "";
+    const sudden = state.suddenDeath ? `<div class="wf-rs-sudden">⚡ Sudden-Death decided it</div>` : "";
+    return `<div class="wf-result-backdrop" role="alert" aria-live="polite">
+      <div class="wf-result-card">
+        <div class="wf-rs-title">${title}</div>
+        <div class="wf-rs-reason">${escapeHtml(reason)}</div>
+        ${sudden}
+        ${this.renderBlowLine(state)}
+        <button class="wf-rs-go" data-act="continue" aria-label="Continue to results">Continue →</button>
+      </div>
+    </div>`;
+  }
+
+  /** The "finishing blow" line, naming the card. Impersonal for an Event kill
+   *  (no thrower), special-cased for a bounce self-soak, omitted for a turn-cap end. */
+  private renderBlowLine(state: WaterFightState): string {
+    const r = state.result;
+    if (r.endKind === "cap") return `<div class="wf-rs-sub">(no final soak — the clock ran out)</div>`;
+    if (!r.blowMeans) return "";
+    const seats = [...state.seats];
+    const nick = (seat: number): string => escapeHtml(seats.find((s) => s.seat === seat)?.nickname ?? `Seat ${seat + 1}`);
+    const label = escapeHtml(getMeansLabel(r.blowMeans));
+    const victim = nick(r.blowVictim);
+    if (r.blowAttacker < 0) return `<div class="wf-rs-blow">${victim} was soaked by ${label}</div>`;
+    if (r.blowAttacker === r.blowVictim) return `<div class="wf-rs-blow">${victim}'s attack bounced back and soaked them with ${label}</div>`;
+    return `<div class="wf-rs-blow">${nick(r.blowAttacker)} soaked ${victim} with ${label}</div>`;
   }
 
   /** Paint the dark card-detail / Help modal into its own host node, only when the

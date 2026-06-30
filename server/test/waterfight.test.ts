@@ -48,6 +48,27 @@ describe("water fight save validator", () => {
     // version mismatch
     assert.strictEqual(tamper((b) => (b.engine.engineVersion = "9.9.9")), null, "engine version mismatch rejected");
   });
+
+  it("round-trips a finalBlow and coerces a bogus means to null (cosmetic, never rejects the load)", () => {
+    const overBlob = (means: unknown): any => {
+      const b = JSON.parse(JSON.stringify(validBlob()));
+      b.engine.over = true;
+      b.engine.winner = 0;
+      b.engine.endReason = "last-standing";
+      b.engine.awaiting = { seats: [], kind: "GAME_OVER" };
+      b.engine.players[1].lives = 0;
+      b.engine.players[1].out = true;
+      b.engine.players[1].stormCloud = true; // a normal-play soak becomes a Storm Cloud
+      b.engine.finalBlow = { attacker: 0, victim: 1, means };
+      return b;
+    };
+    const ok = parseSave(overBlob("basic")) as any;
+    assert.ok(ok, "an over-engine blob with a valid finalBlow loads");
+    assert.deepEqual(ok.engine.finalBlow, { attacker: 0, victim: 1, means: "basic" });
+    const ok2 = parseSave(overBlob("<script>")) as any;
+    assert.ok(ok2, "a bogus means still loads (not rejected)");
+    assert.strictEqual(ok2.engine.finalBlow, null, "bogus means coerced to null");
+  });
 });
 
 function makeConfig() {
@@ -74,6 +95,9 @@ describe("water fight room", () => {
     // Turn off the auto-pass timers so the test fully drives every decision.
     room.state.turnSeconds = 0;
     room.state.reactionSeconds = 0;
+    // Shrink the end-of-game reveal beat so tests that drive to a win reach ENDED
+    // quickly via the auto-advance timer (a test observing the beat re-raises it).
+    room.revealHoldMs = 40;
     beforeStart?.(room);
     clients[0]!.send(LobbyMsg.START, {});
     await until(() => room.state.phase === Phase.PLAYING);
@@ -87,7 +111,9 @@ describe("water fight room", () => {
     const bySession = new Map(clients.map((c) => [c.sessionId, c]));
 
     let guard = 0;
-    while (room.state.phase === Phase.PLAYING) {
+    // Drive on the ENGINE (not phase): on game-over the room holds phase=PLAYING for
+    // the reveal beat, so a phase-based loop would run a body with no awaited seat.
+    while (!room.engine.over) {
       assert.ok(++guard < 6000, "game did not terminate");
       const prev = room.engine;
       const seat = prev.awaiting.seats[0]!;
@@ -97,10 +123,12 @@ describe("water fight room", () => {
       } else {
         actor.send(WaterFightMsg.RESOLVE, policy.resolve(prev));
       }
-      await until(() => room.engine !== prev || room.state.phase !== Phase.PLAYING, 5000);
+      await until(() => room.engine !== prev || room.engine.over, 5000);
       assertInvariants(room.engine);
     }
 
+    // The reveal beat holds, then auto-advances (revealHoldMs=40 from startedGame).
+    await until(() => room.state.phase === Phase.ENDED);
     assert.strictEqual(room.state.phase, Phase.ENDED);
     assert.ok(
       room.state.endReason.startsWith(EndReason.WIN_PREFIX) || room.state.endReason === EndReason.DRAW,
@@ -183,6 +211,105 @@ describe("water fight room", () => {
     assert.strictEqual(room.engine.players[0]!.lives, 3, "lives reset");
     assert.strictEqual(room.engine.players[1]!.lives, 3);
     assert.strictEqual(room.state.currentTurn, a.sessionId, "seat 0 starts again");
+  });
+
+  // ---- end-of-game reveal beat ----
+
+  /** Drive seat 0 to soak seat 1 (game over), returning once the engine is over. */
+  async function driveToWin(
+    room: WaterFightRoom,
+    a: { send: (t: string, p: unknown) => void },
+    b: { send: (t: string, p: unknown) => void },
+  ): Promise<void> {
+    room.engine.players[1]!.lives = 1;
+    room.engine.players[0]!.hand = [{ id: 10000, kind: "balloon" }] as never;
+    room.engine.players[1]!.hand = [] as never;
+    room.engine.splashPile = ["hit", "hit"];
+    a.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "SPLASH_DRAW");
+    a.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
+    await until(() => room.engine.awaiting.kind === "DEFEND");
+    b.send(WaterFightMsg.RESOLVE, { kind: "DEFEND", defense: "pass" });
+    await until(() => room.engine.over);
+  }
+
+  it("holds a reveal beat (phase PLAYING) at game-over, then CONTINUE advances to ENDED", async () => {
+    const { room, clients } = await startedGame(3);
+    const [a, b] = clients;
+    room.revealHoldMs = 5000; // observe the beat; CONTINUE will advance it early
+    await driveToWin(room, a!, b!);
+    await until(() => room.state.result.pending);
+    assert.strictEqual(room.state.phase, Phase.PLAYING, "phase held during the beat");
+    assert.ok(room.engine.over, "engine is over while the beat holds");
+    assert.strictEqual(room.state.result.winnerSeat, 0, "winner projected");
+    assert.strictEqual(room.state.result.endKind, "last-standing");
+    assert.strictEqual(room.state.result.blowMeans, "basic", "the finishing card is named");
+    assert.strictEqual(room.state.result.blowAttacker, 0);
+    assert.strictEqual(room.state.result.blowVictim, 1);
+
+    a!.send(WaterFightMsg.CONTINUE, {});
+    await until(() => room.state.phase === Phase.ENDED);
+    assert.ok(room.state.endReason.startsWith(EndReason.WIN_PREFIX), "ended on a win");
+    assert.strictEqual(room.state.result.pending, false, "beat cleared at ENDED");
+  });
+
+  it("auto-advances the reveal beat when nobody taps Continue", async () => {
+    const { room, clients } = await startedGame(3);
+    const [a, b] = clients;
+    room.revealHoldMs = 60; // short timer; NO Continue sent (covers bot/idle tables)
+    await driveToWin(room, a!, b!);
+    await until(() => room.state.phase === Phase.ENDED, 3000);
+    assert.ok(room.state.endReason.startsWith(EndReason.WIN_PREFIX), "ended via the auto-advance timer");
+  });
+
+  it("ignores CONTINUE when there is no reveal beat", async () => {
+    const { room, clients } = await startedGame(3);
+    const before = room.engine;
+    clients[0]!.send(WaterFightMsg.CONTINUE, {}); // game not over -> no-op
+    await sleep(120);
+    assert.strictEqual(room.engine, before, "engine untouched");
+    assert.strictEqual(room.state.phase, Phase.PLAYING, "still playing");
+  });
+
+  it("reconstructs the reveal beat for a player who refreshes mid-beat", async () => {
+    const { room, clients } = await startedGame(3);
+    const [a, b] = clients;
+    room.revealHoldMs = 5000;
+    await driveToWin(room, a!, b!);
+    await until(() => room.state.result.pending);
+    const token = b!.reconnectionToken;
+    const bId = b!.sessionId;
+    await b!.leave(false);
+    await until(() => room.state.players.get(bId)?.connected === false);
+    const b2 = await colyseus.sdk.reconnect(token);
+    const b2State = () => b2.state as unknown as { phase: string; result: { pending: boolean; winnerSeat: number } };
+    await until(() => b2State().result?.pending === true, 5000);
+    assert.strictEqual(b2State().phase, Phase.PLAYING, "reconnector still sees the beat");
+    assert.strictEqual(b2State().result.winnerSeat, 0, "winner synced to the reconnector");
+    b2.send(WaterFightMsg.CONTINUE, {}); // the reconnected client can still advance
+    await until(() => room.state.phase === Phase.ENDED);
+  });
+
+  it("a rematch clears the reveal result fields", async () => {
+    const { room, clients } = await startedGame(3);
+    const [a, b] = clients;
+    await driveToWin(room, a!, b!);
+    await until(() => room.state.phase === Phase.ENDED); // revealHoldMs=40 auto-advances
+    a!.send(LobbyMsg.REMATCH, {});
+    b!.send(LobbyMsg.REMATCH, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    assert.strictEqual(room.state.result.pending, false, "pending reset");
+    assert.strictEqual(room.state.result.endKind, "", "endKind reset");
+    assert.strictEqual(room.state.result.blowMeans, "", "blowMeans reset");
+    assert.strictEqual(room.state.result.blowAttacker, -1, "blowAttacker reset");
+  });
+
+  it("a player leaving below minPlayers ends ABANDONED with no reveal beat", async () => {
+    const { room, clients } = await startedGame(3, 2);
+    await clients[0]!.leave(true); // consented leave -> removed for good -> table < minPlayers
+    await until(() => room.state.phase === Phase.ENDED, 5000);
+    assert.strictEqual(room.state.endReason, EndReason.ABANDONED);
+    assert.strictEqual(room.state.result.pending, false, "abandon skips the reveal beat");
   });
 
   // ---- Phase D: the reaction sub-phase over the wire ----
@@ -549,6 +676,7 @@ describe("water fight room", () => {
     host.send(LobbyMsg.ADD_BOT, {});
     await until(() => room.state.players.size === 2);
     room.botDelayMs = 5;
+    room.revealHoldMs = 5; // auto-advance the reveal beat fast (no human taps Continue)
     room.state.turnSeconds = 0;
     room.state.reactionSeconds = 0;
     host.send(LobbyMsg.START, {});
