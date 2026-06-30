@@ -304,6 +304,25 @@ describe("water fight room", () => {
     assert.strictEqual(room.state.result.blowAttacker, -1, "blowAttacker reset");
   });
 
+  it("a custom lobby dial (startingLives) persists across a rematch", async () => {
+    // Guards that the rematch flow does NOT reset the game's lobby dials: they
+    // live on the reused State and onGameStart re-reads them (a smoke-test scare
+    // that turned out to be a hand-count misread for lives — keep it honest).
+    const { room, clients } = await startedGame(3, 2, (r) => {
+      r.state.startingLives = 1; // non-default (the default is 3)
+    });
+    const [a, b] = clients;
+    assert.strictEqual(room.engine.players[0]!.lives, 1, "game 1 honored the dial");
+    await driveToWin(room, a!, b!);
+    await until(() => room.state.phase === Phase.ENDED);
+    a!.send(LobbyMsg.REMATCH, {});
+    b!.send(LobbyMsg.REMATCH, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    assert.strictEqual(room.state.startingLives, 1, "the dial value is still on the state");
+    assert.strictEqual(room.engine.players[0]!.lives, 1, "rematch honored the persisted dial, not the default 3");
+    assert.strictEqual(room.engine.players[1]!.lives, 1);
+  });
+
   it("a player leaving below minPlayers ends ABANDONED with no reveal beat", async () => {
     const { room, clients } = await startedGame(3, 2);
     await clients[0]!.leave(true); // consented leave -> removed for good -> table < minPlayers
