@@ -847,7 +847,7 @@ button.spl-gem.selected {
 }
 
 .catan-board-wrap > div {
-  width: min(100vw, 640px);
+  width: min(100vw, 780px); /* tablets: a bigger board (was 640) */
 }
 
 .catan-svg {
@@ -858,9 +858,12 @@ button.spl-gem.selected {
   touch-action: manipulation;
 }
 
+/* The board is height-gated, so raising max-height is what actually makes it
+   bigger on a landscape tablet (a wider width cap alone just letterboxes). The
+   panels below stay a tidy column (no #app widen) so they don't stretch sparse. */
 @media (orientation: landscape) {
   .catan-svg {
-    max-height: 70vh;
+    max-height: 75vh;
   }
 }
 
@@ -1274,6 +1277,15 @@ button.spl-gem.selected {
 }
 .sc-icon-btn {
   padding: 2px 8px;
+}
+/* Space Chase has no #app override, so it was stuck in the 480px phone column.
+   Widen it on tablets (fluid 96vw, capped) so the board + side panel fill the
+   screen. NOT zoomed: the board positions rockets/portals with getBoundingClientRect
+   pixel math (a ResizeObserver recomputes them when the board grows), which CSS
+   zoom would corrupt. The 960 cap bounds the board width, so its aspect-ratio
+   height stays within any iPad's height. */
+#app:has(.sc) {
+  max-width: min(960px, 96vw);
 }
 .sc-main {
   display: flex;
