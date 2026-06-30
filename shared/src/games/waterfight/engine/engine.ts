@@ -402,7 +402,7 @@ function applySupport(s: GameState, seat: number, support: SupportKind, target?:
   );
   switch (support) {
     case "firstaid":
-      p.lives = Math.min(s.options.startingLives, p.lives + 1); // E8: cap at starting lives
+      healSeat(s, seat); // E8: caps at starting lives + emits the +1 ❤️ heal event
       return;
     case "backpack": {
       const before = p.hand.length;

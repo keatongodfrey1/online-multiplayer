@@ -298,7 +298,7 @@ export type Resolution =
  *  detail (which exact card you lost/drew) goes through the private `Reveal` channel. */
 export interface GameEvent {
   /** Routing key for the client (e.g. "damage" | "soak" | "save" | "heal" | "event"
-   *  | "support" | "attack" | "suddendeath" | "turn" | "draw" | "autopass"). */
+   *  | "support" | "attack" | "react" | "suddendeath" | "turn" | "draw"). */
   kind: string;
   /** Actor seat, or -1 (e.g. a table Event has no actor). */
   seat: number;

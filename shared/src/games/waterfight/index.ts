@@ -108,7 +108,7 @@ export class WaterFightEvent extends Schema {
   /** Room-owned monotonic id; the client toasts each `seq` once (primed on mount). */
   @type("uint32") seq = 0;
   /** Routing key ("damage"|"soak"|"save"|"heal"|"event"|"support"|"attack"|"react"
-   *  |"draw"|"suddendeath"|"turn"|"autopass"). */
+   *  |"draw"|"suddendeath"|"turn"). */
   @type("string") kind = "";
   /** Actor seat, or -1. */
   @type("int8") seat = -1;

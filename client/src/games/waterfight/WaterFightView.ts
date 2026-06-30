@@ -31,10 +31,13 @@ const SPLASH_REVEAL_MS = 2600;
 const EVENT_BURST_SKIP = 10;
 /** How long each queued toast shows before the next (flashToast is a singleton). */
 const TOAST_MS = 1500;
+/** Max pending toasts — bots act faster than TOAST_MS, so an unbounded queue would lag
+ *  arbitrarily far behind real state; keep only the most recent few (older ones are stale). */
+const TOAST_QUEUE_MAX = 3;
 /** Per-reduce headline priority — one toast per reduce shows the highest-priority event,
  *  so a multi-target moment (Flash Flood: attack + N damage) collapses to one summary. */
 const EVENT_PRIORITY: Record<string, number> = {
-  suddendeath: 9, event: 8, attack: 7, autopass: 6, turn: 6, save: 5, soak: 5,
+  suddendeath: 9, event: 8, attack: 7, turn: 6, save: 5, soak: 5,
   support: 4, react: 4, draw: 3, heal: 2, damage: 1,
 };
 const wfTurnLabel = (blob: any): number => (blob?.engine?.turnCount ?? 0) + 1;
@@ -250,6 +253,9 @@ export class WaterFightView implements GameView {
   private lastSeenSplashSeq = 0;
   /** Highest event-stream seq toasted — primed on mount (no replay on reconnect). */
   private lastEventSeq = 0;
+  /** Last private-reveal payload already toasted (kind + card ids) — so a reconnect
+   *  re-send of the same "you lost X" doesn't re-fire the toast as if it were fresh. */
+  private lastRevealToastKey = "";
   /** Toast queue (flashToast overwrites, so we show queued toasts one at a time). */
   private toastQueue: string[] = [];
   private toastTimer?: ReturnType<typeof setTimeout>;
@@ -275,9 +281,15 @@ export class WaterFightView implements GameView {
       if (!this.root) return; // ignore if this view has since unmounted
       this.reveal = payload;
       // Private specifics (your own lost/drawn cards) → a private toast only you see.
+      // The server re-sends the last reveal on reconnect to restore the panel; dedupe by
+      // payload so a refresh doesn't re-toast a stale "you lost X" as if it were fresh.
       if (payload.kind === "lost" || payload.kind === "drew") {
-        const names = payload.cards.map((c) => cardName(c.kind)).join(", ");
-        if (names) this.enqueueToast(payload.kind === "lost" ? `😖 You lost: ${names}` : `🎁 You drew: ${names}`);
+        const key = `${payload.kind}:${payload.cards.map((c) => c.id).sort().join(",")}`;
+        if (key !== this.lastRevealToastKey) {
+          this.lastRevealToastKey = key;
+          const names = payload.cards.map((c) => cardName(c.kind)).join(", ");
+          if (names) this.enqueueToast(payload.kind === "lost" ? `😖 You lost: ${names}` : `🎁 You drew: ${names}`);
+        }
       }
       this.render();
     });
@@ -320,6 +332,11 @@ export class WaterFightView implements GameView {
 
   private enqueueToast(text: string): void {
     this.toastQueue.push(text);
+    // Cap the backlog: if reduces arrive faster than toasts drain (bots, cascades), drop
+    // the oldest so toasts track recent state instead of lagging minutes behind.
+    if (this.toastQueue.length > TOAST_QUEUE_MAX) {
+      this.toastQueue.splice(0, this.toastQueue.length - TOAST_QUEUE_MAX);
+    }
     if (!this.toastTimer) this.pumpToast();
   }
 

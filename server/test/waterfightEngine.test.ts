@@ -188,6 +188,27 @@ describe("water fight engine: event stream + two-tier secrecy", () => {
     assert.strictEqual(lost!.cards.length, 2, "the 2 discarded cards are named privately to the victim");
   });
 
+  it("Golden draw: the PUBLIC event never names the 2 drawn cards; the drawer learns them privately", () => {
+    const g = game(3, 5); // 3p so a soak does not end the game
+    g.players[0]!.hand.push({ id: 10000, kind: "golden" });
+    setHand(g, 1, ["umbrella"]);
+    // Stack the deck so the 2 Golden draws are KNOWN kinds (drawMainCard pops the tail).
+    g.mainDeck.push({ id: 20001, kind: "mega" }, { id: 20002, kind: "giant" });
+    let r = applyMove(g, { kind: "PLAY_BIG", big: "golden", target: 1 });
+    r = applyResolution(r.state, { kind: "DEFEND", defense: "umbrella" }); // afterAttack draws 2
+    const pub = r.state.events.find((e) => e.kind === "draw" && e.seat === 0);
+    assert.ok(pub, "a public draw event fired (the COUNT is public)");
+    for (const drawn of ["mega", "giant"]) {
+      assert.ok(!r.state.events.some((e) => mentions(e.text, drawn)), `public events leaked the drawn card "${drawn}"`);
+    }
+    const drew = r.state.reveals.find((rv) => rv.kind === "drew" && rv.seat === 0);
+    assert.ok(drew, "the drawer gets a private 'drew' reveal");
+    assert.ok(
+      drew!.cards.some((c) => c.kind === "mega") && drew!.cards.some((c) => c.kind === "giant"),
+      "the 2 drawn cards are named privately to the drawer only",
+    );
+  });
+
   it("cardSwap and switcheroo emit NO lost/drew reveal (2-way swaps are excluded)", () => {
     for (const support of ["cardswap", "switcheroo"] as const) {
       const g = game(2, 5);

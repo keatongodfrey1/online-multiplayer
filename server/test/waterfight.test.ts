@@ -450,6 +450,7 @@ describe("water fight room", () => {
     c0.send(LobbyMsg.START, {});
     await until(() => room2.state.phase === Phase.PLAYING);
     assert.strictEqual(room2.engine.turnCount, savedTurnCount, "resumed at the saved turn");
+    assert.deepStrictEqual(room2.engine.events, [], "the event stream is ephemeral — never resumed from a save");
     assertInvariants(room2.engine);
   });
 
@@ -828,5 +829,13 @@ describe("water fight room", () => {
     host.send(WaterFightMsg.MOVE, { kind: "END_TURN" });
     await until(() => room.engine !== beforeBot && room.engine.turnSeat === 0, 8000);
     assert.ok(room.engine.turnCount >= 1, "the bot took at least one turn unattended");
+    // The bot path applies the engine through the same funnel, so its moves MUST also
+    // feed the synced event stream (bots bypass sanitize and per-site patches alike).
+    const events = [...room.state.events];
+    assert.ok(events.length > 0, "the bot's unattended turn emitted public events");
+    assert.ok(
+      events.some((e) => e.kind === "turn" || e.kind === "attack"),
+      "the bot's turn/attack surfaced on the public stream",
+    );
   });
 });
