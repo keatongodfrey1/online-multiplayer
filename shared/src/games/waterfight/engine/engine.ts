@@ -31,6 +31,14 @@ import {
 
 const STACK_IDS: readonly StackId[] = WF_STACK_IDS;
 
+/** PUBLIC display name for each blind shop stack (the stack is public; the bought card
+ *  is not) — used in the generic "buys from the …" event text. */
+const STACK_NAMES: Record<StackId, string> = {
+  defense: "Defense Depot",
+  mischief: "Mischief Market",
+  attack: "Attack Arsenal",
+};
+
 /** Log-friendly player name for a seat index — falls back to "seat N" if a name
  *  was never set. The room populates real nicknames before any action is logged. */
 function who(s: GameState, i: number): string {
@@ -125,14 +133,22 @@ function drawCards(s: GameState, seat: number, n: number): void {
 /** Push a PUBLIC moment onto the per-reduce event stream. The room appends it to the
  *  synced stream with a seq → a transient toast on every client. `text` MUST be generic
  *  (names ok, never a card identity) — the stream is public to all. */
-function emit(s: GameState, kind: string, seat: number, target: number, amount: number, text: string): void {
-  s.events.push({ kind, seat, target, amount, text });
+function emit(
+  s: GameState,
+  kind: string,
+  seat: number,
+  target: number,
+  amount: number,
+  text: string,
+  detailKind = "", // the SPECIFIC public card/event/defense kind, when one drove this event
+): void {
+  s.events.push({ kind, seat, target, amount, text, detailKind });
 }
 
 /** Forward the SPECIFIC cards a one-directional effect removed from / added to `seat`'s
  *  hand to that owner ONLY (via the private reveal channel; never public/synced). Never
  *  used for 2-way swaps (cardSwap/switcheroo) — the diff there is ambiguous. */
-function recordPrivate(s: GameState, seat: number, kind: "lost" | "drew", cards: Card[]): void {
+function recordPrivate(s: GameState, seat: number, kind: "lost" | "drew" | "bought", cards: Card[]): void {
   if (cards.length === 0) return;
   s.reveals.push({ seat, kind, cards: cards.map((c) => ({ ...c })) });
 }
@@ -270,7 +286,7 @@ function resolveEvent(s: GameState, drawer: number, event: EventKind): void {
   s.log.push(`${who(s, drawer)} draws Event: ${event}`);
   // Headline toast; damage/heal branches emit their own granular events (for the
   // record + PR2 anims) — the client collapses a reduce's batch to this headline.
-  emit(s, "event", drawer, -1, 0, `🎲 ${who(s, drawer)} drew ${EVENT_NAMES[event]}`);
+  emit(s, "event", drawer, -1, 0, `🎲 ${who(s, drawer)} drew ${EVENT_NAMES[event]}`, event);
   switch (event) {
     case "mudslide":
     case "stormsurge":
@@ -399,6 +415,7 @@ function applySupport(s: GameState, seat: number, support: SupportKind, target?:
     target !== undefined
       ? `${who(s, seat)} used ${label} on ${who(s, target)}`
       : `${who(s, seat)} played ${label}`,
+    support, // PUBLIC: the support KIND (its effect is public; the lost/drawn card is not)
   );
   switch (support) {
     case "firstaid":
@@ -633,7 +650,17 @@ function resolveTarget(s: GameState, hit: boolean): void {
   // attacker is atk.attackerSeat post-swap (a pre-flip Water Trap may make the
   // reactor the attacker, so attacker === victim self-soaks are legal).
   if (hit && !suppressed) damageAndRecord(s, tSeat, atk.damage, atk.attackerSeat, atk.kind);
-  else s.log.push(`attack on ${who(s, tSeat)} ${hit ? "suppressed (Sudden-Death AoE)" : "missed"}`);
+  else {
+    s.log.push(`attack on ${who(s, tSeat)} ${hit ? "suppressed (Sudden-Death AoE)" : "missed"}`);
+    // Surface a DEFENSIVE block. `resolveTarget` is only reached from the ladder, and every
+    // ladder outcome with `!hit` is a successful defense (umbrella, enough Miss blocks, OR a
+    // Wild-as-Miss) — so surface them all. EXCLUDE only a Sudden-Death AoE suppression (a hit
+    // the engine voids); a plain splash-flip whiff never reaches here (it routes via afterAttack).
+    if (!suppressed && !hit) {
+      const dk = atk.umbrellaBlock ? "umbrella" : ""; // name the umbrella; Miss/Wild block is generic
+      emit(s, "defend", tSeat, -1, 0, dk ? `☂️ ${who(s, tSeat)} blocks with an Umbrella!` : `🛡️ ${who(s, tSeat)} blocks the throw!`, dk);
+    }
+  }
   nextTargetOrFinish(s);
 }
 
@@ -712,7 +739,7 @@ function resolvePending(s: GameState): void {
 function startThrow(s: GameState, attacker: number, target: number, soaker: boolean, spread?: Spread): void {
   spendKind(s, attacker, "balloon");
   if (soaker) spendKind(s, attacker, "soaker"); // R2: declared pre-flip (wasted on a Miss)
-  emit(s, "attack", attacker, target, 0, `💧 ${who(s, attacker)} throws a balloon at ${who(s, target)}`);
+  emit(s, "attack", attacker, target, 0, `💧 ${who(s, attacker)} throws a balloon at ${who(s, target)}`, "balloon");
   if (spread) armSplashDraw(s, attacker, target, soaker, spread);
   else offerReaction(s, { kind: "THROW", attacker, target, soaker, redirectedSeats: [] });
 }
@@ -722,7 +749,7 @@ function startThrow(s: GameState, attacker: number, target: number, soaker: bool
 function startBig(s: GameState, attacker: number, target: number, big: BigKind, soaker: boolean, spread?: Spread): void {
   spendKind(s, attacker, big);
   if (soaker) spendKind(s, attacker, "soaker");
-  emit(s, "attack", attacker, target, 0, `${CARD_INFO[big].label} — ${who(s, attacker)} attacks ${who(s, target)}`);
+  emit(s, "attack", attacker, target, 0, `${CARD_INFO[big].label} — ${who(s, attacker)} attacks ${who(s, target)}`, big);
   const { blockNumber, damage } = bigStats(big);
   if (spread) {
     spendKind(s, attacker, spread.modifier);
@@ -1059,11 +1086,21 @@ export function applyMove(state: GameState, move: Move): ApplyResult {
     sellKind("balloon", move.sell.balloons);
     sellKind("treasure", move.sell.treasures);
     sellKind("wild", move.sell.wild);
+    const bought: Card[] = [];
     for (const st of move.buy) {
       const card = s.stacks[st].pop();
-      if (card) hand.push(card);
+      if (card) {
+        hand.push(card);
+        bought.push(card);
+      }
     }
     s.log.push(`${who(s, seat)} shops -> buys [${move.buy.join(", ")}]`);
+    if (bought.length > 0) {
+      // PUBLIC: name the COUNT + which blind stack(s) — never the specific card (secret).
+      const stacks = [...new Set(move.buy)].map((st) => STACK_NAMES[st]).join(" + ");
+      emit(s, "shop", seat, -1, bought.length, `🛍️ ${who(s, seat)} buys ${bought.length} card${bought.length > 1 ? "s" : ""} from the ${stacks}`);
+      recordPrivate(s, seat, "bought", bought); // PRIVATE: the specific cards, to the buyer only
+    }
     endActiveTurn(s);
     return { state: s, awaiting: s.awaiting, events };
   }
@@ -1111,7 +1148,7 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
       if (res.action === "towel") {
         spendKind(s, seat, "towel");
         s.log.push(`${who(s, seat)} Towels their splash`);
-        emit(s, "react", seat, -1, 0, `🧻 ${who(s, seat)} towels it away!`);
+        emit(s, "react", seat, -1, 0, `🧻 ${who(s, seat)} towels it away!`, "towel");
         nextTargetOrFinish(s); // THIS instance cancelled; the rest still land
         return { state: s, awaiting: s.awaiting, events };
       }
@@ -1120,12 +1157,12 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
         spendKind(s, seat, "redirect");
         atk.targets[atk.targetIdx] = res.target!;
         s.log.push(`${who(s, seat)} Redirects their splash to ${who(s, res.target!)}`);
-        emit(s, "react", seat, res.target!, 0, `↪️ ${who(s, seat)} redirects it to ${who(s, res.target!)}!`);
+        emit(s, "react", seat, res.target!, 0, `↪️ ${who(s, seat)} redirects it to ${who(s, res.target!)}!`, "redirect");
       } else {
         spendKind(s, seat, "watertrap");
         atk.targets[atk.targetIdx] = atk.attackerSeat; // bounce this instance to the attacker
         s.log.push(`${who(s, seat)} Water Traps their splash back at ${who(s, atk.attackerSeat)}`);
-        emit(s, "react", seat, atk.attackerSeat, 0, `🪤 ${who(s, seat)} traps it back at ${who(s, atk.attackerSeat)}!`);
+        emit(s, "react", seat, atk.attackerSeat, 0, `🪤 ${who(s, seat)} traps it back at ${who(s, atk.attackerSeat)}!`, "watertrap");
       }
       // The rerouted/bounced victim gets its OWN reaction window (bounded by the
       // once-per-seat redirectedSeats cap), mirroring the pre-flip pending path.
@@ -1141,7 +1178,7 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
     if (res.action === "towel") {
       spendKind(s, seat, "towel"); // E11: cancel the targeting card outright
       s.log.push(`${who(s, seat)} Towels the ${pa.kind}`);
-      emit(s, "react", seat, -1, 0, `🧻 ${who(s, seat)} towels it away!`);
+      emit(s, "react", seat, -1, 0, `🧻 ${who(s, seat)} towels it away!`, "towel");
       s.pending = null;
       if (pa.kind === "SUPPORT") s.awaiting = { seats: [pa.attacker], kind: "MOVE" };
       else afterAttack(s, pa.kind === "PLAY_BIG" ? pa.big! : "basic");
@@ -1154,12 +1191,12 @@ export function applyResolution(state: GameState, res: Resolution): ApplyResult 
     if (res.action === "redirect") {
       spendKind(s, seat, "redirect");
       s.log.push(`${who(s, seat)} Redirects to ${who(s, res.target!)}`);
-      emit(s, "react", seat, res.target!, 0, `↪️ ${who(s, seat)} redirects it to ${who(s, res.target!)}!`);
+      emit(s, "react", seat, res.target!, 0, `↪️ ${who(s, seat)} redirects it to ${who(s, res.target!)}!`, "redirect");
       pa.target = res.target!;
     } else {
       spendKind(s, seat, "watertrap");
       s.log.push(`${who(s, seat)} Water Traps -> bounces to ${who(s, pa.attacker)}`);
-      emit(s, "react", seat, pa.attacker, 0, `🪤 ${who(s, seat)} traps it back at ${who(s, pa.attacker)}!`);
+      emit(s, "react", seat, pa.attacker, 0, `🪤 ${who(s, seat)} traps it back at ${who(s, pa.attacker)}!`, "watertrap");
       pa.target = pa.attacker; // the original attacker must now defend
       pa.attacker = seat; // the trapper's Hits resolve in the ladder
     }

@@ -89,3 +89,40 @@ export const EVENT_NAMES: Record<EventKind, string> = {
   springcleaning: "Spring Cleaning", lostandfound: "Lost & Found",
   calmwaters: "Calm Waters", falsealarm: "False Alarm", gentlebreeze: "Gentle Breeze",
 };
+
+/** One-line player-facing EFFECT for EVERY Event kind — so a drawn Event explains itself
+ *  ("Mudslide — everyone takes 1 damage"), not just names itself. Complete `Record` so a
+ *  new EventKind without an effect line fails `npm run typecheck`. Keep each a single short
+ *  clause (match CARD_INFO `desc` length). Mirrors the engine's `resolveEvent` switch. */
+export const EVENT_DESCRIPTIONS: Record<EventKind, string> = {
+  mudslide: "Everyone takes 1 damage.",
+  stormsurge: "Everyone takes 1 damage.",
+  heatwave: "Everyone takes 1 damage.",
+  downpour: "Everyone takes 1 damage.",
+  tidalwave: "Everyone takes 1 damage.",
+  lightning: "The player with the most lives takes 1 damage.",
+  targetedstorm: "The player with the most lives takes 1 damage.",
+  sunbreak: "Every player heals 1 life.",
+  rainbow: "Every player heals 1 life.",
+  waterparkpass: "You heal 1 life.",
+  treasurechest: "You gain 2 Treasure cards.",
+  supplycache: "You gain 2 Treasure cards.",
+  supplydrop: "Everyone gains 1 Treasure card.",
+  leakybucket: "You discard 1 random card.",
+  springcleaning: "Everyone discards 1 random card.",
+  lostandfound: "Take 1 random card from each opponent.",
+  calmwaters: "Nothing happens — a calm moment.",
+  falsealarm: "Nothing happens — a false alarm.",
+  gentlebreeze: "Nothing happens — just a breeze.",
+};
+
+/** A themed emoji for EVERY Event kind, so the event flourish shows "🌈 Rainbow" not a
+ *  generic die for the 12 non-damaging events (EVENT_LABELS only covers the 7 that soak).
+ *  Complete `Record` → a new EventKind without an emoji fails `npm run typecheck`. */
+export const EVENT_EMOJI: Record<EventKind, string> = {
+  mudslide: "🌊", stormsurge: "🌊", heatwave: "☀️", downpour: "🌧️", tidalwave: "🌊",
+  lightning: "⚡", targetedstorm: "🎯", sunbreak: "🌤️", rainbow: "🌈",
+  waterparkpass: "🎟️", treasurechest: "💎", supplycache: "📦", supplydrop: "🎁",
+  leakybucket: "🪣", springcleaning: "🧹", lostandfound: "🔎",
+  calmwaters: "😌", falsealarm: "🔕", gentlebreeze: "🍃",
+};

@@ -784,6 +784,30 @@ describe("water fight room", () => {
     assert.ok(pub && !/\b(mega|giant)\b/i.test(pub.text), "no secret card kind in the public event");
   });
 
+  it("two-tier secrecy: a shop buyer privately learns the bought card; others do not", async () => {
+    const { room, clients } = await startedGame(75, 3, (r) => { r.state.eventDensity = 0; });
+    const [a, b, c] = clients as [typeof clients[0], typeof clients[0], typeof clients[0]];
+    let aReveal: any = null;
+    let bReveal: any = null;
+    let cReveal: any = null;
+    a!.onMessage(WaterFightMsg.REVEAL, (p: unknown) => (aReveal = p));
+    b!.onMessage(WaterFightMsg.REVEAL, (p: unknown) => (bReveal = p));
+    c!.onMessage(WaterFightMsg.REVEAL, (p: unknown) => (cReveal = p));
+    room.engine.players[0]!.hand = [{ id: 10000, kind: "treasure" }, { id: 10001, kind: "treasure" }] as never; // 4 coins
+    room.engine.stacks.defense.push({ id: 30001, kind: "umbrella" } as never); // SHOP pops the end → buys this
+    a!.send(WaterFightMsg.MOVE, { kind: "SHOP", sell: { balloons: 0, treasures: 2, wild: 0 }, buy: ["defense"] });
+    await until(() => aReveal !== null);
+    assert.strictEqual(aReveal.kind, "bought", "the buyer privately learns what they bought");
+    assert.ok(aReveal.cards.some((card: { kind: string }) => card.kind === "umbrella"));
+    await sleep(80);
+    assert.strictEqual(bReveal, null, "an opponent never sees the bought card");
+    assert.strictEqual(cReveal, null, "a spectator never sees it either");
+    // ...and the PUBLIC stream named only the count + stack, never the card.
+    const pub = [...room.state.events].find((e) => e.kind === "shop");
+    assert.ok(pub && !/\bumbrella\b/i.test(pub.text), "no bought card kind in the public shop event");
+    assert.strictEqual(pub!.detailKind, "", "shop carries no detailKind (the card is secret)");
+  });
+
   it("a rematch clears the event stream and restarts the seq", async () => {
     const { room, clients } = await startedGame(77);
     const [a, b] = clients;

@@ -308,6 +308,11 @@ export interface GameEvent {
   amount: number;
   /** PUBLIC, GENERIC, pre-built human line (names already substituted). */
   text: string;
+  /** The SPECIFIC card/event/defense kind that drove this event, when it is PUBLIC
+   *  (attack big kind, support kind, react/defense kind, EventKind) — so the client can
+   *  show its name + effect. "" when none or SECRET (a blind-shop buy, a generic balloon,
+   *  or a post-hit consequence like damage/soak/heal). NEVER a hidden card identity. */
+  detailKind: string;
 }
 
 /** A one-shot private reveal (Goggles peek the deck top, Sneaky Peek an opponent's
@@ -317,8 +322,9 @@ export interface Reveal {
   seat: number; // who may see it (the peeker / the owner of the lost-or-drawn cards)
   /** "deck-top"/"hand" = peeks (Goggles/Sneaky Peek); "lost"/"drew" = the specific
    *  cards a ONE-DIRECTIONAL effect removed from / added to YOUR hand (Sabotage,
-   *  Pickpocket, forced discard, Golden/Backpack draw). NEVER used for 2-way swaps. */
-  kind: "deck-top" | "hand" | "lost" | "drew";
+   *  Pickpocket, forced discard, Golden/Backpack draw); "bought" = the cards you just
+   *  bought from the blind shop (only you learn which). NEVER used for 2-way swaps. */
+  kind: "deck-top" | "hand" | "lost" | "drew" | "bought";
   cards: Card[];
   ofSeat?: number; // for kind "hand": whose hand was peeked
 }
