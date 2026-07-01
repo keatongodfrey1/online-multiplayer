@@ -9,10 +9,7 @@ import {
   type BaseState,
   CARD_INFO,
   COIN_VALUES,
-  EVENT_DESCRIPTIONS,
-  EVENT_EMOJI,
   EVENT_LABELS,
-  EVENT_NAMES,
   LobbyMsg,
   Phase,
   WaterFightMsg,
@@ -26,6 +23,16 @@ import { escapeAttr, escapeHtml } from "../../lobby/HomeScreen.js";
 import { flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
 import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
 import { infoButton, wireInfoButtons } from "../../framework/infoPopover.js";
+import {
+  cardDesc,
+  cardEmoji,
+  cardName,
+  flourishContent,
+  FLOURISH_QUEUE_MAX,
+  FLOURISH_TOTAL_MS,
+  flourishTone,
+  pickFlourish,
+} from "./flourish.js";
 
 const WF_SAVES_KEY = "waterfight-saves";
 /** How long the HIT/MISS splash reveal stays on screen. */
@@ -37,32 +44,6 @@ const TOAST_MS = 1500;
 /** Max pending toasts — bots act faster than TOAST_MS, so an unbounded queue would lag
  *  arbitrarily far behind real state; keep only the most recent few (older ones are stale). */
 const TOAST_QUEUE_MAX = 3;
-/** Per-reduce headline priority — one flourish per reduce shows the highest-priority event,
- *  so a multi-target moment (Flash Flood: attack + N damage) collapses to one summary. */
-const EVENT_PRIORITY: Record<string, number> = {
-  suddendeath: 9, event: 8, attack: 7, turn: 6, defend: 6, save: 5, soak: 5,
-  support: 4, react: 4, shop: 4, draw: 3, heal: 2, damage: 1,
-};
-/** Kinds that get a centered explanatory flourish. `turn` is excluded — the banner +
- *  `wf-pulse` already announce whose turn it is, and a flourish every turn is spam. */
-const FLOURISH_KINDS = new Set(
-  Object.keys(EVENT_PRIORITY).filter((k) => k !== "turn"),
-);
-/** Flourish timing (owner-chosen, mockup-confirmed): held ~2.6s total so a player can read
- *  the effect line — ~3× the old toast. */
-const FLOURISH_IN_MS = 260;
-const FLOURISH_HOLD_MS = 1900;
-const FLOURISH_OUT_MS = 420;
-/** Total time one flourish occupies the host (pop-in + hold + fade) — paces the queue and
- *  matches the `wf-flourish-anim` keyframe duration. */
-const FLOURISH_TOTAL_MS = FLOURISH_IN_MS + FLOURISH_HOLD_MS + FLOURISH_OUT_MS;
-/** Each flourish is ~2.6s, so under bot pacing (≈700ms/action) the queue would back up;
- *  cap it and drop the oldest so flourishes track the newest, current moments. */
-const FLOURISH_QUEUE_MAX = 3;
-/** Events that harm vs. heal — used only to TINT an event flourish (color reinforces the
- *  word; meaning never rests on color alone). */
-const DAMAGING_EVENTS = new Set(["mudslide", "stormsurge", "heatwave", "downpour", "tidalwave", "lightning", "targetedstorm", "leakybucket", "springcleaning"]);
-const HEALING_EVENTS = new Set(["sunbreak", "rainbow", "waterparkpass", "treasurechest", "supplycache", "supplydrop", "lostandfound"]);
 const wfTurnLabel = (blob: any): number => (blob?.engine?.turnCount ?? 0) + 1;
 
 // MIRROR of the engine's TARGETED_SUPPORTS / implemented supports (engine.ts) —
@@ -92,10 +73,6 @@ const SUPPORT_LABELS: Record<string, string> = {
 const CARD_LABELS: Record<string, string> = Object.fromEntries(
   Object.entries(CARD_INFO).map(([k, v]) => [k, v.label]),
 );
-const cardLabel = (kind: string): string => CARD_INFO[kind as keyof typeof CARD_INFO]?.label ?? kind;
-const cardDesc = (kind: string): string => CARD_INFO[kind as keyof typeof CARD_INFO]?.desc ?? "";
-const cardEmoji = (kind: string): string => cardLabel(kind).split(" ")[0] ?? "🃏";
-const cardName = (kind: string): string => cardLabel(kind).split(" ").slice(1).join(" ") || kind;
 /** Which shop stack a card belongs to → drives the card-tile category color band. */
 const cardCategory = (kind: string): string => CARD_INFO[kind as keyof typeof CARD_INFO]?.stack ?? "basic";
 /** Friendly name for a finishing-blow `means` (an attack kind or a damaging Event).
@@ -105,35 +82,6 @@ const getMeansLabel = (means: string): string => {
   if (means === "basic") return "a water balloon";
   if (CARD_INFO[means as keyof typeof CARD_INFO]) return cardName(means);
   return EVENT_LABELS[means as keyof typeof EVENT_LABELS] ?? "an Event";
-};
-
-/** Color band for a flourish — color REINFORCES the word (meaning never rests on color
- *  alone, since every flourish also carries an emoji + a word). */
-const flourishTone = (kind: string, detailKind: string): string => {
-  if (kind === "damage" || kind === "soak") return "danger";
-  if (kind === "save" || kind === "heal" || kind === "defend") return "ok";
-  if (kind === "suddendeath") return "warn";
-  if (kind === "event") return DAMAGING_EVENTS.has(detailKind) ? "danger" : HEALING_EVENTS.has(detailKind) ? "ok" : "accent";
-  return "accent";
-};
-
-/** Build the explanatory flourish content: a NAME + one-line effect when we know the
- *  specific public card/event (detailKind), else the event's generic public text. The
- *  caller escapes every dynamic field (text/name/desc) — nicknames are user-controlled. */
-const flourishContent = (
-  ev: { kind: string; text: string; detailKind: string },
-): { emoji: string; name: string; desc: string } | { line: string } => {
-  const dk = ev.detailKind;
-  if (dk) {
-    if (ev.kind === "event" && EVENT_NAMES[dk as keyof typeof EVENT_NAMES]) {
-      const emoji = EVENT_EMOJI[dk as keyof typeof EVENT_EMOJI] ?? "🎲"; // themed per-event, all 19
-      return { emoji, name: EVENT_NAMES[dk as keyof typeof EVENT_NAMES], desc: EVENT_DESCRIPTIONS[dk as keyof typeof EVENT_DESCRIPTIONS] ?? "" };
-    }
-    if (CARD_INFO[dk as keyof typeof CARD_INFO]) {
-      return { emoji: cardEmoji(dk), name: cardName(dk), desc: cardDesc(dk) };
-    }
-  }
-  return { line: ev.text };
 };
 const NUDGE_KEY = "waterfight-card-hint-seen";
 
@@ -402,12 +350,8 @@ export class WaterFightView implements GameView {
 
   /** One flourish per reduce = the highest-priority FLOURISH-worthy event (turn excluded). */
   private flourishBatch(batch: { kind: string; text: string; detailKind: string }[]): void {
-    let best: { kind: string; text: string; detailKind: string } | undefined;
-    for (const e of batch) {
-      if (!FLOURISH_KINDS.has(e.kind)) continue;
-      if (!best || (EVENT_PRIORITY[e.kind] ?? 0) > (EVENT_PRIORITY[best.kind] ?? 0)) best = e;
-    }
-    if (best && best.text) this.enqueueFlourish({ kind: best.kind, text: best.text, detailKind: best.detailKind });
+    const best = pickFlourish(batch);
+    if (best) this.enqueueFlourish(best);
   }
 
   private enqueueToast(text: string): void {

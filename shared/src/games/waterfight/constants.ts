@@ -4,7 +4,7 @@
 // engine imports these from `../constants.js`; the schema index re-exports them.
 
 // Type-only imports erase at runtime, so constants.ts stays engine-free.
-import type { CardKind, EventKind, StackId } from "./engine/types.js";
+import type { CardKind, EventKind, StackId, SupportKind } from "./engine/types.js";
 
 /** Coins earned by selling each kind at the shop (D4 economy). */
 export const COIN_VALUES = { balloon: 1, treasure: 2, wild: 5 } as const;
@@ -125,4 +125,29 @@ export const EVENT_EMOJI: Record<EventKind, string> = {
   waterparkpass: "🎟️", treasurechest: "💎", supplycache: "📦", supplydrop: "🎁",
   leakybucket: "🪣", springcleaning: "🧹", lostandfound: "🔎",
   calmwaters: "😌", falsealarm: "🔕", gentlebreeze: "🍃",
+};
+
+/** The color band a flourish is tinted with — `danger` (red, harm), `ok` (green, benefit),
+ *  `warn` (yellow, Sudden-Death), `accent` (blue, neutral). Color only REINFORCES the emoji +
+ *  word; meaning never rests on it alone. */
+export type FlourishTone = "danger" | "ok" | "warn" | "accent";
+
+/** Per-support tint so a card played AT you reads as a threat (red) and one that helps its
+ *  player reads as a benefit (green); utility/2-way plays stay neutral. A complete
+ *  `Record<SupportKind>` → a new support without a tone fails `npm run typecheck`. */
+export const SUPPORT_TONE: Record<SupportKind, FlourishTone> = {
+  sabotage: "danger", needle: "danger", pickpocket: "danger", lemonadespill: "danger", freezeout: "danger",
+  firstaid: "ok", backpack: "ok", hiddenstash: "ok",
+  goggles: "accent", sneakypeek: "accent", cardswap: "accent", switcheroo: "accent",
+};
+
+/** Per-event tint (harm = red, heal/gain = green, dud = neutral). A complete
+ *  `Record<EventKind>` → adding an event without a tone fails typecheck (this is the
+ *  compile-time completeness the old hand-kept `DAMAGING_EVENTS`/`HEALING_EVENTS` sets lacked). */
+export const EVENT_TONE: Record<EventKind, FlourishTone> = {
+  mudslide: "danger", stormsurge: "danger", heatwave: "danger", downpour: "danger", tidalwave: "danger",
+  lightning: "danger", targetedstorm: "danger", leakybucket: "danger", springcleaning: "danger",
+  sunbreak: "ok", rainbow: "ok", waterparkpass: "ok",
+  treasurechest: "ok", supplycache: "ok", supplydrop: "ok", lostandfound: "ok",
+  calmwaters: "accent", falsealarm: "accent", gentlebreeze: "accent",
 };

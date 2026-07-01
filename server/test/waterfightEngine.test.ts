@@ -278,6 +278,41 @@ describe("water fight engine: event stream + two-tier secrecy", () => {
     assert.ok(!r.state.events.some((e) => e.kind === "defend"), "no defend on a whiff (the splash-MISS reveal shows it)");
   });
 
+  it("a Sudden-Death AoE suppression emits NO defend event (the distinct `!suppressed` branch)", () => {
+    // A suppressed multi-target hit reaches resolveTarget's `else` with suppressed=true —
+    // separate from the plain-whiff case above. The `!suppressed` guard must drop the defend.
+    const g = game(3, 5);
+    g.phase = "sudden-death";
+    g.players[0]!.lives = 1;
+    g.players[1]!.lives = 1;
+    g.players[2]!.lives = 1;
+    setHand(g, 0, ["flashflood"]);
+    setHand(g, 1, []);
+    setHand(g, 2, []);
+    const kinds: string[] = [];
+    let r = applyMoveRaw(g, { kind: "FLASH_FLOOD" }); // 3p → targets [1,2] → suppressed
+    kinds.push(...r.state.events.map((e) => e.kind));
+    for (let i = 0; i < 4 && r.awaiting.kind === "DEFEND"; i++) {
+      r = applyResolutionRaw(r.state, { kind: "DEFEND", defense: "pass" });
+      kinds.push(...r.state.events.map((e) => e.kind));
+    }
+    assert.ok(!kinds.includes("defend"), "a Sudden-Death AoE suppression never emits a defend");
+    assert.ok(!kinds.includes("damage"), "and deals no damage (E9)");
+  });
+
+  it("the greedy bot never shops — so there is no bot→shop event path to test", () => {
+    // The `shop` event's funnel coverage rests on afterApply (shared by human + bot applies),
+    // and the human-shop wire test proves it. A bot can never trigger it: GreedyPolicy.move()
+    // only ever THROWs or ENDs the turn. This pins that, so "cover bot-shop" isn't a real gap.
+    const g = game(2, 5, { shopCost: 1 });
+    moveFromDeck(g, 0, "treasure", 6); // 12 coins → SHOP is affordable and a legal move
+    assert.ok(legalMoves(g).some((m) => m.kind === "SHOP"), "SHOP is a legal option in this state");
+    const policy = new GreedyPolicy(1);
+    for (let i = 0; i < 25; i++) {
+      assert.notEqual(policy.move(g).kind, "SHOP", "GreedyPolicy only THROWs or ENDs — never SHOP");
+    }
+  });
+
   it("events carry the specific PUBLIC detailKind (support/attack/event)", () => {
     const gs = game(2, 5);
     setHand(gs, 0, ["sabotage"]);
