@@ -83,12 +83,14 @@ export const flourishContent = (
 };
 
 /** Pick the ONE flourish for a per-reduce batch: the highest-priority flourish-worthy event
- *  (`turn` excluded, empty text skipped). Returns null when the batch has nothing to show. */
+ *  (`turn` excluded, empty text skipped). Returns null when the batch has nothing to show.
+ *  Returns a plain SNAPSHOT (not the batch element) — the caller queues it for ~2.6s, and the
+ *  batch elements are live Colyseus schema instances that a later sync can mutate/recycle. */
 export const pickFlourish = (batch: FlourishEvent[]): FlourishEvent | null => {
   let best: FlourishEvent | undefined;
   for (const e of batch) {
     if (!FLOURISH_KINDS.has(e.kind)) continue;
     if (!best || (EVENT_PRIORITY[e.kind] ?? 0) > (EVENT_PRIORITY[best.kind] ?? 0)) best = e;
   }
-  return best && best.text ? best : null;
+  return best && best.text ? { kind: best.kind, text: best.text, detailKind: best.detailKind } : null;
 };
