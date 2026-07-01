@@ -134,6 +134,21 @@ Every rule below has a copy-from reference — open it, don't reinvent it.
   but NOT Perfect Palace's light/serif `.pp-modal` skin (it reads as a different
   app on the dark theme). Keep z-index below the turn-toast and reconnect overlay.
 
+- **Stacked fixed overlays: check their EXTENTS overlap, not just their anchors.**
+  Two `position: fixed` overlays with different `top` anchors can still collide once
+  you add their rendered height. Water Fight's flourish (`top:35%`) and the personal
+  turn-toast (`top:45%`, `translate(-50%,-50%)`) had non-overlapping anchors but
+  overlapping *bands* (~35–51% vs ~41–49%), so the opaque toast painted over the
+  flourish's effect line. Compute the pixel band (anchor ± half-height) for each and
+  keep them disjoint (the fix: move the flourish band wholly above the toast).
+
+- **Interpolate a JS constant into CSS-in-JS, never duplicate the number.** When a
+  duration/size lives in both a JS constant (a `setTimeout`, a queue tick) and a CSS
+  string built as a template literal, inject it — `animation: … ${FLOURISH_TOTAL_MS}ms`
+  — so the two can't silently drift (a CSS animation longer than the JS timer repaints
+  over a still-animating node; shorter leaves a gap). Hardcoding `2580ms` in both is a
+  latent bug.
+
 ---
 
 <a id="3-show-dont-hide"></a>
@@ -152,6 +167,12 @@ Three non-negotiables:
    shop/buy and in-turn block emitted nothing until PR2 — the audit is what caught
    them). The synced **log is a backup, never the only feedback** — if a player must
    scroll the log or already know the cards to follow the game, the design has failed.
+   **When you surface a CATEGORY of action, key on the OUTCOME, not a subset predicate,
+   and enumerate every variant.** Water Fight's "blocked!" flourish was gated on
+   `isBlocked` (umbrella or enough Miss cards) — a Wild-as-Miss block sets neither, so
+   that block was silently invisible. The fix keyed it on the real outcome (any
+   ladder resolution that isn't a hit is a block). A gate on a partial condition drops
+   the variants it forgot, silently — the exact failure this whole section is about.
 2. **EXPLAIN it, with readable pacing.** Each beat gets an **interactive action**
    (the player triggers it) or an **animated/centered reveal that STATES the effect**,
    held long enough to read (~2.6s for a sentence — NOT a ~0.9s toast flash), PLUS a
