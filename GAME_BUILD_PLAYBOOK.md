@@ -81,7 +81,12 @@ Every rule below has a copy-from reference — open it, don't reinvent it.
   (`client/src/style.css:2`): `--bg --card --text --muted --accent --accent-press
   --danger --ok --warn`. Never hardcode a light color (`#fff`, `white`,
   `background: none`). The single biggest Water Fight bug was light text that was
-  invisible on the dark app.
+  invisible on the dark app. A faint **tinted** background pulled from a token (a
+  "your move" highlight, a status pill) must be **derived** —
+  `color-mix(in srgb, var(--token) N%, transparent)` — never a hardcoded
+  `rgba(r,g,b,a)` copy of the token's channels. The copy silently drifts if the
+  token is ever retuned; the PR #47 review caught `.catan-status-mine` hardcoding
+  `rgba(65,201,138,0.12)`, a literal copy of `--ok`, inside a token-conformance PR.
 
 - **Mobile-first AND tablet/laptop-wide.** The base `#app` column is capped near
   480px. Break out of it for your game root with a `:has()` rule keyed on the
@@ -118,7 +123,11 @@ Every rule below has a copy-from reference — open it, don't reinvent it.
   `wireInfoButtons(container)` wires the popover (`client/src/framework/infoPopover.ts`).
   The popover lives on `document.body`, so a re-render of the surrounding subtree
   can't destroy it mid-open. For card meanings, also offer a tappable card → a
-  detail modal (below).
+  detail modal (below). When you **replace** a `title=` on an interactive element
+  (a colour swatch, an icon button) with an ⓘ, that element loses its only
+  accessible name — add an **`aria-label`** (and `escapeAttr` any user-controlled
+  text like a nickname in it) or you ship a nameless button. The lobby and PR #47
+  reviews both flagged this exact a11y-name regression.
 
 - **Lobby number settings = `−` / `+` steppers, not `<input type=number>`.**
   Native number inputs show **no spinner arrows on mobile**. Copy the stepper:
