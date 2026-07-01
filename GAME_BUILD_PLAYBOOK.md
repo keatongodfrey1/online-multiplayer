@@ -54,6 +54,13 @@ the things that shape the schema and room and are a rewrite to change later.
 > engine, then write the room as a thin adapter (copy `SplendorRoom`/`CatanRoom`,
 > not the thin TicTacToe room).
 >
+> **Show AND explain every beat (see §3):** make every consequential moment — dice
+> roll, card drawn, card played, card bought, attack, block, life/coin change,
+> turn-order, triggered event — instantly obvious AND explained (what the card/event
+> does, not just its name), held long enough to read. Audit for silent actions that
+> change state but show nothing. Build this in from the first commit — it is part of
+> the definition of done, not a later polish pass.
+>
 > **The ending is part of the game:** at game-over, show who won, why, and the
 > deciding move *before* the standings screen (a held reveal beat — see §3). Build
 > it from the start; don't ship a bare standings card and wait to be asked.
@@ -144,21 +151,57 @@ Every rule below has a copy-from reference — open it, don't reinvent it.
   but NOT Perfect Palace's light/serif `.pp-modal` skin (it reads as a different
   app on the dark theme). Keep z-index below the turn-toast and reconnect overlay.
 
+- **Stacked fixed overlays: check their EXTENTS overlap, not just their anchors.**
+  Two `position: fixed` overlays with different `top` anchors can still collide once
+  you add their rendered height. Water Fight's flourish (`top:35%`) and the personal
+  turn-toast (`top:45%`, `translate(-50%,-50%)`) had non-overlapping anchors but
+  overlapping *bands* (~35–51% vs ~41–49%), so the opaque toast painted over the
+  flourish's effect line. Compute the pixel band (anchor ± half-height) for each and
+  keep them disjoint (the fix: move the flourish band wholly above the toast).
+
+- **Interpolate a JS constant into CSS-in-JS, never duplicate the number.** When a
+  duration/size lives in both a JS constant (a `setTimeout`, a queue tick) and a CSS
+  string built as a template literal, inject it — `animation: … ${FLOURISH_TOTAL_MS}ms`
+  — so the two can't silently drift (a CSS animation longer than the JS timer repaints
+  over a still-animating node; shorter leaves a gap). Hardcoding `2580ms` in both is a
+  latent bug.
+
 ---
 
 <a id="3-show-dont-hide"></a>
 ## 3. Show, don't hide — and respect secrecy
 
-**Every random or consequential event must be SHOWN to the table — the synced
-log is a backup, never the only feedback.** If the only way to know what
-happened is to scroll the log, the design has failed. This covers: a **dice
-roll, a card drawn, a hit/miss or splash flip, turn-order being decided, a life
-lost or gained, a purchase, an attack.** Each gets either an **interactive
-action** (the player triggers it) or an **animated reveal**, PLUS a transient
-**toast** naming who did what to whom (e.g. "Keaton threw a water balloon at
-Gemma", "Keaton goes first"). Reuse `flashToast` / `turnChime`
-(`client/src/framework/turnAlert.ts`) — already used for "Your turn!" and the
-Water Fight splash.
+**THE rule this app keeps relearning the hard way: make every consequential beat
+instantly OBVIOUS and UNDERSTANDABLE — and EXPLAIN what it does, don't just name
+it.** A player who sees "Mudslide" or "Sabotage" learns nothing; show **what the
+card/event IS and what it DOES to whom** ("🌊 Mudslide — everyone takes 1 damage").
+Three non-negotiables:
+
+1. **Cover EVERY consequential beat** — dice roll, card drawn, card played, **card
+   bought**, attack, **block**, hit/miss or splash flip, turn-order being decided, a
+   life/coin change, a triggered event. **Audit for silent ones:** an action that
+   changes state but emits nothing on the event stream is invisible (Water Fight's
+   shop/buy and in-turn block emitted nothing until PR2 — the audit is what caught
+   them). The synced **log is a backup, never the only feedback** — if a player must
+   scroll the log or already know the cards to follow the game, the design has failed.
+   **When you surface a CATEGORY of action, key on the OUTCOME, not a subset predicate,
+   and enumerate every variant.** Water Fight's "blocked!" flourish was gated on
+   `isBlocked` (umbrella or enough Miss cards) — a Wild-as-Miss block sets neither, so
+   that block was silently invisible. The fix keyed it on the real outcome (any
+   ladder resolution that isn't a hit is a block). A gate on a partial condition drops
+   the variants it forgot, silently — the exact failure this whole section is about.
+2. **EXPLAIN it, with readable pacing.** Each beat gets an **interactive action**
+   (the player triggers it) or an **animated/centered reveal that STATES the effect**,
+   held long enough to read (~2.6s for a sentence — NOT a ~0.9s toast flash), PLUS a
+   transient **toast** naming who did what to whom. Reuse `flashToast` / `turnChime`
+   (`client/src/framework/turnAlert.ts`) and pull the effect text from the **shared
+   card-info table** (`CARD_INFO[kind].desc` + an events-effect table) so the reveal,
+   the help screen, and the toast never drift.
+3. **Build it in from the first commit** — like the end-of-game reveal (below). This
+   is a from-kickoff design requirement and part of the definition of done, **not a
+   polish pass** bolted on after the owner asks. (On Water Fight the owner had to ask
+   for this repeatedly across the audit, the ending beat, and the explanatory
+   flourishes — don't make them ask.)
 
 **Reference implementation = Space Chase** (`SpaceChaseView`, PR #17). Copy its
 reveal mechanics exactly:
@@ -338,6 +381,37 @@ re-derive them.
   and auto-grows (works, but noisy + a little slower). Set it once at server boot:
   `import { Encoder } from "@colyseus/schema"; Encoder.BUFFER_SIZE = 16 * 1024;`.
   (A framework/boot change, not per-game.)
+
+#### The synced event stream — the engine behind "show, don't hide" (Water Fight PR1/PR2)
+- **A seq'd synced event list is the canonical "show, don't hide" enabler.** Copy
+  Space Chase: a `<Game>Event` sub-schema `{seq, kind, seat, target, amount, text,
+  detailKind}`, a room-owned monotonic `eventSeq` + `appendEvents` (capped, FIFO
+  trim), and a client that primes `lastSeq = maxSeq()` on mount, diffs `seq > lastSeq`
+  each sync, and **burst-snaps on reconnect** (>N new at once → advance the seq, no
+  replay storm). Toasts (PR1) and animated flourishes (PR2) both ride this one diff.
+- **Never put a raw `Move`/`Resolution` (or any input object) into a synced event or
+  `log`.** Water Fight's first cut stored the whole move (`detail = move`) — it carried
+  exact `cardId`s and the defense played, so the synced stream would have broadcast
+  every player's secret cards. A synced PUBLIC payload is **flat primitives + an
+  engine-built GENERIC `text`**; the SPECIFIC secret goes only via the private `REVEAL`
+  channel. (Two-tier: public generic event + private specific; a before/after hand-diff
+  to capture "what you lost/drew" only works for **one-directional** effects — exclude
+  2-way / whole-hand swaps like cardSwap/switcheroo, where the diff is ambiguous.)
+- **Capture engine output at the SINGLE apply funnel, not per call-site.** A game
+  applies the engine at several sites (human move, resolve, bot move, gentle/auto-pass).
+  Patch only the human ones and **every bot/auto-pass action silently emits nothing** —
+  the same blind spot as "bots bypass sanitize". Drain `engine.events` once in the
+  shared `afterApply`.
+- **Transient channels need a capped queue + a multi-target collapse.** The shared
+  `flashToast` (and any single centered reveal host) is a singleton that overwrites, so
+  rapid moments lose all but the last and a slow drip (bots act faster than a toast
+  drains) lags arbitrarily behind real state. Add a small queue with a **cap +
+  drop-oldest**, and collapse a multi-target reduce (Flash Flood hitting everyone) to
+  **ONE summary**, not N — pick the highest-priority event per reduce.
+- **A new synced field must be copied in `appendEvents` AND survive a refresh.** When
+  you add a field to the event sub-schema (e.g. `detailKind`), copy it in the room's
+  `appendEvents`, and remember the client diff is reconnection-safe only because
+  `lastSeq` is primed on mount — verify a mid-game refresh neither replays nor storms.
 
 ---
 
