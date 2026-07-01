@@ -862,4 +862,32 @@ describe("water fight room", () => {
       "the bot's turn/attack surfaced on the public stream",
     );
   });
+
+  it("a bot's auto-block feeds the synced stream (the funnel covers bot DEFEND, not just bot MOVE)", async () => {
+    const room = (await colyseus.createRoom(WATER_FIGHT, { seed: 4 })) as unknown as WaterFightRoom;
+    const host = await colyseus.connectTo(room, { nickname: "Human" });
+    host.send(LobbyMsg.ADD_BOT, {});
+    await until(() => room.state.players.size === 2);
+    room.state.turnSeconds = 0;
+    room.state.reactionSeconds = 0;
+    room.botDelayMs = 20;
+    host.send(LobbyMsg.START, {});
+    await until(() => room.state.phase === Phase.PLAYING);
+    // Force the human (seat 0) to be the active mover with a balloon; the bot (seat 1) holds an
+    // Umbrella it will greedily block with (GreedyPolicy prefers a non-pass DEFEND); force HIT.
+    room.engine.turnSeat = 0;
+    room.engine.awaiting = { seats: [0], kind: "MOVE" } as never;
+    room.engine.players[0]!.hand = [{ id: 10000, kind: "balloon" }] as never;
+    room.engine.players[1]!.hand = [{ id: 10001, kind: "umbrella" }] as never;
+    room.engine.splashPile = ["hit", "hit"] as never;
+    host.send(WaterFightMsg.MOVE, { kind: "THROW", target: 1 });
+    await until(() => room.engine.awaiting.kind === "SPLASH_DRAW"); // the human attacker flips
+    host.send(WaterFightMsg.RESOLVE, { kind: "DRAW_SPLASH" });
+    // HIT → the bot gets a DEFEND window → the room auto-plays the greedy Umbrella block, whose
+    // `defend` event MUST reach the synced stream (bot RESOLVE path → afterApply → appendEvents).
+    await until(() => [...room.state.events].some((e) => e.kind === "defend"), 8000);
+    const def = [...room.state.events].find((e) => e.kind === "defend");
+    assert.ok(def, "the bot's auto-block emitted a defend on the public stream");
+    assert.strictEqual(def!.detailKind, "umbrella");
+  });
 });
