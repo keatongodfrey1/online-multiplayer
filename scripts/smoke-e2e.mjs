@@ -172,10 +172,19 @@ console.log(`Smoke-testing ${URL}\n`);
   await until(() => a.state?.players?.size === 2);
   a.send("lobby/start", {});
   await until(() => a.state.phase === "playing");
-  ok(a.state.enginePhase === "initial-mapping", "opens at the hidden initial mapping");
+  ok(a.state.enginePhase === "initial-roll", "opens at the interactive turn-order roll");
   ok(a.state.deckCount === 18 && a.state.discardCount === 0, "deck synced as counts only");
   ok(a.state.deck === undefined, "deck order is never synced to clients");
-  ok([...a.state.seats].every((s) => s.resourceCard.length === 0), "resource cards are hidden during the pick");
+  ok([...a.state.seats].every((s) => s.resourceCard.length === 0), "resource cards are hidden before the reveal");
+
+  // Opening roll for turn order (server-authoritative d6). A top tie clears the tied
+  // rolls, so re-send until the room finalizes the order and advances to the mapping.
+  for (let i = 0; i < 40 && a.state.enginePhase === "initial-roll"; i++) {
+    a.send("perfectpalace/action", { type: "initialRoll/roll" });
+    b.send("perfectpalace/action", { type: "initialRoll/roll" });
+    await sleep(150);
+  }
+  ok(a.state.enginePhase === "initial-mapping", "advances to the hidden mapping after the roll");
 
   const card = [
     { kind: "sticks", amount: 5 }, { kind: "bricks", amount: 5 }, { kind: "bricks", amount: 10 },
@@ -228,6 +237,12 @@ console.log(`Smoke-testing ${URL}\n`);
 
   a.send("lobby/start", {});
   await until(() => a.state.phase === "playing");
+  // The game opens at the interactive turn-order roll: the host rolls, the bot
+  // auto-rolls, then the room finalizes order and advances to the hidden mapping.
+  for (let i = 0; i < 40 && a.state.enginePhase === "initial-roll"; i++) {
+    a.send("perfectpalace/action", { type: "initialRoll/roll" });
+    await sleep(150);
+  }
   // Host locks; the bot auto-locks → the reveal fires with no human input for it.
   const card = [
     { kind: "sticks", amount: 5 }, { kind: "bricks", amount: 5 }, { kind: "bricks", amount: 10 },
