@@ -22,7 +22,8 @@ import {
 import type { GameView, GameViewContext, LobbySettingsContext } from "../../framework/GameView.js";
 import { hookSaveData, renderSaveSlots } from "../../framework/saveSlots.js";
 import { flashToast, isMuted, setMuted, turnChime } from "../../framework/turnAlert.js";
-import { escapeHtml } from "../../lobby/HomeScreen.js";
+import { escapeAttr, escapeHtml } from "../../lobby/HomeScreen.js";
+import { infoButton, wireInfoButtons } from "../../framework/infoPopover.js";
 import { PLAYER_COLOR, renderBoardSvg, resourceIcon, type BoardUi } from "./board.js";
 
 const {
@@ -86,33 +87,31 @@ export function renderCatanLobbySettings(
   const isTwo = state.players.size === 2;
   const official = state.useTwoPlayerVariant;
 
+  // The full rules explanation now lives in a tap-ⓘ hint; a one-line summary stays visible.
+  const twoHint = official
+    ? "Official CATAN for Two: two neutral piece-sets start on the board with one settlement each (they never take turns or score), every road or settlement you build also places a free piece for a neutral, and trade tokens unlock Forced Trades. Seat a third player or an AI for the standard game."
+    : "Plain standard rules with 2 players — no neutral pieces, no trade tokens. Quicker to learn, but trading and the robber are less balanced head-to-head.";
+  const twoSummary = official ? "Neutral piece-sets + trade tokens" : "No neutral pieces or tokens";
   const twoRules = isTwo
     ? `<label class="catan-lobby-setting">
-        2-player rules
+        <span>2-player rules${infoButton(twoHint, "2-player rules")}</span>
         <select id="catan-two-rules" ${ctx.isHost ? "" : "disabled"}>
           <option value="official" ${official ? "selected" : ""}>Official "CATAN for Two"</option>
           <option value="plain" ${official ? "" : "selected"}>Plain standard rules</option>
         </select>
         ${ctx.isHost ? "" : '<span class="muted">(host chooses)</span>'}
-      </label>`
+      </label>
+      <p class="catan-lobby-summary">${escapeHtml(twoSummary)}</p>`
     : "";
-  const note = isTwo
-    ? official
-      ? `<p class="catan-lobby-note">Official <strong>CATAN for Two</strong>: two <em>neutral</em>
-          piece sets start on the board with one settlement each (they never take turns or score),
-          every road or settlement you build also places a free piece for a neutral, and trade
-          tokens unlock Forced Trades. Seat a third player or an AI for the standard game.</p>`
-      : `<p class="catan-lobby-note"><strong>Plain standard rules</strong> with 2 players — no
-          neutral pieces, no trade tokens. Quicker to learn, but trading and the robber are less
-          balanced head-to-head.</p>`
-    : "";
+  const robberHint =
+    "The robber still blocks the tile from producing. This house rule just lets whoever moved it take 1 of that tile's resource from the bank, instead of stealing a random card from a neighbour — it speeds up play, especially head-to-head.";
   const robber = `
     <label class="catan-lobby-setting catan-lobby-check">
       <input type="checkbox" id="catan-robber-bounty" ${state.robberBounty ? "checked" : ""} ${
         ctx.isHost ? "" : "disabled"
       }/>
       <span>House rule: whoever moves the robber may <strong>take 1 of the tile's resource</strong>
-      from the bank instead of stealing</span>
+      from the bank instead of stealing${infoButton(robberHint, "Robber bounty house rule")}</span>
     </label>`;
   // Everyone picks their own piece color; taken colors are locked out.
   const takenBy: Record<string, string> = {};
@@ -126,12 +125,19 @@ export function renderCatanLobbySettings(
     const owner = takenBy[c];
     const mine = c === myColor;
     const lockedByOther = owner !== undefined && !mine;
-    const title = lockedByOther ? `Taken by ${owner}` : mine ? "Your color (tap to clear)" : c;
+    // No `title` (invisible on touch). aria-label is the swatch's accessible name; a
+    // disabled swatch also shows the taker's initial so "who has it" isn't hover-only.
+    const label = lockedByOther ? `${c} — taken by ${owner}` : mine ? `${c} — your colour (tap to clear)` : `Choose ${c}`;
+    const initial = lockedByOther
+      ? `<span class="catan-swatch-initial">${escapeHtml([...owner][0]?.toUpperCase() ?? "")}</span>`
+      : "";
     return `<button class="catan-color-swatch ${mine ? "catan-color-selected" : ""}" data-color="${c}" style="background:${PLAYER_COLOR[c]}" ${
       lockedByOther ? "disabled" : ""
-    } title="${escapeHtml(title)}"></button>`;
+    } aria-label="${escapeAttr(label)}">${initial}</button>`;
   }).join("");
-  const colorRow = `<div class="catan-lobby-setting"><span>Your color</span><div class="catan-color-row">${swatches}</div></div>`;
+  const colorHint =
+    "Tap a colour to claim your playing-piece colour. Greyed-out colours are already taken by another player; tap your own colour again to clear it.";
+  const colorRow = `<div class="catan-lobby-setting"><span>Your color${infoButton(colorHint, "Your color")}</span><div class="catan-color-row">${swatches}</div></div>`;
 
   const addBot = ctx.isHost
     ? `<button id="catan-add-bot" class="secondary" ${seatsLeft > 0 ? "" : "disabled"}>
@@ -139,7 +145,7 @@ export function renderCatanLobbySettings(
       </button>`
     : "";
 
-  container.innerHTML = colorRow + twoRules + note + robber + addBot + `<div class="catan-saves-block"></div>`;
+  container.innerHTML = colorRow + twoRules + robber + addBot + `<div class="catan-saves-block"></div>`;
   // Saved games (shared framework helper): banner while staged, else the slot list.
   renderSaveSlots(container.querySelector<HTMLElement>(".catan-saves-block")!, room, {
     key: CATAN_SAVES_KEY,
@@ -161,6 +167,8 @@ export function renderCatanLobbySettings(
   container.querySelector<HTMLButtonElement>("#catan-add-bot")?.addEventListener("click", () => {
     room.send(LobbyMsg.ADD_BOT, {});
   });
+  // Tappable ⓘ hints: one delegated listener on this render's settings container.
+  wireInfoButtons(container);
 }
 
 /** Game-over summary (GameDefinition.renderGameSummary): the final score
@@ -262,13 +270,17 @@ export class CatanView implements GameView {
     root.innerHTML = `
       <div class="catan">
         <div id="catan-topbar" class="catan-topbar"></div>
-        <div id="catan-status" class="catan-status"></div>
-        <div class="catan-board-wrap"><div id="catan-board"></div></div>
-        <div id="catan-actions" class="catan-actions"></div>
-        <div id="catan-modal"></div>
-        <div id="catan-me" class="catan-me"></div>
-        <div id="catan-opponents" class="catan-opponents"></div>
-        <div id="catan-log" class="catan-log"></div>
+        <div class="catan-main">
+          <div id="catan-status" class="catan-status"></div>
+          <div class="catan-board-wrap"><div id="catan-board"></div></div>
+        </div>
+        <div class="catan-side">
+          <div id="catan-actions" class="catan-actions"></div>
+          <div id="catan-modal"></div>
+          <div id="catan-me" class="catan-me"></div>
+          <div id="catan-opponents" class="catan-opponents"></div>
+          <div id="catan-log" class="catan-log"></div>
+        </div>
       </div>`;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
@@ -378,7 +390,7 @@ export class CatanView implements GameView {
     this.wasMyDecision = myDecisionNow;
 
     this.renderTopbar(s);
-    this.renderStatus(s, me);
+    this.renderStatus(s, me, mine);
     this.renderBoard(s, me, mine);
     this.renderActions(s, me, mine);
     this.renderModal(s, me, mine);
@@ -399,8 +411,10 @@ export class CatanView implements GameView {
     el.innerHTML = mute + save;
   }
 
-  private renderStatus(s: CatanState, me: number): void {
+  private renderStatus(s: CatanState, me: number, mine: boolean): void {
     const el = this.root!.querySelector<HTMLElement>("#catan-status")!;
+    // Turn-banner accent: highlight the status when the local player must act.
+    el.classList.toggle("catan-status-mine", mine && s.phaseDetail !== "gameOver");
     const who = (i: number) => (i === me ? "<strong>You</strong>" : `<strong>${this.nickname(i)}</strong>`);
     let line = "";
     switch (s.phaseDetail) {

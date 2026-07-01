@@ -81,7 +81,12 @@ Every rule below has a copy-from reference — open it, don't reinvent it.
   (`client/src/style.css:2`): `--bg --card --text --muted --accent --accent-press
   --danger --ok --warn`. Never hardcode a light color (`#fff`, `white`,
   `background: none`). The single biggest Water Fight bug was light text that was
-  invisible on the dark app.
+  invisible on the dark app. A faint **tinted** background pulled from a token (a
+  "your move" highlight, a status pill) must be **derived** —
+  `color-mix(in srgb, var(--token) N%, transparent)` — never a hardcoded
+  `rgba(r,g,b,a)` copy of the token's channels. The copy silently drifts if the
+  token is ever retuned; the PR #47 review caught `.catan-status-mine` hardcoding
+  `rgba(65,201,138,0.12)`, a literal copy of `--ok`, inside a token-conformance PR.
 
 - **Mobile-first AND tablet/laptop-wide.** The base `#app` column is capped near
   480px. Break out of it for your game root with a `:has()` rule keyed on the
@@ -92,6 +97,23 @@ Every rule below has a copy-from reference — open it, don't reinvent it.
   phone. Don't grid a flat list of children — wrap them into two explicit
   containers (e.g. `.wf-main` / `.wf-side`).
 
+- **Board games: landscape board + side-rail (a variation of the two-column
+  dashboard).** A game whose centrepiece is a full-bleed SVG board
+  (`.catan-board-wrap` uses `margin: 0 calc(50% - 50vw)` to span the viewport)
+  should, in landscape on a tablet, put the board in a **left grid column** and the
+  controls / hand / opponents / log in a **right rail** — wrap them into
+  `.catan-main` / `.catan-side` in `mount()` so **portrait keeps the exact stacked
+  order** (the wrappers are plain flex columns until the grid turns on). Three
+  gotchas that bite: (1) **cancel the full-bleed** (`.catan-board-wrap { margin: 0 }`)
+  *inside* the grid, or the board blows out of its cell and reintroduces horizontal
+  scroll; (2) gate the grid on
+  `@media (min-width:900px) and (min-height:600px) and (orientation:landscape)` —
+  the **`min-height:600` is load-bearing**: it keeps a landscape *phone* (short, but
+  ≥900px wide) on the single-column stack instead of a cramped two-column; (3) the
+  board is **height-gated** in landscape, so a bigger `max-height` (vh) is the real
+  size lever — a wider column alone just letterboxes. Copy from the `.catan`
+  landscape grid (`style.css`) + `CatanView` `mount()` (PR #47).
+
 - **44px minimum touch targets.** The owner plays on an iPad mini. The default
   `button { padding: 12px }` is ~44px — don't override it smaller. Icon buttons
   get an explicit `width/height: 44px` (see `.wf-ic`).
@@ -101,7 +123,11 @@ Every rule below has a copy-from reference — open it, don't reinvent it.
   `wireInfoButtons(container)` wires the popover (`client/src/framework/infoPopover.ts`).
   The popover lives on `document.body`, so a re-render of the surrounding subtree
   can't destroy it mid-open. For card meanings, also offer a tappable card → a
-  detail modal (below).
+  detail modal (below). When you **replace** a `title=` on an interactive element
+  (a colour swatch, an icon button) with an ⓘ, that element loses its only
+  accessible name — add an **`aria-label`** (and `escapeAttr` any user-controlled
+  text like a nickname in it) or you ship a nameless button. The lobby and PR #47
+  reviews both flagged this exact a11y-name regression.
 
 - **Lobby number settings = `−` / `+` steppers, not `<input type=number>`.**
   Native number inputs show **no spinner arrows on mobile**. Copy the stepper:
@@ -409,6 +435,7 @@ selector name is the durable anchor.
 | Dark theme tokens | `client/src/style.css:2` (`:root`) | `--bg --card --text --muted --accent --accent-press --danger --ok --warn`. Every game uses these. |
 | Width breakout (tablet/laptop) | `#app:has(.spl)` `style.css:237`; `#app:has(.wf)` `style.css:2265` | Game root gets a short class; `:has()` lifts the ~480px `#app` cap. |
 | Two-column dashboard | `WaterFightView` STYLE (`.wf` grid `1fr minmax(280px,340px)` ≥900px) + `render()` building `.wf-main` / `.wf-side` | Stacks to one flex column on phone. Wrap children into two explicit containers, don't grid a flat list. |
+| Landscape board + side-rail (board games) | `.catan` landscape grid (`style.css`, `@media (min-width:900) and (min-height:600) and (orientation:landscape)`) + `CatanView` `mount()` (`.catan-main`/`.catan-side` wrap) (PR #47) | Full-bleed SVG board → board left, controls/info rail right. **Cancel** the `calc(50%-50vw)` full-bleed inside the grid; `min-height:600` keeps landscape *phones* stacked; board is height-gated so `max-height:vh` is the size lever, not width. Portrait unchanged. |
 | −/+ lobby steppers | `.wf-stepper` `style.css:2234` (global) + `renderWaterFightLobbySettings()` (`WaterFightView.ts`) off `WF_SETTINGS` (`shared/.../waterfight/index.ts:46`) | Native `<input type=number>` shows no arrows on mobile. Lobby CSS MUST be global. Drive rows off a descriptor table. |
 | Tap-popover (replaces `title`) | `infoButton(hint,label)` + `wireInfoButtons(container)` (`client/src/framework/infoPopover.ts`) | `title=` never shows on touch. Popover lives on `document.body` so a re-render can't kill it mid-open. |
 | 44px touch targets | `.wf-ic { width/height:44px }`; default `button{padding:12px}` | Owner tests on iPad mini. Don't override smaller. |
