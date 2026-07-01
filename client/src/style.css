@@ -848,15 +848,16 @@ button.spl-gem.selected {
   font-size: 0.95rem;
   min-height: 1.4em;
   background: var(--card);
-  border-left: 3px solid var(--line);
+  border: 1px solid var(--line);
   border-radius: 8px;
   padding: 8px 12px;
 }
 
-/* "It's your move" — faint --ok tint + green accent edge (echoes .wf-banner). */
+/* "It's your move" — the whole status card glows: --ok border + a faint --ok tint
+   (derived from the token so it tracks --ok, symmetric with the centered text). */
 .catan-status-mine {
-  border-left-color: var(--ok);
-  background: rgba(65, 201, 138, 0.12);
+  border-color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
 }
 
 .catan-dice {
