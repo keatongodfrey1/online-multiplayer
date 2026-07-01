@@ -828,10 +828,35 @@ button.spl-gem.selected {
   gap: 10px;
 }
 
+/* Two-container split (board side / control+info rail) used by the landscape grid
+   below. In portrait these are plain flex columns, so children stack as before. */
+.catan-main,
+.catan-side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Idle panels are emptied to "" by their renderers — drop the dead flex gap. */
+#catan-modal:empty,
+#catan-actions:empty {
+  display: none;
+}
+
 .catan-status {
   text-align: center;
   font-size: 0.95rem;
   min-height: 1.4em;
+  background: var(--card);
+  border-left: 3px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+/* "It's your move" — faint --ok tint + green accent edge (echoes .wf-banner). */
+.catan-status-mine {
+  border-left-color: var(--ok);
+  background: rgba(65, 201, 138, 0.12);
 }
 
 .catan-dice {
@@ -864,6 +889,39 @@ button.spl-gem.selected {
 @media (orientation: landscape) {
   .catan-svg {
     max-height: 75vh;
+  }
+}
+
+/* Landscape tablet: board fills the left, a control+info rail sits on the right.
+   Gated min-height:600 so landscape PHONES (short) keep the single-column stack. */
+@media (min-width: 900px) and (min-height: 600px) and (orientation: landscape) {
+  #app:has(.catan) {
+    max-width: min(1340px, 96vw); /* lift the 480px cap — landscape only */
+  }
+  .catan {
+    display: grid;
+    grid-template-columns: 1fr minmax(300px, 380px);
+    gap: 10px 16px;
+    align-items: start;
+  }
+  .catan-topbar {
+    grid-column: 1 / -1;
+  }
+  .catan-main {
+    min-width: 0; /* let the board shrink inside the 1fr cell */
+  }
+  .catan-board-wrap {
+    margin: 0; /* cancel the full-bleed; the board lives in its grid cell */
+  }
+  .catan-board-wrap > div {
+    width: 100%;
+    max-width: none;
+  }
+  .catan-svg {
+    max-height: 84vh; /* board is height-gated; this is the real size lever */
+  }
+  .catan-trade-grid {
+    grid-template-columns: 1fr; /* the 2-col trade panel won't fit the rail — stack it */
   }
 }
 
@@ -945,7 +1003,7 @@ button.spl-gem.selected {
 
 .catan-panel {
   background: var(--card);
-  border: 1px solid #353a4f;
+  border: 1px solid var(--line);
   border-radius: 12px;
   padding: 12px;
 }
@@ -1039,7 +1097,7 @@ button.spl-gem.selected {
 
 .catan-chip {
   background: #161927;
-  border: 1px solid #353a4f;
+  border: 1px solid var(--line);
   border-radius: 8px;
   padding: 6px 10px;
   font-size: 0.95rem;
@@ -1053,7 +1111,7 @@ button.spl-gem.selected {
 
 .catan-dev {
   background: #161927;
-  border: 1px solid #353a4f;
+  border: 1px solid var(--line);
   border-radius: 8px;
   padding: 6px 8px;
   font-size: 0.85rem;
@@ -1126,7 +1184,7 @@ button.spl-gem.selected {
   align-items: center;
   gap: 8px;
   background: #161927;
-  border: 1px solid #353a4f;
+  border: 1px solid var(--line);
   border-radius: 10px;
   padding: 8px 10px;
   font-size: 0.92rem;
@@ -1155,6 +1213,13 @@ button.spl-gem.selected {
   padding: 8px;
 }
 
+/* One-line summary under the 2-player rules select (full detail is in the ⓘ). */
+.catan-lobby-summary {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: -4px 0 10px;
+}
+
 .catan-lobby-check {
   align-items: flex-start;
   text-align: left;
@@ -1177,9 +1242,22 @@ button.spl-gem.selected {
   width: 34px;
   height: 34px;
   border-radius: 8px;
-  border: 2px solid #353a4f;
+  border: 2px solid var(--line);
   padding: 0;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Initial of the player who claimed a (disabled) swatch — shows "who has it"
+   without a hover tooltip. Dark glyph + white halo reads on any piece colour. */
+.catan-swatch-initial {
+  font-size: 0.8rem;
+  font-weight: 800;
+  color: #10131c;
+  text-shadow: 0 0 2px #fff, 0 0 2px #fff;
+  pointer-events: none;
 }
 
 .catan-color-swatch.catan-color-selected {
@@ -1188,7 +1266,7 @@ button.spl-gem.selected {
 }
 
 .catan-color-swatch:disabled {
-  opacity: 0.4;
+  opacity: 0.6; /* dim enough to read "unavailable", bright enough to show colour + initial */
   cursor: not-allowed;
 }
 
