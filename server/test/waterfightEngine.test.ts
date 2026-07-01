@@ -255,11 +255,24 @@ describe("water fight engine: event stream + two-tier secrecy", () => {
     assert.strictEqual(def!.detailKind, "umbrella", "and names the umbrella so the flourish can explain it");
   });
 
-  it("a plain miss (no defensive block) emits NO defend event", () => {
+  it("a Wild-as-Miss block ALSO emits a 'defend' event (show-don't-hide, generic)", () => {
+    const g = game(2, 5);
+    setHand(g, 0, ["balloon"]);
+    setHand(g, 1, ["wild"]);
+    forceSplash(g, "hit");
+    let r = applyMoveRaw(g, { kind: "THROW", target: 1 });
+    r = applyResolutionRaw(r.state, { kind: "DRAW_SPLASH" }); // HIT → opens DEFEND
+    r = applyResolutionRaw(r.state, { kind: "DEFEND", defense: "wild_miss" });
+    const def = r.state.events.find((e) => e.kind === "defend");
+    assert.ok(def, "a Wild block is surfaced, not silent (it sets neither umbrella nor missBlocks)");
+    assert.strictEqual(def!.detailKind, "", "generic block — only an Umbrella gets a named detailKind");
+  });
+
+  it("a plain miss (splash-flip whiff) emits NO defend event", () => {
     const g = game(2, 5);
     setHand(g, 0, ["balloon"]);
     setHand(g, 1, []); // no defense card
-    forceSplash(g, "miss"); // the throw whiffs on the flip — not a block
+    forceSplash(g, "miss"); // the throw whiffs on the flip — routes via afterAttack, not resolveTarget
     let r = applyMoveRaw(g, { kind: "THROW", target: 1 });
     r = applyResolutionRaw(r.state, { kind: "DRAW_SPLASH" }); // MISS
     assert.ok(!r.state.events.some((e) => e.kind === "defend"), "no defend on a whiff (the splash-MISS reveal shows it)");
@@ -282,6 +295,25 @@ describe("water fight engine: event stream + two-tier secrecy", () => {
     injectTopEvent(ge, "mudslide");
     const re = applyMove(ge, { kind: "END_TURN" }); // next seat draws + resolves the event
     assert.strictEqual(re.state.events.find((e) => e.kind === "event")?.detailKind, "mudslide");
+
+    // react names the defense card played (public)
+    const gr = game(2, 5);
+    setHand(gr, 0, ["balloon"]);
+    setHand(gr, 1, ["towel"]);
+    let rr = applyMoveRaw(gr, { kind: "THROW", target: 1 }); // opens a REACT window (towel available)
+    rr = applyResolutionRaw(rr.state, { kind: "REACT", action: "towel" });
+    assert.strictEqual(rr.state.events.find((e) => e.kind === "react")?.detailKind, "towel");
+
+    // a post-hit CONSEQUENCE (damage) carries NO detailKind — damageSeat doesn't know the attack kind
+    const gd = game(2, 5);
+    gd.players[1]!.lives = 3;
+    setHand(gd, 0, ["balloon"]);
+    setHand(gd, 1, []);
+    forceSplash(gd, "hit");
+    let rd = applyMoveRaw(gd, { kind: "THROW", target: 1 });
+    rd = applyResolutionRaw(rd.state, { kind: "DRAW_SPLASH" });
+    rd = applyResolutionRaw(rd.state, { kind: "DEFEND", defense: "pass" });
+    assert.strictEqual(rd.state.events.find((e) => e.kind === "damage")?.detailKind, "");
   });
 });
 

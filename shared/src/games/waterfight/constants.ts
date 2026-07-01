@@ -115,3 +115,14 @@ export const EVENT_DESCRIPTIONS: Record<EventKind, string> = {
   falsealarm: "Nothing happens — a false alarm.",
   gentlebreeze: "Nothing happens — just a breeze.",
 };
+
+/** A themed emoji for EVERY Event kind, so the event flourish shows "🌈 Rainbow" not a
+ *  generic die for the 12 non-damaging events (EVENT_LABELS only covers the 7 that soak).
+ *  Complete `Record` → a new EventKind without an emoji fails `npm run typecheck`. */
+export const EVENT_EMOJI: Record<EventKind, string> = {
+  mudslide: "🌊", stormsurge: "🌊", heatwave: "☀️", downpour: "🌧️", tidalwave: "🌊",
+  lightning: "⚡", targetedstorm: "🎯", sunbreak: "🌤️", rainbow: "🌈",
+  waterparkpass: "🎟️", treasurechest: "💎", supplycache: "📦", supplydrop: "🎁",
+  leakybucket: "🪣", springcleaning: "🧹", lostandfound: "🔎",
+  calmwaters: "😌", falsealarm: "🔕", gentlebreeze: "🍃",
+};

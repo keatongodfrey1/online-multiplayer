@@ -5,7 +5,7 @@
 // ladder lives in attack.ts; this module owns the turn flow, draws, damage/soak/
 // win, and the legal-move surface that policies (bots/fuzz) read.
 
-import { advanceLadder, bigStats, currentTarget, isBlocked, openAttack, openTarget } from "./attack.js";
+import { advanceLadder, bigStats, currentTarget, openAttack, openTarget } from "./attack.js";
 import { CARD_INFO, COIN_VALUES, EVENT_NAMES, WF_STACK_IDS } from "../constants.js";
 import { DRAW_PER_TURN, FLASH_FLOOD_BLOCK, FLASH_FLOOD_DAMAGE } from "./data.js";
 import { discardCard, drawMainCard, flipSplash } from "./deck.js";
@@ -652,10 +652,12 @@ function resolveTarget(s: GameState, hit: boolean): void {
   if (hit && !suppressed) damageAndRecord(s, tSeat, atk.damage, atk.attackerSeat, atk.kind);
   else {
     s.log.push(`attack on ${who(s, tSeat)} ${hit ? "suppressed (Sudden-Death AoE)" : "missed"}`);
-    // Surface a DEFENSIVE block (umbrella, or enough Miss blocks) — but NOT a Sudden-Death
-    // AoE suppression or a plain whiff (the splash-MISS reveal already shows those).
-    if (!suppressed && !hit && isBlocked(atk)) {
-      const dk = atk.umbrellaBlock ? "umbrella" : "";
+    // Surface a DEFENSIVE block. `resolveTarget` is only reached from the ladder, and every
+    // ladder outcome with `!hit` is a successful defense (umbrella, enough Miss blocks, OR a
+    // Wild-as-Miss) — so surface them all. EXCLUDE only a Sudden-Death AoE suppression (a hit
+    // the engine voids); a plain splash-flip whiff never reaches here (it routes via afterAttack).
+    if (!suppressed && !hit) {
+      const dk = atk.umbrellaBlock ? "umbrella" : ""; // name the umbrella; Miss/Wild block is generic
       emit(s, "defend", tSeat, -1, 0, dk ? `☂️ ${who(s, tSeat)} blocks with an Umbrella!` : `🛡️ ${who(s, tSeat)} blocks the throw!`, dk);
     }
   }

@@ -10,6 +10,7 @@ import {
   CARD_INFO,
   COIN_VALUES,
   EVENT_DESCRIPTIONS,
+  EVENT_EMOJI,
   EVENT_LABELS,
   EVENT_NAMES,
   LobbyMsg,
@@ -125,7 +126,7 @@ const flourishContent = (
   const dk = ev.detailKind;
   if (dk) {
     if (ev.kind === "event" && EVENT_NAMES[dk as keyof typeof EVENT_NAMES]) {
-      const emoji = (EVENT_LABELS[dk as keyof typeof EVENT_LABELS] ?? "🎲").split(" ")[0] || "🎲";
+      const emoji = EVENT_EMOJI[dk as keyof typeof EVENT_EMOJI] ?? "🎲"; // themed per-event, all 19
       return { emoji, name: EVENT_NAMES[dk as keyof typeof EVENT_NAMES], desc: EVENT_DESCRIPTIONS[dk as keyof typeof EVENT_DESCRIPTIONS] ?? "" };
     }
     if (CARD_INFO[dk as keyof typeof CARD_INFO]) {
@@ -167,11 +168,12 @@ const STYLE = `
 .wf-splash.hit { background: #3a1d22; border: 1px solid var(--danger); }
 .wf-splash.miss { background: #1d2740; border: 1px solid var(--accent); }
 @keyframes wf-pop { from { transform: scale(0.82); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-/* Centered explanatory flourish — the public "show + explain" channel. Fixed overlay above
-   the board, offset from the personal toast (top 45%) so the two never overlap. ~2.6s hold. */
-.wf-event-host { position: fixed; top: 35%; left: 0; right: 0; z-index: 60; display: flex; justify-content: center; padding: 0 16px; pointer-events: none; }
+/* Centered explanatory flourish — the public "show + explain" channel. Fixed overlay in the
+   upper third, its whole band kept ABOVE the personal turn-toast (fixed at top 45%, ~41–49%)
+   so the toast never paints over the flourish's effect line. ~2.6s hold. */
+.wf-event-host { position: fixed; top: 22%; left: 0; right: 0; z-index: 60; display: flex; justify-content: center; padding: 0 16px; pointer-events: none; }
 .wf-event-host:empty { display: none; }
-.wf-flourish { max-width: 340px; box-sizing: border-box; padding: 14px 20px; border-radius: 14px; text-align: center; color: var(--text); background: rgba(31, 34, 48, 0.96); border: 1px solid var(--line); box-shadow: 0 12px 40px #000a; animation: wf-flourish-anim 2580ms ease-out forwards; }
+.wf-flourish { max-width: 340px; box-sizing: border-box; padding: 14px 20px; border-radius: 14px; text-align: center; color: var(--text); background: rgba(31, 34, 48, 0.96); border: 1px solid var(--line); box-shadow: 0 12px 40px #000a; animation: wf-flourish-anim ${FLOURISH_TOTAL_MS}ms ease-out forwards; }
 .wf-flourish.danger { border-color: var(--danger); }
 .wf-flourish.ok { border-color: var(--ok); }
 .wf-flourish.warn { border-color: var(--warn); }
@@ -182,6 +184,9 @@ const STYLE = `
 .wf-fl-line { font-size: 18px; font-weight: 800; }
 .wf-flourish.warn .wf-fl-name, .wf-flourish.warn .wf-fl-line { color: var(--warn); }
 @keyframes wf-flourish-anim { 0% { opacity: 0; transform: scale(0.86); } 10% { opacity: 1; transform: scale(1); } 84% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(1); } }
+/* Respect reduced-motion: same hold + fade, no scale/pop. */
+@media (prefers-reduced-motion: reduce) { .wf-flourish { animation-name: wf-flourish-fade; } }
+@keyframes wf-flourish-fade { 0% { opacity: 0; } 10% { opacity: 1; } 84% { opacity: 1; } 100% { opacity: 0; } }
 .wf-result-host:empty { display: none; }
 .wf-result-backdrop { position: fixed; inset: 0; z-index: 95; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(10, 12, 20, 0.74); animation: wf-fade 0.25s ease-out; }
 @keyframes wf-fade { from { opacity: 0; } to { opacity: 1; } }
@@ -345,7 +350,7 @@ export class WaterFightView implements GameView {
     this.ctx = ctx;
     this.lastSeenSplashSeq = this.room.state.lastSplashSeq ?? 0; // seed BEFORE first render
     this.lastEventSeq = this.maxEventSeq(); // prime so a refresh/late-join never replays the stream
-    root.innerHTML = `<style>${STYLE}</style><div class="wf-event-host"></div><div class="wf-splash-host"></div><div class="wf-modal-host"></div><div class="wf-result-host"></div><div class="wf"></div>`;
+    root.innerHTML = `<style>${STYLE}</style><div class="wf-event-host" aria-live="polite"></div><div class="wf-splash-host"></div><div class="wf-modal-host"></div><div class="wf-result-host"></div><div class="wf"></div>`;
     root.addEventListener("click", this.onClick);
     this.room.onStateChange(this.onState);
     this.room.onMessage(WaterFightMsg.REVEAL, (payload: { kind: string; ofSeat: number; cards: { id: number; kind: string }[] }) => {

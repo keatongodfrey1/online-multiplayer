@@ -30,7 +30,7 @@ function discardOne(s: GameState, seat: number, kind: CardKind): void {
   discardCard(s, hand.splice(idx, 1)[0]!);
 }
 
-export function isBlocked(atk: AttackState): boolean {
+function isBlocked(atk: AttackState): boolean {
   return atk.umbrellaBlock || atk.missBlocks >= atk.blockNumber;
 }
 
